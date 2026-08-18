@@ -3,3 +3,4 @@ openpyxl
 xlrd
 reportlab
 Pillow
+pdfplumber
