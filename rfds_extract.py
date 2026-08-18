@@ -27,17 +27,30 @@ import zipfile
 def load_rfds_pages(rfds_bytes):
     """Returns {page_number: page_text}. Ported from QUICKIX's
     extract_pdf_text(), split per-page instead of concatenated, so callers
-    can target specific pages/headings without re-searching the whole doc."""
-    if rfds_bytes[:2] != b"PK":
-        raise ValueError("RFDS bytes are not a zip bundle (unexpected format - "
-                          "if this is ever a genuine PDF, add a pdfplumber fallback here).")
-    pages = {}
-    with zipfile.ZipFile(io.BytesIO(rfds_bytes)) as zf:
-        manifest = json.loads(zf.read("manifest.json"))
-        for p in manifest["pages"]:
-            text = zf.read(p["text"]["path"]).decode("utf-8", errors="replace")
-            pages[p["page_number"]] = text
-    return pages
+    can target specific pages/headings without re-searching the whole doc.
+
+    Tries the zip-bundle format first (every RFDS sample seen so far), then
+    falls back to pdfplumber for a genuine PDF - confirmed necessary: a real
+    user's RFDS came through as an actual PDF, not the zip bundle."""
+    if rfds_bytes[:2] == b"PK":
+        pages = {}
+        with zipfile.ZipFile(io.BytesIO(rfds_bytes)) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+            for p in manifest["pages"]:
+                text = zf.read(p["text"]["path"]).decode("utf-8", errors="replace")
+                pages[p["page_number"]] = text
+        return pages
+
+    if rfds_bytes[:5] == b"%PDF-":
+        import pdfplumber
+        pages = {}
+        with pdfplumber.open(io.BytesIO(rfds_bytes)) as pdf:
+            for i, page in enumerate(pdf.pages, start=1):
+                pages[i] = page.extract_text() or ""
+        return pages
+
+    raise ValueError("RFDS bytes are neither a zip bundle nor a genuine PDF "
+                      "(unrecognized file format).")
 
 
 def find_pages_by_heading(pages, heading_substr):
