@@ -1,5 +1,0 @@
-streamlit
-openpyxl
-xlrd
-reportlab
-Pillow
