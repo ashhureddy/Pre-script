@@ -1,0 +1,251 @@
+"""
+Node-level field extraction from a parsed Pre kget-all / hget log
+(see log_parser.py for the underlying table parser).
+
+Each function takes `parsed` = log_parser.parse_log(text) and returns either
+a value, or None if the node's log doesn't contain that data (e.g. a newly
+built node has no Pre kget-all at all, so callers should treat "no log
+provided for this node" as a distinct case from "log present but field
+missing").
+"""
+import re
+
+from log_parser import find_command, all_rows, get_command_block
+
+_SW_VERSION_RE = re.compile(
+    r'Current SwVersion:\s*(?P<package>\S+)\s*\(\s*(?P<version>[^)]+?)\s*\)'
+)
+
+# The 'nrsectorcarrier|nrcelldu ^arfcn|ssbfrequency|...|cellLocalId|nRTAC' combo
+# command doesn't pad its output to fixed-width columns (blank AutoSelected
+# fields emit no token at all, rather than a padded blank one), so the generic
+# table parser misaligns every column after the first. Confirmed against real
+# output — 'true'/'false' (nRTACInSib1Enabled) is the one field guaranteed
+# present, so it's used as a sync point; the optional non-capturing group
+# transparently absorbs ssbDurationAutoSelected whether or not it's blank.
+_NR_CELLDU_RE = re.compile(
+    r'NRCellDU=(?P<cell>\S+)\s+(?P<cellLocalId>\S+)\s+(?P<nRTAC>\S+)\s+(?:true|false)\s+'
+    r'(?P<ssbDuration>\S+)\s+(?:\S+\s+)?(?P<ssbFrequency>\S+)',
+    re.I
+)
+
+# Same root cause as _NR_CELLDU_RE: moshell sizes each column to the widest
+# value across ALL rows in the result (here, mixed EUtranCellFDD=... and
+# SectorCarrier=... MO instances of very different lengths), so shorter rows'
+# data lands shifted left of where the header claims that column starts.
+# Confirmed against real output — anchored regex, not position, is the only
+# reliable way to read this table. pimAggressorCellId/pimVictimCellId are each
+# optionally blank (no token at all when empty); sectorCarrierRef's value is
+# itself 3 whitespace-separated tokens ('[1]', '=', 'SectorCarrier=X').
+_EUTRAN_CELL_RE = re.compile(
+    r'EUtranCellFDD=(?P<cell>\S+)\s+(?P<cellId>\S+)\s+(?P<dlChannelBandwidth>\S+)\s+(?:true|false)\s+'
+    r'(?P<earfcndl>\S+)\s+(?P<earfcnul>\S+)\s+(?P<physicalLayerCellId>\S+)\s+(?P<physicalLayerCellIdGroup>\S+)\s+'
+    r'(?P<physicalLayerSubCellId>\S+)\s+(?:\S+\s+)?(?:\S+\s+)?(?P<rachRootSequence>\S+)\s+'
+    r'(?:\[\d+\]\s*=\s*\S+\s+)?(?P<tac>\S+)\s+(?:true|false)',
+    re.I
+)
+
+
+def extract_ul_channel_bandwidth(text):
+    """ulChannelBandwidth per cell - only available via 'kget all' full dump
+    (not a targeted hget block), so best-effort: returns {} if kget all
+    wasn't captured or timed out for this node (confirmed: happens on real
+    sites, e.g. FSL00877's kget all timed out server-side).
+
+    Scoped to each 'EUtranCellFDD=X' MO block individually (split first,
+    then search each block) rather than one regex sweep over the whole
+    multi-megabyte log - the naive whole-file version is catastrophically
+    slow (confirmed: multi-minute hang on a 25MB log)."""
+    result = {}
+    if not text:
+        return result
+    headers = list(re.finditer(r'^MO\s+\S*(?<!External)EUtranCellFDD=([^\s,]+)\s*$', text, re.M))
+    for i, block_m in enumerate(headers):
+        cell = block_m.group(1)
+        if cell in result:
+            continue
+        window_end = headers[i + 1].start() if i + 1 < len(headers) else block_m.end() + 50000
+        window = text[block_m.end():window_end]
+        m = re.search(r'ulChannelBandwidth\s+(\S+)', window)
+        if m:
+            result[cell] = m.group(1)
+    return result
+
+
+def extract_cell_to_sef(text):
+    """Cell -> SectorEquipmentFunction number, via the
+    SectorCarrier=|SectorEquipmentFunction hget block's reservedBy
+    cross-references (Cell -> SectorCarrier -> SEF chain). No confirmed
+    link from SEF number to a specific RRU product name exists in Pre
+    kget-all data, so this stops at the SEF number - callers needing the
+    Pre-side radio product should treat it as NOT AVAILABLE rather than
+    guess further down this chain."""
+    block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction')
+    if not block:
+        return {}
+    cell_to_sc = {}
+    for m in re.finditer(r'^(SectorCarrier=\S+)\s.*?EUtranCellFDD=(\S+)', block, re.M):
+        cell_to_sc[m.group(2)] = m.group(1)
+    sc_to_sef = {}
+    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s.*?SectorCarrier=(\S+)', block, re.M):
+        sc_to_sef[f'SectorCarrier={m.group(2)}'] = m.group(1)
+    return {cell: sc_to_sef.get(sc) for cell, sc in cell_to_sc.items() if sc_to_sef.get(sc)}
+
+
+def node_id_from_log(text):
+    """The node ID as it appears at the moshell prompt, e.g. 'SCL05020'."""
+    m = re.search(r'^([A-Za-z0-9_]+)>\s', text, re.M)
+    return m.group(1) if m else None
+
+
+def extract_sw_version(text):
+    """Rule #1: SW Version / SW Package, from the 'cvcu'/'cvls' backup-version
+    block's 'Current SwVersion: <package> (<version>)' line.
+    Returns {'sw_package': str, 'sw_version': str} or None if not found."""
+    m = _SW_VERSION_RE.search(text)
+    if not m:
+        return None
+    return {'sw_package': m.group('package'), 'sw_version': m.group('version')}
+
+
+def extract_identity(parsed):
+    """Rule #2/12/14/17 (collapsed): eNBId (from ENodeBFunction=1) and gNBId
+    (from GNBDUFunction=1, per the confirmed preference over CUCP/CUUP).
+    Returns {'eNBId': str|None, 'gNBId': str|None, 'gNBIdLength': str|None}.
+    None values mean that identity type genuinely isn't present on this node
+    (e.g. an LTE-only node has no gNBId at all)."""
+    entry = find_command(parsed, 'eNBId|gNBId')
+    result = {'eNBId': None, 'gNBId': None, 'gNBIdLength': None}
+    if not entry:
+        return result
+    for row in all_rows(entry):
+        mo = row.get('MO', '')
+        if mo.startswith('ENodeBFunction') and row.get('eNBId'):
+            result['eNBId'] = row['eNBId']
+        elif mo.startswith('GNBDUFunction') and row.get('gNBId'):
+            result['gNBId'] = row['gNBId']
+            result['gNBIdLength'] = row.get('gNBIdLength')
+    return result
+
+
+def extract_hardware(parsed):
+    """Rule #5/#15 (board type) + XMU presence for #11/#26/#27.
+    Returns {'boards': [{'mo':..,'model':..}], 'radios': [...], 'xmus': [...]}
+    split by FieldReplaceableUnit MO prefix. 'model' is the productName with
+    the leading family word (Baseband/Radio/SAU/SUP) kept, since RFDS text
+    needs the same family word stripped/matched on the numeric token by the
+    caller (mirrors QUICKIX's hw_string()/extract_pre_hw() approach of
+    comparing the last whitespace token)."""
+    entry = find_command(parsed, 'FieldReplaceableUnit product')
+    boards, radios, xmus, other = [], [], [], []
+    if not entry:
+        return {'boards': boards, 'radios': radios, 'xmus': xmus, 'other': other}
+    for row in all_rows(entry):
+        mo = row.get('MO', '')
+        item = {'mo': mo, 'model': row.get('productName', '').strip()}
+        if mo.upper().startswith('FIELDREPLACEABLEUNIT=XMU'):
+            xmus.append(item)
+        elif 'RRU-' in mo.upper() or item['model'].upper().startswith('RADIO'):
+            radios.append(item)
+        elif item['model'].upper().startswith('BASEBAND') and 'XMU' not in mo.upper():
+            boards.append(item)
+        else:
+            other.append(item)
+    return {'boards': boards, 'radios': radios, 'xmus': xmus, 'other': other}
+
+
+def model_token(product_name):
+    """Last whitespace token of a productName, e.g. 'Baseband 6630' -> '6630',
+    'Radio 4449 B5 B12A' -> 'B12A' (radios need a different join key upstream;
+    for boards this reliably isolates the bare model number)."""
+    if not product_name:
+        return None
+    tokens = product_name.strip().split()
+    return tokens[-1] if tokens else None
+
+
+def extract_tac(text):
+    """Rule #16: LTE TAC per cell. Takes raw log TEXT (see _EUTRAN_CELL_RE's
+    comment for why this table needs regex, not the fixed-width parser).
+    Returns {cell_name: tac_str, ...}. Cells on one node normally share a
+    single TAC; callers should flag internally-inconsistent TACs as their own
+    anomaly rather than silently picking one."""
+    block = get_command_block(text, 'EUtranCell.DD|Sector')
+    result = {}
+    if not block:
+        return result
+    for m in _EUTRAN_CELL_RE.finditer(block):
+        result[m.group('cell')] = m.group('tac')
+    return result
+
+
+def extract_nr_tac(text):
+    """Rule #7/#8: NR TAC per 5G cell. Takes the raw log TEXT (not a parsed
+    table — see _NR_CELLDU_RE's comment for why this command needs regex
+    instead of the generic fixed-width parser)."""
+    block = get_command_block(text, 'nrsectorcarrier|nrcelldu')
+    result = {}
+    if not block:
+        return result
+    for m in _NR_CELLDU_RE.finditer(block):
+        result[m.group('cell')] = m.group('nRTAC')
+    return result
+
+
+def extract_lte_sector_params(text):
+    """Rule #19 (LTE half): earfcndl/earfcnul/dlChannelBandwidth/tac/
+    rachRootSequence/cellId per cell, from the same combined EUtranCellFDD
+    block used by extract_tac(). Returns {cell_name: {field: value}}."""
+    block = get_command_block(text, 'EUtranCell.DD|Sector')
+    result = {}
+    if not block:
+        return result
+    fields = ('cellId', 'dlChannelBandwidth', 'earfcndl', 'earfcnul', 'rachRootSequence', 'tac')
+    for m in _EUTRAN_CELL_RE.finditer(block):
+        result[m.group('cell')] = {f: m.group(f) for f in fields}
+    return result
+
+
+def extract_5g_sector_params(parsed, text):
+    """Rule #19 (5G half) + #25: arfcnDL/arfcnUL/bSChannelBwDL/bSChannelBwUL
+    (from NRSectorCarrier, reliably fixed-width -> generic table parser) plus
+    ssbFrequency/cellLocalId/nRTAC (from NRCellDU, needs regex -- see
+    _NR_CELLDU_RE). Returns {cell_name: {field: value}}."""
+    result = {}
+    carrier_entry = find_command(parsed, 'arfcn|bSChannelBw|ssbfrequency')
+    for row in all_rows(carrier_entry, mo_prefix='NRSectorCarrier'):
+        cell = row['MO'].split('=', 1)[-1]
+        result.setdefault(cell, {}).update({
+            'arfcnDL': row.get('arfcnDL'),
+            'arfcnUL': row.get('arfcnUL'),
+            'bSChannelBwDL': row.get('bSChannelBwDL'),
+            'bSChannelBwUL': row.get('bSChannelBwUL'),
+        })
+    block = get_command_block(text, 'nrsectorcarrier|nrcelldu')
+    if block:
+        for m in _NR_CELLDU_RE.finditer(block):
+            cell = m.group('cell')
+            result.setdefault(cell, {}).update({
+                'ssbFrequency': m.group('ssbFrequency'),
+                'cellLocalId': m.group('cellLocalId'),
+                'nRTAC': m.group('nRTAC'),
+            })
+    return result
+
+
+def extract_nbiot_cells(parsed):
+    """Rule #4: NBIoT cell presence, from 'hget ^nbiotcell ...'. Returns a list
+    of {'cell':.., 'cellid':.., 'physicalLayerCellId':.., 'tac':..} — empty
+    list means no NBIoT cells on this node (check does not trigger)."""
+    entry = find_command(parsed, 'nbiotcell')
+    out = []
+    if not entry:
+        return out
+    for row in all_rows(entry):
+        out.append({
+            'cell': row.get('MO', '').split('=', 1)[-1],
+            'cellid': row.get('cellid'),
+            'physicalLayerCellId': row.get('physicalLayerCellId'),
+            'tac': row.get('tac'),
+        })
+    return out
