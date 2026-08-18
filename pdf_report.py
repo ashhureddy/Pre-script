@@ -57,10 +57,19 @@ def _styled_table(header, body_rows, row_statuses, col_widths):
 
 
 def _sec(n, title, styles):
-    """Section heading, sized like the reference PDF's plain headings - not
-    oversized banners."""
-    return Paragraph(f'{n}) {title}', ParagraphStyle('SecH', parent=styles['Heading3'], fontSize=10.5,
-                                                       spaceBefore=10, spaceAfter=4, textColor=BRAND_NAVY))
+    """Section title banner — full-width solid navy bar, white bold centered
+    text, matching the reference PDF's 'Summary Status'/'Alarm Information'
+    style exactly (not a plain left-aligned heading)."""
+    label = f'{n}) {title}' if n != '' else title
+    t = Table([[Paragraph(label, ParagraphStyle('BannerText', fontName='Helvetica-Bold', fontSize=9.5,
+                                                  textColor=colors.white, alignment=1))]],
+               colWidths=[7.0 * inch])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), BRAND_NAVY),
+        ('TOPPADDING', (0, 0), (-1, -1), 5), ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    return t
 
 
 def _mono(text, styles, size=8.5):
@@ -74,6 +83,7 @@ def _verdict(status, ok='Match', bad='Mismatch', skip='N/A', expected='Planned')
 def _table_if_rows(n, title, rows, columns, styles, story, widths=None):
     if not rows:
         return
+    story.append(Spacer(1, 8))
     story.append(_sec(n, title, styles))
     header = [c[0] for c in columns]
     body, statuses = [], []
@@ -145,6 +155,7 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     story.append(Spacer(1, 6))
 
     # ---- 1) Pre/Post configuration ----
+    story.append(Spacer(1, 4))
     story.append(_sec(1, 'Pre/post configuration', styles))
     story.append(_mono(f'<b>Pre Configuration:</b>&nbsp;&nbsp;{pre_config_text or "—"}', styles))
     story.append(_mono(f'<b>Post Configuration:</b>&nbsp;&nbsp;{post_config_text or "—"}', styles))
@@ -156,6 +167,7 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     story.append(Spacer(1, 4))
 
     # ---- 2) SOW analysis ----
+    story.append(Spacer(1, 8))
     story.append(_sec(2, 'SOW analysis', styles))
     if scope_lines:
         for line in scope_lines:
@@ -176,6 +188,7 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     # ---- 4) eNBId/gNBId validation ----
     ident_rows = results.get('identity', [])
     if ident_rows:
+        story.append(Spacer(1, 8))
         story.append(_sec(4, 'Enbid/Gnbid validation - Pre vs CIQ', styles))
         body, statuses = [], []
         for r in ident_rows:
@@ -260,6 +273,7 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
 
     swap_rows = results.get('sector_swap', [])
     if swap_rows:
+        story.append(Spacer(1, 8))
         story.append(_sec('13a', 'Sector/TX-RX/Power (Pre vs CIQ, best-effort)', styles))
         body = [[r['cell'], r['sec_id'], r['pre_txrx'], r['ciq_txrx'], r['ciq_power']] for r in swap_rows]
         story.append(_styled_table(['Cells', 'sec_id', 'TX/RX [Pre]', 'TX/RX [CIQ]', 'Power [CIQ]'], body,
@@ -268,6 +282,7 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
 
     share_rows = results.get('radio_sharing', [])
     if share_rows:
+        story.append(Spacer(1, 8))
         story.append(_sec('13b', 'Shared radios', styles))
         body = [[r['cell'], r['note']] for r in share_rows]
         story.append(_styled_table(['Cells', 'Comment'], body, ['NEUTRAL'] * len(body), [4.0 * inch, 3.0 * inch]))
@@ -311,6 +326,7 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     # ---- 18) Pre-existing node TAC ----
     tac_rows = results.get('tac', [])
     if tac_rows:
+        story.append(Spacer(1, 8))
         story.append(_sec(18, 'Pre-existing node (TAC)', styles))
         body = [[r['node'], r.get('pre_tac') or 'NA', r.get('ciq_tac') or 'NA'] for r in tac_rows]
         story.append(_styled_table(['Node ID', 'Pre TAC', 'CIQ TAC'], body, [r['status'] for r in tac_rows],
@@ -323,6 +339,7 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
                     styles, story, [1.9 * inch, 1.7 * inch, 1.9 * inch, 1.5 * inch])
 
     if results.get('unavailable_notes'):
+        story.append(Spacer(1, 10))
         story.append(_sec('—', 'Not available in this run', styles))
         for n in results['unavailable_notes']:
             story.append(_mono('• ' + n, styles, size=7.5))
