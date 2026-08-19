@@ -79,9 +79,34 @@ _HEADER_NOISE_RE = re.compile(
 
 _CELL_DETAILS_ROW_RE = re.compile(
     r'^(?P<cell>\S+)[ \t]+(?P<bbu>\S+)[ \t]+(?P<rest>.+?)[ \t]+(?P<rcn>\d+)[ \t]+'
-    r'(?P<useid>[\d.]+\.[A-Za-z0-9.]+)[ \t]+(?P<status>NEW|EXISTING|UPDATE)[ \t\r]*$',
+    r'(?P<useid>[\d.]+\.[A-Za-z0-9.]+)[ \t]+(?P<status>NEW|EXISTING|UPDATE|AF MIGRATED)[ \t\r]*$',
     re.M
 )
+
+
+_RRH_BAND_SUFFIX_RE = re.compile(r'^B\d|/')
+
+
+def _extract_rrh(rest):
+    """Isolates just the RRH/radio-model from the 'rest' capture (which also
+    contains Sector Position and/or a bare frequency-band label mashed in,
+    e.g. '4449 B5/B12 A-1-1,A-1-4 700' or '8843 B2/B66A AWS'). Keeps the
+    first token (model number/name) plus any following band-suffix tokens
+    (start with 'B<digit>' or contain '/'), stops at the first token that
+    doesn't - confirmed against real Sector-Position and frequency-label
+    formats. Without this, radio-type comparison substring-matched against
+    the whole mashed string, which usually still worked by luck but wasn't
+    actually comparing RRH to RRH."""
+    if not rest:
+        return rest
+    toks = rest.split()
+    rrh = toks[:1]
+    for tok in toks[1:]:
+        if _RRH_BAND_SUFFIX_RE.match(tok):
+            rrh.append(tok)
+        else:
+            break
+    return ' '.join(rrh)
 
 
 def extract_cell_details(pages):
@@ -108,6 +133,7 @@ def extract_cell_details(pages):
             'rcn': m.group('rcn'),
             'bbu': m.group('bbu'),
             'rrh_and_secpos': m.group('rest').strip(),
+            'rrh': _extract_rrh(m.group('rest').strip()),
             'status': m.group('status'),
         }
     return result
