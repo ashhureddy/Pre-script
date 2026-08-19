@@ -110,7 +110,7 @@ def _combined_node_label(primary, secondary, bbu_mode=None):
     return f"{primary}(P)"
 
 
-def check_primary_secondary(node_id, edp_rows, mm_row, rfds_pages=None):
+def check_primary_secondary(node_id, edp_rows, mm_row, rfds_pages=None, rfds_bytes=None):
     """Rule #3/#31 - Primary/Secondary agreement, CIQ vs EDP vs RFDS. Each
     column shows the combined 'Primary(P)/Secondary(S)(mode)' label per its
     own source, per the confirmed format (a plain role string isn't enough -
@@ -137,7 +137,7 @@ def check_primary_secondary(node_id, edp_rows, mm_row, rfds_pages=None):
     rfds_label = 'NOT CHECKED'
     if rfds_pages is not None:
         import rfds_extract as rf
-        present = rf.check_nodes_present_together(rfds_pages, primary, secondary, final=True) if secondary else None
+        present = rf.check_nodes_present_together(rfds_pages, primary, secondary, rfds_bytes) if secondary else None
         if secondary:
             rfds_label = ciq_label if present else 'NOT FOUND IN RFDS'
         else:
@@ -237,14 +237,16 @@ def check_tac(node_id, log_text, enb_row, has_pre_log):
             'note': ' '.join(notes) if notes else 'TAC confirmed.'}
 
 
-def check_xmu_rfds_vs_ciq(node_id, enb_row, gnb_row, rfds_pages):
+def check_xmu_rfds_vs_ciq(node_id, enb_row, gnb_row, rfds_pages, rfds_bytes=None):
     """Rule #27 - XMU Validation vs RFDS: XMU presence must agree between
     CIQ (eNB/gNB Info '1st XMU'/'2nd XMU' = YES) and RFDS's Non RF Inventory
-    Details (Final) page. Page-wide presence check, not node-attributed -
-    the Non RF Inventory page's OCR ordering is too scrambled to reliably
-    attribute an XMU mention to one specific node (see rfds_extract.py's
-    module docstring) - flagged plainly in the note rather than pretending
-    to a precision this data doesn't support."""
+    Details (Final) page.
+
+    Tries node-specific attribution first (rfds_extract.extract_xmu_by_node,
+    genuine-PDF RFDS only, via pdfplumber table extraction) - falls back to
+    the page-wide check when that's unavailable (zip-bundle/OCR format,
+    where the page's scrambled ordering makes per-node attribution
+    unreliable - see rfds_extract.py's module docstring)."""
     ciq_has_xmu = False
     for row in (enb_row, gnb_row):
         if row and (str(row.get('1st XMU', '')).strip().upper() == 'YES' or str(row.get('2nd XMU', '')).strip().upper() == 'YES'):
@@ -255,6 +257,27 @@ def check_xmu_rfds_vs_ciq(node_id, enb_row, gnb_row, rfds_pages):
                 'note': 'No RFDS provided.'}
 
     import rfds_extract as rf
+
+    if rfds_bytes is not None:
+        by_node = rf.extract_xmu_by_node(rfds_bytes)
+        if by_node is not None:
+            if node_id in by_node:
+                rfds_has_xmu = by_node[node_id]
+                match = ciq_has_xmu == rfds_has_xmu
+                note = 'Confirmed (node-specific).' if match else \
+                    f'CIQ XMU present={ciq_has_xmu}, RFDS XMU present={rfds_has_xmu} (node-specific).'
+                return {'rule': '#27', 'node': node_id, 'status': 'MATCH' if match else 'MISMATCH',
+                        'ciq_xmu': ciq_has_xmu, 'rfds_xmu': rfds_has_xmu, 'note': note}
+            # Node parsed successfully but isn't listed in the RFDS at all.
+            # Do NOT fall through to the page-wide check here: another node's
+            # XMU on the same page would be reported as this node's, which is
+            # exactly backwards (confirmed on a real site - OKL00082 is absent
+            # from the RFDS entirely, yet inherited OKTN000082's XMU and was
+            # flagged as a mismatch against a correct CIQ).
+            return {'rule': '#27', 'node': node_id, 'status': 'SKIPPED',
+                    'ciq_xmu': ciq_has_xmu, 'rfds_xmu': None,
+                    'note': 'Node not listed in RFDS Non RF Inventory — nothing to compare.'}
+
     text = rf.find_pages_by_heading(rfds_pages, 'Non RF Inventory Details (Final)')
     collapsed = re.sub(r'\s+', '', text) if text else ''
     rfds_has_xmu = 'XMU' in collapsed
@@ -266,7 +289,7 @@ def check_xmu_rfds_vs_ciq(node_id, enb_row, gnb_row, rfds_pages):
             'ciq_xmu': ciq_has_xmu, 'rfds_xmu': rfds_has_xmu, 'note': note}
 
 
-def run_node_checks(node_id, log_text, ciq_wb, edp_rows, rfds_pages=None):
+def run_node_checks(node_id, log_text, ciq_wb, edp_rows, rfds_pages=None, rfds_bytes=None):
     """Runs all node-level checks for one node and returns a list of result
     rows, ready to feed into the PDF's node-level section."""
     import log_parser as lp
@@ -281,7 +304,7 @@ def run_node_checks(node_id, log_text, ciq_wb, edp_rows, rfds_pages=None):
     results = [check_sw_version(node_id, log_text) if has_pre_log else
                {'rule': '#1', 'node': node_id, 'status': 'SKIPPED', 'note': 'No Pre kget-all log.'}]
     results.append(check_identity(node_id, parsed, mm_row, has_pre_log))
-    results.append(check_primary_secondary(node_id, edp_rows, mm_row, rfds_pages))
+    results.append(check_primary_secondary(node_id, edp_rows, mm_row, rfds_pages, rfds_bytes))
     results.append(check_board_type(node_id, mm_row, enb_row, ciq_wb, edp_rows, rfds_pages))
 
     gnb_row = None
@@ -292,6 +315,6 @@ def run_node_checks(node_id, log_text, ciq_wb, edp_rows, rfds_pages=None):
                 if str(r.get('gNodeB Name', '')).strip().upper() == g_name:
                     gnb_row = r
                     break
-    results.append(check_xmu_rfds_vs_ciq(node_id, enb_row, gnb_row, rfds_pages))
+    results.append(check_xmu_rfds_vs_ciq(node_id, enb_row, gnb_row, rfds_pages, rfds_bytes))
     results.append(check_tac(node_id, log_text, enb_row, has_pre_log))
     return results
