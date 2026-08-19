@@ -231,6 +231,51 @@ def merge_moved_in_pre(base_dict, node_logs, moved_map, extract_fn):
     return merged
 
 
+def extract_cell_to_rilink(text):
+    """Cell -> 'Single'/'Double' RILink count, from 'hget rilink=' riPortRef2
+    (FieldReplaceableUnit=RRU-N,RiPort=...) counted per RRU-N, joined via the
+    same RfBranch->RRU chain as extract_cell_to_radio."""
+    if not text:
+        return {}
+    fru_by_branch = {}
+    for m in re.finditer(r'^(AntennaUnitGroup=\d+,RfBranch=\d+)\s+.*?FieldReplaceableUnit=([^,\s]+)',
+                          get_command_block(text, 'rfbranch auport|rfportref') or '', re.M):
+        fru_by_branch[m.group(1)] = m.group(2)
+    rru_links = {}
+    for m in re.finditer(r'FieldReplaceableUnit=(RRU-\S+),RiPort=', get_command_block(text, 'rilink=') or ''):
+        rru_links[m.group(1)] = rru_links.get(m.group(1), 0) + 1
+    carrier_rru = {}
+    for m in re.finditer(r'^(SectorCarrier=\S+)\s+(.*)$', get_command_block(text, 'sector rfbranch') or '', re.M):
+        refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
+        rrus = {fru_by_branch[r] for r in refs if r in fru_by_branch}
+        if rrus:
+            carrier_rru[m.group(1)] = sorted(rrus)[0]
+    result = {}
+    block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction')
+    for m in re.finditer(r'^(SectorCarrier=\S+)\s+(.*)$', block or '', re.M):
+        carrier, rest = m.group(1), m.group(2)
+        rru = carrier_rru.get(carrier)
+        if not rru:
+            continue
+        n = rru_links.get(rru, 0)
+        label = 'Double' if n >= 2 else ('Single' if n == 1 else None)
+        if not label:
+            continue
+        for cell in re.findall(r'EUtranCellFDD=(\S+)', rest):
+            result[cell] = label
+        for cell in re.findall(r'NRCellDU=(\S+)', rest):
+            result[cell] = label
+    return result
+
+
+def parse_rbb_txrx(rbb_type):
+    """'RBB44_1D' -> '4x4'. Returns None if not RBB44/42/22-style."""
+    if not rbb_type:
+        return None
+    m = re.match(r'RBB(\d)(\d)', str(rbb_type))
+    return f'{m.group(1)}x{m.group(2)}' if m else None
+
+
 def node_id_from_log(text):
     """The node ID as it appears at the moshell prompt, e.g. 'SCL05020'."""
     m = re.search(r'^([A-Za-z0-9_]+)>\s', text, re.M)
