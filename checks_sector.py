@@ -21,16 +21,26 @@ def _rows(ciq_wb, sheet_name):
 
 def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name):
     """Blueprint section 13 'Radio Type verification' (#6). Cells | Pre |
-    CIQ | RFDS | Match. Pre is best-effort via the Cell->SectorCarrier->SEF
-    chain (pre_extract.extract_cell_to_sef) - this resolves to a SEF number,
-    not a specific RRU product name (no confirmed SEF->RRU link exists in
-    Pre kget-all data), so Pre shows 'NOT AVAILABLE' rather than a guess."""
+    CIQ | RFDS | Match.
+
+    Pre is resolved via the full MO chain (confirmed):
+        SectorCarrier -> fdd (EUtranCellFDD/NRCellDU)
+        SectorCarrier -> AntennaUnitGroup,RfBranch (rfBranchRxRef/TxRef)
+        AntennaUnitGroup,RfBranch -> FieldReplaceableUnit=RRU-N
+        FieldReplaceableUnit=RRU-N -> productName
+    (pre_extract.extract_cell_to_radio). An earlier version stopped at the
+    SectorEquipmentFunction number, showing '(SEF ...)' instead of an actual
+    radio model - the real link exists via RfBranch, not SEF."""
     results = []
     cell_details = {}
     if rfds_pages is not None:
         import rfds_extract as rf
-        cell_details = rf.extract_cell_details(rfds_pages, final=True)
-    cell_to_sef = pe.extract_cell_to_sef(log_text) if log_text else {}
+        cell_details = rf.extract_cell_details(rfds_pages)
+    cell_to_radio = pe.extract_cell_to_radio(log_text) if log_text else {}
+
+    def _pre_for(cell):
+        product = cell_to_radio.get(cell)
+        return pe._short_radio_name(product) if product else 'NOT AVAILABLE'
 
     for row in _rows(ciq_wb, 'eUtran Parameters'):
         cell = row.get('EutranCellFDDId')
@@ -38,12 +48,19 @@ def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name):
             continue
         ciq_rru = str(row.get('RRU type', '')).strip()
         rfds_rrh = cell_details.get(cell, {}).get('rrh_and_secpos', 'NOT FOUND' if rfds_pages is not None else 'NOT CHECKED')
-        pre_val = 'NOT AVAILABLE' if not cell_to_sef.get(cell) else f"(SEF {cell_to_sef[cell]})"
+        pre_val = _pre_for(cell)
         rru_token = ciq_rru.split()[-1] if ciq_rru else ''
-        match = bool(rru_token) and rru_token in rfds_rrh
+        rfds_match = bool(rru_token) and rru_token in rfds_rrh
+        pre_match = pre_val == 'NOT AVAILABLE' or pre_val == ciq_rru
+        match = rfds_match and pre_match
+        notes = []
+        if not rfds_match:
+            notes.append('RFDS does not confirm CIQ RRU type.')
+        if not pre_match:
+            notes.append(f'Radio swap indicated: Pre={pre_val} vs CIQ={ciq_rru}.')
         results.append({'rule': '#6', 'node': node_id, 'cell': cell, 'pre': pre_val,
                          'ciq': ciq_rru, 'rfds': rfds_rrh, 'status': 'MATCH' if match else 'MISMATCH',
-                         'note': 'Confirmed.' if match else 'Radio swap pending / RFDS does not confirm CIQ RRU type.'})
+                         'note': 'Confirmed.' if match else ' '.join(notes)})
 
     for row in _rows(ciq_wb, '5G Info'):
         cell = row.get('NRCellDU')
@@ -51,11 +68,19 @@ def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name):
             continue
         ciq_rru = str(row.get('RRU Type', '')).strip()
         rfds_rrh = cell_details.get(cell, {}).get('rrh_and_secpos', 'NOT FOUND' if rfds_pages is not None else 'NOT CHECKED')
+        pre_val = _pre_for(cell)
         rru_token = ciq_rru.split()[-1] if ciq_rru else ''
-        match = bool(rru_token) and rru_token in rfds_rrh
-        results.append({'rule': '#6', 'node': node_id, 'cell': cell, 'pre': 'NA',
+        rfds_match = bool(rru_token) and rru_token in rfds_rrh
+        pre_match = pre_val == 'NOT AVAILABLE' or pre_val == ciq_rru
+        match = rfds_match and pre_match
+        notes = []
+        if not rfds_match:
+            notes.append('RFDS does not confirm CIQ RRU type.')
+        if not pre_match:
+            notes.append(f'Radio swap indicated: Pre={pre_val} vs CIQ={ciq_rru}.')
+        results.append({'rule': '#6', 'node': node_id, 'cell': cell, 'pre': pre_val,
                          'ciq': ciq_rru, 'rfds': rfds_rrh, 'status': 'MATCH' if match else 'MISMATCH',
-                         'note': 'Confirmed.' if match else 'RFDS does not confirm CIQ RRU type.'})
+                         'note': 'Confirmed.' if match else ' '.join(notes)})
     return results
 
 
@@ -87,40 +112,99 @@ def check_radio_sharing_pairs(node_id, ciq_wb):
     return results
 
 
-def check_sector_swap_config(node_id, log_text, ciq_wb, e_name):
-    """Blueprint section 13, rules #21/#22/#32 - sector ID rename, TX/RX
-    antenna count, and configured power, Pre vs CIQ (per cell). 'Link'
-    (DATA1/DATA2 port designation) has no confirmed CIQ column and is
-    NOT AVAILABLE rather than guessed."""
+def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None):
+    """Blueprint section 13, rules #21/#22/#32 - sector ID, TX/RX antenna
+    count, and configured power, Pre vs CIQ (per cell).
+
+    All three Pre values come from ONE command's output
+    ('hget ^EUtranCell.DD|Sector ^earfcn|...|configuredMaxTxPower|
+    noOfRxAntennas|noOfTxAntennas|sectorcarrierref') - confirmed against a
+    real log, this single hget produces three tables: the LTE combo table
+    (giving sectorCarrierRef, e.g. 'SectorCarrier=7_1' - the sec_id itself),
+    and TWO 'configuredMaxTxPower|noOfRxAntennas|noOfTxAntennas' tables, one
+    keyed by SectorCarrier=<sec_id> (LTE) and one by NRSectorCarrier=<cell>
+    (5G). 'Link' (DATA1/DATA2 port designation) has no confirmed CIQ column
+    and is NOT AVAILABLE rather than guessed."""
     if not log_text:
         return []
     import log_parser as lp
     parsed = lp.parse_log(log_text)
-    block = lp.get_command_block(log_text, 'Sectorstate|configuredMaxTxPower')
-    pre_by_sef = {}
-    if block:
-        for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+.*?(?:UNLOCKED|LOCKED)\s+(\S+)\s+(\S+)\s+.*?(\d+)\s+(\d+)\s+\d+\s+\d+\s+(?:ENABLED|DISABLED)',
-                              block, re.M):
-            pre_by_sef[m.group(1)] = {'tx': m.group(4), 'rx': m.group(5)}
-    cell_to_sef = pe.extract_cell_to_sef(log_text)
+    block = lp.get_command_block(log_text, '^EUtranCell.DD|Sector ^earfcn')
+    tables = lp.parse_tables(block) if block else []
+
+    # LTE: SectorCarrier=<sec_id> -> power/tx/rx
+    sc_power = {}
+    for t in tables:
+        if len(t['header']) > 1 and 'configuredMaxTxPower' in t['header'][1]:
+            for row in t['rows']:
+                mo = row.get('MO', '')
+                if mo.startswith('SectorCarrier='):
+                    vals = row.get('configuredMaxTxPower noOfRxAntennas noOfTxAntennas', '').split()
+                    if len(vals) >= 3:
+                        sc_power[mo.split('=', 1)[1]] = vals
+                elif mo.startswith('NRSectorCarrier='):
+                    cell = mo.split('=', 1)[1]
+                    vals = row.get('configuredMaxTxPower noOfRxAntennas noOfTxAntennas', '').split()
+                    if len(vals) >= 3:
+                        sc_power[f'5G:{cell}'] = vals
+
+    # LTE cell -> sectorCarrierRef (the sec_id itself, e.g. 'SectorCarrier=7_1')
+    cell_to_sec_id = {}
+    for m in re.finditer(r'^EUtranCellFDD=(\S+)\s.*?\[\d+\]\s*=\s*SectorCarrier=(\S+)', block or '', re.M):
+        cell_to_sec_id[m.group(1)] = m.group(2)
 
     results = []
     for row in _rows(ciq_wb, 'eUtran Parameters'):
         cell = row.get('EutranCellFDDId')
         if not (cell and e_name and str(cell).startswith(e_name)):
             continue
-        sef = cell_to_sef.get(cell)
-        pre_txrx = 'NOT AVAILABLE'
-        if sef and sef in pre_by_sef:
-            pre_txrx = f"{pre_by_sef[sef]['tx']}x{pre_by_sef[sef]['rx']}"
+        pre_sec_id = cell_to_sec_id.get(cell, 'NOT AVAILABLE')
+        pv = sc_power.get(pre_sec_id)
+        pre_power = pv[0] if pv else 'NOT AVAILABLE'
+        pre_txrx = f'{pv[2]}x{pv[1]}' if pv else 'NOT AVAILABLE'
         ciq_tx, ciq_rx = row.get('noOfTxAntennas'), row.get('noOfRxAntennas')
         ciq_txrx = f"{ciq_tx}x{ciq_rx}" if ciq_tx and ciq_rx else 'NOT FOUND'
         ciq_power = str(row.get('configuredOutputPower', '')).strip()
-        sec_id = str(row.get('sectorId', '')).strip()
+        ciq_sec_id = str(row.get('sectorId', '')).strip()
+        mismatches = []
+        if pre_sec_id != 'NOT AVAILABLE' and pre_sec_id != ciq_sec_id:
+            mismatches.append(f'sec_id Pre={pre_sec_id} vs CIQ={ciq_sec_id}')
+        if pre_txrx != 'NOT AVAILABLE' and pre_txrx != ciq_txrx:
+            mismatches.append(f'TX/RX Pre={pre_txrx} vs CIQ={ciq_txrx}')
+        if pre_power != 'NOT AVAILABLE' and ciq_power and pre_power != ciq_power:
+            mismatches.append(f'Power Pre={pre_power} vs CIQ={ciq_power}')
         results.append({'rule': '#21/#22/#32', 'node': node_id, 'cell': cell,
-                         'sec_id': sec_id, 'pre_txrx': pre_txrx, 'ciq_txrx': ciq_txrx,
-                         'ciq_power': ciq_power, 'status': 'INFO',
-                         'note': 'Pre TX/RX/power not fully resolvable without RFDS radio-swap confirmation - review manually.'})
+                         'sec_id': ciq_sec_id, 'pre_sec_id': pre_sec_id,
+                         'pre_txrx': pre_txrx, 'ciq_txrx': ciq_txrx,
+                         'pre_power': pre_power, 'ciq_power': ciq_power,
+                         'status': 'MISMATCH' if mismatches else 'MATCH',
+                         'note': '; '.join(mismatches) if mismatches else 'Confirmed.'})
+
+    if g_name:
+        for row in _rows(ciq_wb, '5G Info'):
+            cell = row.get('NRCellDU')
+            if not (cell and str(cell).startswith(g_name)):
+                continue
+            pv = sc_power.get(f'5G:{cell}')
+            pre_power = pv[0] if pv else 'NOT AVAILABLE'
+            pre_txrx = f'{pv[2]}x{pv[1]}' if pv else 'NOT AVAILABLE'
+            ciq_tx, ciq_rx = row.get('noOfTxAntennas'), row.get('noOfRxAntennas')
+            # CIQ's 5G Info tab has no TX/RX antenna count columns at all
+            # (confirmed - only 'configuredMaxTxPower' exists there), so this
+            # is a genuine data gap, not a lookup failure.
+            ciq_txrx = f"{ciq_tx}x{ciq_rx}" if ciq_tx and ciq_rx else 'NOT IN CIQ'
+            ciq_power = str(row.get('configuredMaxTxPower', '')).strip()
+            mismatches = []
+            if pre_txrx != 'NOT AVAILABLE' and ciq_txrx != 'NOT IN CIQ' and pre_txrx != ciq_txrx:
+                mismatches.append(f'TX/RX Pre={pre_txrx} vs CIQ={ciq_txrx}')
+            if pre_power != 'NOT AVAILABLE' and ciq_power and pre_power != ciq_power:
+                mismatches.append(f'Power Pre={pre_power} vs CIQ={ciq_power}')
+            results.append({'rule': '#21/#22/#32', 'node': node_id, 'cell': cell,
+                             'sec_id': 'NA', 'pre_sec_id': 'NA',
+                             'pre_txrx': pre_txrx, 'ciq_txrx': ciq_txrx,
+                             'pre_power': pre_power, 'ciq_power': ciq_power,
+                             'status': 'MISMATCH' if mismatches else 'MATCH',
+                             'note': '; '.join(mismatches) if mismatches else 'Confirmed.'})
     return results
 
 
@@ -151,21 +235,29 @@ def check_nbiot(node_id, log_text, ciq_wb=None):
                          'pre_id': pre_id, 'ciq_id': ciq_id,
                          'status': 'MATCH' if match else 'MISMATCH',
                          'note': 'Confirmed.' if match else f'Pre={pre_id} vs CIQ={ciq_id}.'})
-    # Any Pre NBIoT cell with no CIQ counterpart at all
-    for c in pre_cells:
-        if c.get('physicalLayerCellId') not in matched_pre:
-            results.append({'rule': '#4', 'node': node_id, 'cell': c.get('cell'),
-                             'pre_id': c.get('cellid'), 'ciq_id': 'NOT FOUND',
-                             'status': 'MISMATCH', 'note': 'Pre NBIoT cell not found in CIQ.'})
+    # Confirmed scoping rule: every check is driven by the CIQ (the post
+    # design). Cells that exist only in Pre are out of scope - they are not
+    # what is being scripted - so no row is emitted for them. Pre is only
+    # ever a comparison column against a CIQ cell, and reads 'NA' when the
+    # CIQ cell is newly adding.
     return results
 
 
-def check_nr_tac(node_id, log_text, ciq_wb, has_pre_log, has_amf):
+def check_nr_tac(node_id, log_text, ciq_wb, has_pre_log, has_amf, g_name=None):
     """Rule #7/#8 - NR TAC. Pre kget-all vs CIQ 5G Info nRTAC, per 5G cell.
     #8's NSA(0)/SA(7-digit) branch: cells present in NR_SA tab are expected
     7-digit (SA); others expected '0' (NSA). #7's warning: if AMF is present
     (has_amf, from 'st amf' in the Pre kget-all - caller determines this) and
-    nRTAC is 7-digit in Pre, warn of SA configuration on this node."""
+    nRTAC is 7-digit in Pre, warn of SA configuration on this node.
+
+    g_name: this node's gNodeB Name - cells are filtered to those belonging
+    to it. Without this filter every node emits every 5G cell in the CIQ
+    (confirmed: a 3-node site produced each cell three times, and compared
+    other nodes' cells against THIS node's Pre data, producing false
+    mismatches). A node with no gNodeB Name has no 5G identity at all, so
+    it correctly yields no rows rather than falling through to every cell."""
+    if not g_name:
+        return []
     fiveg_rows = _rows(ciq_wb, '5G Info')
     nr_sa_rows = _rows(ciq_wb, 'NR_SA')
     sa_nodes = {str(r.get('Node Name', '')).strip().upper() for r in nr_sa_rows if r.get('Node Name')}
@@ -177,18 +269,26 @@ def check_nr_tac(node_id, log_text, ciq_wb, has_pre_log, has_amf):
         cell = row.get('NRCellDU')
         if not cell:
             continue
+        if not str(cell).startswith(g_name):
+            continue
         ciq_nrtac = str(row.get('nRTAC', '')).strip()
         gnb_name = str(row.get('gNB Name', '')).strip().upper()
         expects_sa = gnb_name in sa_nodes
         notes = []
         status = 'MATCH'
 
-        if expects_sa and not (ciq_nrtac.isdigit() and len(ciq_nrtac) == 7):
-            status = 'MISMATCH'
-            notes.append(f"Node in NR_SA (SA conversion) but nRTAC='{ciq_nrtac}' is not 7-digit.")
-        elif not expects_sa and ciq_nrtac not in ('0', ''):
-            status = 'MISMATCH'
-            notes.append(f"Not an NR_SA node (expect NSA, nRTAC=0) but nRTAC='{ciq_nrtac}'.")
+        # NR_SA tab empty means no SA conversion is in scope at all - in that
+        # case nRTAC is whatever the design says and there is no 0-vs-7-digit
+        # expectation to enforce (confirmed: enforcing it on a site with an
+        # empty NR_SA tab flagged every legitimately-populated nRTAC as a
+        # mismatch).
+        if sa_nodes:
+            if expects_sa and not (ciq_nrtac.isdigit() and len(ciq_nrtac) == 7):
+                status = 'MISMATCH'
+                notes.append(f"Node in NR_SA (SA conversion) but nRTAC='{ciq_nrtac}' is not 7-digit.")
+            elif not expects_sa and ciq_nrtac not in ('0', ''):
+                status = 'MISMATCH'
+                notes.append(f"Not an NR_SA node (expect NSA, nRTAC=0) but nRTAC='{ciq_nrtac}'.")
 
         pre_val = pre_nr_tac.get(cell)
         if pre_val is not None and pre_val != ciq_nrtac:
@@ -282,6 +382,53 @@ def check_port_uniqueness(node_id, ciq_wb):
     fiveg_rows = _rows(ciq_wb, '5G Info')
     port_cols = ['Port 1', 'Port 2', 'Port 3', 'Port 4']
 
+    # XMU ports must be scoped PER NODE - ports on different physical nodes
+    # cannot conflict. Which tab declares them depends on the node type
+    # (confirmed): MMBB nodes map to both eNB Info (by eNodeB Name) and
+    # gNB Info (by gNodeB Name); a 4G-standalone node only has eNB Info; a
+    # 5G-only node only has gNB Info. Collecting them site-wide flagged a
+    # sector on one node against another node's XMU (confirmed false
+    # positive: HXL00147's XMU D/E/F vs HXIN010147's cells, which belong to
+    # HXL04147).
+    mm_rows = _rows(ciq_wb, 'Mixed Mode Info')
+    enb_by_name = {str(r.get('eNodeB Name', '')).strip(): r for r in _rows(ciq_wb, 'eNB Info')
+                   if str(r.get('eNodeB Name', '')).strip()}
+    gnb_by_name = {str(r.get('gNodeB Name', '')).strip(): r for r in _rows(ciq_wb, 'gNB Info')
+                   if str(r.get('gNodeB Name', '')).strip()}
+
+    def _ports_from(row):
+        found = set()
+        if not row:
+            return found
+        for which in ('1st', '2nd'):
+            if str(row.get(f'{which} XMU', '')).strip().upper() != 'YES':
+                continue
+            for i in (1, 2, 3):
+                v = row.get(f'{which} XMU Port {i}')
+                if v is not None and str(v).strip().upper() not in ('', 'N/A', 'NA', 'NOT USED'):
+                    found.add(str(v).strip())
+        return found
+
+    # cell-name prefix -> that node's XMU ports
+    xmu_ports_by_prefix = {}
+    for mm in mm_rows:
+        e_name = str(mm.get('eNodeB Name') or '').strip()
+        g_name = str(mm.get('gNodeB Name') or '').strip()
+        node_ports = _ports_from(enb_by_name.get(e_name)) | _ports_from(gnb_by_name.get(g_name))
+        if not node_ports:
+            continue
+        for prefix in (e_name, g_name):
+            if prefix:
+                xmu_ports_by_prefix[prefix] = xmu_ports_by_prefix.get(prefix, set()) | node_ports
+
+    def _xmu_ports_for_cell(cell):
+        for prefix, ports in xmu_ports_by_prefix.items():
+            if cell and str(cell).startswith(prefix):
+                return ports
+        return set()
+
+    xmu_ports = set().union(*xmu_ports_by_prefix.values()) if xmu_ports_by_prefix else set()
+
     shared_radio_group = {}  # cell -> group key, for 6472/AIR-sharing cells only
     for row in fiveg_rows:
         rru_type = str(row.get('RRU Type', '')).strip()
@@ -292,7 +439,6 @@ def check_port_uniqueness(node_id, ciq_wb):
                 shared_radio_group[cell] = sef
 
     usage = {}
-    xmu_ports = set()
     for row in fiveg_rows:
         cell = row.get('NRCellDU')
         bbu = str(row.get('BB/XMU', '')).strip()
@@ -306,35 +452,58 @@ def check_port_uniqueness(node_id, ciq_wb):
             if is_xmu:
                 xmu_ports.add(str(val).strip())
 
+    # Blueprint's RI port table has TWO port columns: LTE cells use one RI
+    # port (second shows NA), 5G cells can use two. Collect each cell's full
+    # port list so the second can be rendered.
+    ports_by_cell = {}
+    for row in fiveg_rows:
+        cell = row.get('NRCellDU')
+        if not cell:
+            continue
+        plist = [str(row.get(pc)).strip() for pc in port_cols
+                 if row.get(pc) is not None and str(row.get(pc)).strip()]
+        ports_by_cell[cell] = plist
+
+    # XMU ports are keyed separately in `usage` (by their own BB/XMU value), so
+    # a sector reusing an XMU port never collides there and its own row would
+    # read Unique. Collect the conflicting (cell, port) pairs up front so the
+    # sector's real row can be marked - previously this only appended an extra
+    # MISMATCH row afterwards, leaving the sector's original row saying Unique
+    # and the same cell appearing twice with contradictory verdicts.
+    xmu_conflicts = {}
+    for row in fiveg_rows:
+        cell = row.get('NRCellDU')
+        bbu = str(row.get('BB/XMU', '')).strip()
+        if 'XMU' in bbu.upper():
+            continue
+        own_xmu_ports = _xmu_ports_for_cell(cell)
+        for pc in port_cols:
+            val = row.get(pc)
+            if val is not None and str(val).strip() in own_xmu_ports:
+                xmu_conflicts[(cell, str(val).strip())] = bbu
+
     results = []
     for (bbu, port), cells in usage.items():
         # if every cell sharing this port belongs to the same 6472/AIR shared-radio
         # group, the sharing is expected (rule #9) - not a violation.
         groups = {shared_radio_group.get(c) for c in cells}
         exempt = len(cells) > 1 and len(groups) == 1 and None not in groups
-        if len(cells) > 1 and not exempt:
-            for cell in cells:
-                results.append({'rule': '#11/#26/#27', 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
-                                 'bbu': bbu, 'port': port,
-                                 'note': f"Port {port} on {bbu} shared by multiple sectors: {cells}"})
-        else:
-            note = 'Port shared as expected (6472/AIR sharing radio, per rule #9).' if exempt else 'Port unique.'
-            for cell in cells:
-                results.append({'rule': '#11/#26/#27', 'node': node_id, 'cell': cell, 'status': 'MATCH',
-                                 'bbu': bbu, 'port': port, 'note': note})
+        for cell in cells:
+            _pl = [p for p in ports_by_cell.get(cell, []) if p != port]
+            xmu_clash = (cell, port) in xmu_conflicts
+            if len(cells) > 1 and not exempt:
+                status = 'MISMATCH'
+                note = f"Port {port} on {bbu} shared by multiple sectors: {cells}"
+            elif xmu_clash:
+                status = 'MISMATCH'
+                note = f"Port {port} is assigned to an XMU on this node but reused by this sector."
+            elif exempt:
+                status, note = 'MATCH', 'Port shared as expected (6472/AIR sharing radio, per rule #9).'
+            else:
+                status, note = 'MATCH', 'Port unique.'
+            results.append({'rule': '#11/#26/#27', 'node': node_id, 'cell': cell, 'status': status,
+                             'bbu': bbu, 'port': port, 'port2': _pl[0] if _pl else None, 'note': note})
 
-    # XMU port exclusivity: any non-XMU row using a port also used by an XMU row -> violation
-    for row in fiveg_rows:
-        cell = row.get('NRCellDU')
-        bbu = str(row.get('BB/XMU', '')).strip()
-        if 'XMU' in bbu.upper():
-            continue
-        for pc in port_cols:
-            val = row.get(pc)
-            if val is not None and str(val).strip() in xmu_ports:
-                results.append({'rule': '#11/#26/#27', 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
-                                 'bbu': bbu, 'port': val,
-                                 'note': f"Port {val} is assigned to an XMU elsewhere on this node but reused here."})
     return results
 
 
@@ -428,7 +597,7 @@ def check_rfds_cell_presence(node_id, ciq_wb, rfds_pages):
         return [{'rule': '#18', 'node': node_id, 'cell': None, 'status': 'SKIPPED',
                   'note': 'No RFDS provided.'}]
     import rfds_extract as rf
-    rfds_cells = rf.extract_non_rf_inventory_cells(rfds_pages, final=True)
+    rfds_cells = rf.extract_non_rf_inventory_cells(rfds_pages)
     mm_row = None
     for r in _rows(ciq_wb, 'Mixed Mode Info'):
         if str(r.get('Node to be built as', '')).strip().upper() == str(node_id).strip().upper():
@@ -456,7 +625,7 @@ def check_rfds_cell_id(node_id, ciq_wb, rfds_pages):
         return [{'rule': '#25', 'node': node_id, 'cell': None, 'status': 'SKIPPED',
                   'note': 'No RFDS provided.'}]
     import rfds_extract as rf
-    cell_details = rf.extract_cell_details(rfds_pages, final=True)
+    cell_details = rf.extract_cell_details(rfds_pages)
 
     results = []
     for row in _rows(ciq_wb, 'eUtran Parameters'):
@@ -482,7 +651,7 @@ def check_rfds_nrcelldu(node_id, ciq_wb, rfds_pages):
         return [{'rule': '#6', 'node': node_id, 'cell': None, 'status': 'SKIPPED',
                   'note': 'No RFDS provided.'}]
     import rfds_extract as rf
-    cell_details = rf.extract_cell_details(rfds_pages, final=True)
+    cell_details = rf.extract_cell_details(rfds_pages)
 
     results = []
     for row in _rows(ciq_wb, '5G Info'):
@@ -518,7 +687,7 @@ def check_cells_vs_rfds(node_id, ciq_wb, rfds_pages, e_name, g_name):
     if rfds_pages is None:
         return [{'rule': '#6/#18', 'node': node_id, 'cell': None, 'status': 'SKIPPED', 'note': 'No RFDS provided.'}]
     import rfds_extract as rf
-    rfds_cells = rf.extract_non_rf_inventory_cells(rfds_pages, final=True)
+    rfds_cells = rf.extract_non_rf_inventory_cells(rfds_pages)
     results = []
     for row in _rows(ciq_wb, 'eUtran Parameters'):
         cell = row.get('EutranCellFDDId')
@@ -547,7 +716,7 @@ def check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name)
     cell_details = {}
     if rfds_pages is not None:
         import rfds_extract as rf
-        cell_details = rf.extract_cell_details(rfds_pages, final=True)
+        cell_details = rf.extract_cell_details(rfds_pages)
 
     pre_lte = pe.extract_lte_sector_params(log_text) if log_text else {}
     for row in _rows(ciq_wb, 'eUtran Parameters'):
@@ -660,20 +829,45 @@ def check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre_log, retuned_c
 def check_xmu_port_overlap(node_id, enb_row, gnb_row, ciq_wb):
     """Blueprint section 14 second table: Node id | 1st DU type | 1st XMU |
     1st XMU Port 1/2/3 | Port Uniqueness - do the XMU's own designated ports
-    get reused by any other sector's RI port on this node?"""
-    row = enb_row or gnb_row
-    if row is None or str(row.get('1st XMU', '')).strip().upper() != 'YES':
+    get reused by any other sector's RI port on this node?
+
+    Reads BOTH eNB Info and gNB Info rows, and both 1st and 2nd XMU - the
+    earlier version took `enb_row or gnb_row` (silently ignoring the other
+    tab) and only looked at 1st XMU, so a 2nd XMU or a gNB-side declaration
+    was invisible."""
+    rows = [r for r in (enb_row, gnb_row) if r is not None]
+    if not rows:
         return []
-    du_type = str(row.get('DU type') or row.get('1st DU type') or '').strip()
-    xmu_ports = {str(row.get(f'1st XMU Port {i}', '')).strip() for i in (1, 2, 3)}
-    xmu_ports.discard('')
-    xmu_ports.discard('NOT USED')
-    xmu_ports = {p for p in xmu_ports if p.upper() not in ('NOT USED', 'N/A', 'NA')}
+
+    du_type = ''
+    xmu_ports = set()
+    declared = False
+    for row in rows:
+        du_type = du_type or str(row.get('DU type') or row.get('1st DU type') or '').strip()
+        for which in ('1st', '2nd'):
+            if str(row.get(f'{which} XMU', '')).strip().upper() != 'YES':
+                continue
+            declared = True
+            for i in (1, 2, 3):
+                v = row.get(f'{which} XMU Port {i}')
+                if v is not None and str(v).strip().upper() not in ('', 'N/A', 'NA', 'NOT USED'):
+                    xmu_ports.add(str(v).strip())
+    if not declared:
+        return []
+
+    # Only this node's own cells can conflict with this node's XMU ports -
+    # a sector on a different physical node uses different hardware.
+    own_prefixes = {str(r.get(k)).strip() for r in rows for k in ('eNodeB Name', 'gNodeB Name')
+                    if r.get(k) and str(r.get(k)).strip()}
+    own_prefixes.add(str(node_id))
 
     used_elsewhere = set()
     for row5g in _rows(ciq_wb, '5G Info'):
         bbu = str(row5g.get('BB/XMU', '')).strip()
         if 'XMU' in bbu.upper():
+            continue
+        cell = str(row5g.get('NRCellDU') or '')
+        if not any(cell.startswith(p) for p in own_prefixes):
             continue
         for pc in ('Port 1', 'Port 2', 'Port 3', 'Port 4'):
             v = row5g.get(pc)
@@ -814,7 +1008,12 @@ def check_antenna_uniqueness(node_id, ciq_wb):
             fam2 = re.sub(r'_\d+$', '', band2) if band2 else band2
             aws_pcs_pair = (fam1 != fam2) and any(f and ('AWS' in f or 'PCS' in f) for f in (fam1, fam2))
             rrus = {rru_by_cell.get(cell, ''), rru_by_cell.get(other, '')}
-            uses_4890_or_8843 = any('4890' in r or '8843' in r for r in rrus)
+            # Name the specific radio that triggers the exception rather than
+            # lumping them together - an engineer reading the verdict needs to
+            # know which radio is involved. If both appear across the pair,
+            # both are named.
+            trigger_models = sorted({m for m in ('4890', '8843') if any(m in r for r in rrus)})
+            uses_4890_or_8843 = bool(trigger_models)
             # Exception (confirmed): whenever a pair spans DIFFERENT AWS/PCS
             # bands and involves EITHER a 4890 or 8843 radio on either cell,
             # the two sectors must use DIFFERENT antenna ports. Same-band
@@ -823,8 +1022,10 @@ def check_antenna_uniqueness(node_id, ciq_wb):
             exception_applies = aws_pcs_pair and uses_4890_or_8843
 
             if exception_applies:
+                radio_label = '/'.join(trigger_models)
                 status = 'MATCH' if not same else 'MISMATCH'
-                verdict = 'Unique - 4890/8843 Radio' if not same else 'Not Unique - 4890/8843 Radio'
+                verdict = (f'Unique - {radio_label} Radio' if not same
+                           else f'Not Unique - {radio_label} Radio')
             else:
                 status = 'MATCH' if same else 'MISMATCH'
                 verdict = 'shared' if same else 'Not shared'
