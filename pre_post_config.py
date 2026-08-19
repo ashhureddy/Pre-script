@@ -64,8 +64,24 @@ def build_pre_post_config_text(node_logs, ciq_wb):
         model = boards[0] if boards else 'NOT FOUND'
         xmu_suffix = '' if not hw['xmus'] else (' + XMU' if len(hw['xmus']) == 1 else f" + {len(hw['xmus'])} XMU")
         ident = pe.extract_identity(parsed)
-        mmbb_suffix = '(MMBB)' if (ident.get('eNBId') and ident.get('gNBId')) else ''
-        pre_parts.append(f"{node_id}{mmbb_suffix}({model}{xmu_suffix})")
+        mmbb = bool(ident.get('eNBId') and ident.get('gNBId'))
+        secondary = None
+        if mmbb:
+            # Secondary name is derivable directly from this node's own
+            # 'st cell'/'st nrcell' output - its 5G cells are prefixed with
+            # the real gNodeB site name, distinct from the node's own eNodeB
+            # name (confirmed: FSL04452's own log lists 'FSNN094452_...'
+            # cells). Not a guess - same cell-name-prefix convention CIQ
+            # Mixed Mode Info itself uses for eNodeB/gNodeB Name pairing.
+            import pre_cell_inventory as pci
+            cells = pci.extract_pre_cells_for_node(text)
+            import re as _re
+            g_prefixes = {_re.match(r'^([A-Za-z0-9]+?)_', c).group(1) for c in cells
+                          if _re.match(r'^([A-Za-z0-9]+?)_', c) and not c.startswith(node_id)}
+            if g_prefixes:
+                secondary = sorted(g_prefixes)[0]
+        label = f"{node_id}(P)/{secondary}(S)(MMBB)" if secondary else (f"{node_id}(MMBB)" if mmbb else node_id)
+        pre_parts.append(f"{label}({model}{xmu_suffix})")
 
     # ---- Post: one per Mixed Mode Info row, Primary(P)/Secondary(S)(mode)(hw) ----
     post_parts = []
