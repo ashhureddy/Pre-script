@@ -222,30 +222,34 @@ def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None, nod
                          'note': '; '.join(mismatches) if mismatches else 'Confirmed.'})
 
     if g_name:
+        # 5G sectors sharing a radio with LTE (Co-Located Technology Cell)
+        # are already covered by the LTE row above; only standalone 5G
+        # sectors (own radio, not colocated) get their own row here.
+        colo_lte_5g = set()
+        for row in _rows(ciq_wb, 'eUtran Parameters'):
+            for c in str(row.get('Co-Located Technology Cell', '')).split(','):
+                if c.strip().startswith(g_name):
+                    colo_lte_5g.add(c.strip())
+        rilink = pe.extract_cell_to_rilink(log_text) if log_text else {}
+        if node_logs and moved_map:
+            rilink = pe.merge_moved_in_pre(rilink, node_logs, moved_map, pe.extract_cell_to_rilink)
         for row in _rows(ciq_wb, '5G Info'):
             cell = row.get('NRCellDU')
-            if not (cell and str(cell).startswith(g_name)):
+            if not (cell and str(cell).startswith(g_name)) or cell in colo_lte_5g:
                 continue
-            cfg = fiveg_config.get(cell)
-            pre_power = cfg['power'] if cfg else 'NOT AVAILABLE'
-            pre_txrx = f"{cfg['tx']}x{cfg['rx']}" if cfg else 'NOT AVAILABLE'
-            ciq_tx, ciq_rx = row.get('noOfTxAntennas'), row.get('noOfRxAntennas')
-            # CIQ's 5G Info tab has no TX/RX antenna count columns at all
-            # (confirmed - only 'configuredMaxTxPower' exists there), so this
-            # is a genuine data gap, not a lookup failure.
-            ciq_txrx = f"{ciq_tx}x{ciq_rx}" if ciq_tx and ciq_rx else 'NOT IN CIQ'
-            ciq_power = str(row.get('configuredMaxTxPower', '')).strip()
+            rbb = row.get('RBB Type')
+            ciq_txrx = pe.parse_rbb_txrx(rbb) or 'NOT FOUND'
+            ciq_ri = 'Double' if '_1D' in str(rbb or '') else ('Single' if '_1S' in str(rbb or '') else 'NOT FOUND')
+            pre_ri = rilink.get(cell, 'NA')
             mismatches = []
-            if pre_txrx != 'NOT AVAILABLE' and ciq_txrx != 'NOT IN CIQ' and pre_txrx != ciq_txrx:
-                mismatches.append(f'TX/RX Pre={pre_txrx} vs CIQ={ciq_txrx}')
-            if pre_power != 'NOT AVAILABLE' and ciq_power and pre_power != ciq_power:
-                mismatches.append(f'Power Pre={pre_power} vs CIQ={ciq_power}')
+            if pre_ri != 'NA' and ciq_ri != 'NOT FOUND' and pre_ri != ciq_ri:
+                mismatches.append(f'RILink Pre={pre_ri} vs CIQ={ciq_ri}')
             results.append({'rule': '#21/#22/#32', 'node': node_id, 'cell': cell,
                              'sec_id': 'NA', 'pre_sec_id': 'NA',
-                             'pre_txrx': pre_txrx, 'ciq_txrx': ciq_txrx,
-                             'pre_power': pre_power, 'ciq_power': ciq_power,
+                             'pre_txrx': pre_ri, 'ciq_txrx': f'{ciq_txrx} ({ciq_ri})',
+                             'pre_power': 'NA', 'ciq_power': str(row.get('configuredMaxTxPower', '')).strip(),
                              'status': 'MISMATCH' if mismatches else 'MATCH',
-                             'note': '; '.join(mismatches) if mismatches else 'Confirmed.'})
+                             'note': '; '.join(mismatches) if mismatches else 'RBB Type/RILink (standalone 5G radio).'})
     return results
 
 
