@@ -13,13 +13,23 @@ def extract_pre_cells_for_node(text):
     """Returns the set of cell names physically present on this node
     pre-scripting, from 'st cell' + 'st nrcell'. Presence in either table
     means the cell exists, regardless of lock state — mirrors QUICKIX's
-    original PDF-based behavior of accepting both UNLOCKED and LOCKED rows."""
+    original PDF-based behavior of accepting both UNLOCKED and LOCKED rows.
+
+    Excludes 'External...' MO rows - confirmed real bug: 'st cell' also
+    lists IDL/interworking NEIGHBOR references to cells on OTHER physical
+    nodes (e.g. 'ExternalENodeBFunction=...,ExternalEUtranCell=FSL02452_9B_1'
+    appearing on FSNN020452's own log), which are not locally-hosted cells
+    at all. Without this filter, the same handful of cells appeared to
+    exist on every node in an IDL-connected cluster simultaneously,
+    polluting the SOW's carrier ADD/DELETE/MOVE classification."""
     parsed = parse_log(text)
     cells = set()
     for cmd_substr in ('st cell', 'st nrcell'):
         entry = find_command(parsed, cmd_substr)
         for row in all_rows(entry):
             mo = row.get('MO', '')
+            if 'External' in mo:
+                continue
             if '=' in mo:
                 cells.add(mo.rsplit('=', 1)[-1])
     return cells
