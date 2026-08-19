@@ -21,8 +21,47 @@ def sheet_rows_as_dicts(ws):
 
 
 def load_ciq(path):
-    wb = openpyxl.load_workbook(path, data_only=True)
-    return wb
+    """Open a CIQ workbook. Falls back to a stripped copy when openpyxl
+    rejects the stylesheet.
+
+    Confirmed on a real CIQ: some files carry 6-digit RGB colour values (or
+    a bare '0') where the spec requires 8-digit aRGB, and openpyxl refuses to
+    open the whole workbook over it - 'Colors must be aRGB hex values'. This
+    tool only ever reads cell values, never formatting, so the fix is to pad
+    those values to valid aRGB in an in-memory copy and open that. The
+    original file is never modified."""
+    try:
+        return openpyxl.load_workbook(path, data_only=True)
+    except ValueError as exc:
+        if 'aRGB' not in str(exc) and 'stylesheet' not in str(exc):
+            raise
+        return _load_ciq_with_repaired_styles(path)
+
+
+def _load_ciq_with_repaired_styles(path):
+    import io
+    import re
+    import shutil
+    import zipfile
+
+    def _fix(match):
+        val = match.group(1)
+        if re.fullmatch(r'[0-9A-Fa-f]{8}', val):
+            return match.group(0)
+        if re.fullmatch(r'[0-9A-Fa-f]{6}', val):
+            return f'rgb="FF{val}"'
+        return 'rgb="FF000000"'
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(path) as src, zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == 'xl/styles.xml':
+                text = data.decode('utf-8', 'replace')
+                data = re.sub(r'rgb="([^"]*)"', _fix, text).encode('utf-8')
+            dst.writestr(item, data)
+    buf.seek(0)
+    return openpyxl.load_workbook(buf, data_only=True)
 
 
 def mixed_mode_rows(ciq_wb):
