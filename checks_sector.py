@@ -49,7 +49,7 @@ def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node
         if not (cell and e_name and str(cell).startswith(e_name)):
             continue
         ciq_rru = str(row.get('RRU type', '')).strip()
-        rfds_rrh = cell_details.get(cell, {}).get('rrh_and_secpos', 'NOT FOUND' if rfds_pages is not None else 'NOT CHECKED')
+        rfds_rrh = cell_details.get(cell, {}).get('rrh', 'NOT FOUND' if rfds_pages is not None else 'NOT CHECKED')
         pre_val = _pre_for(cell)
         rru_token = ciq_rru.split()[-1] if ciq_rru else ''
         rfds_match = bool(rru_token) and rru_token in rfds_rrh
@@ -69,7 +69,7 @@ def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node
         if not (cell and g_name and str(cell).startswith(g_name)):
             continue
         ciq_rru = str(row.get('RRU Type', '')).strip()
-        rfds_rrh = cell_details.get(cell, {}).get('rrh_and_secpos', 'NOT FOUND' if rfds_pages is not None else 'NOT CHECKED')
+        rfds_rrh = cell_details.get(cell, {}).get('rrh', 'NOT FOUND' if rfds_pages is not None else 'NOT CHECKED')
         pre_val = _pre_for(cell)
         rru_token = ciq_rru.split()[-1] if ciq_rru else ''
         rfds_match = bool(rru_token) and rru_token in rfds_rrh
@@ -708,7 +708,7 @@ def check_rfds_nrcelldu(node_id, ciq_wb, rfds_pages):
         ciq_local_id = str(row.get('cellLocalId', '')).strip()
         rfds_rcn = cell_details[cell]['rcn']
         ciq_rru = str(row.get('RRU Type', '')).strip()
-        rfds_rrh = cell_details[cell]['rrh_and_secpos']
+        rfds_rrh = cell_details[cell]['rrh']
 
         mismatches = []
         if ciq_local_id != rfds_rcn:
