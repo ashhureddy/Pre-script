@@ -13,6 +13,7 @@ import pre_post_config as ppc
 import port_conversion as pconv
 import scope_of_work_text as sowt
 import pdf_report as pr
+import warnings_text as wt
 
 
 def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
@@ -20,7 +21,8 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
     edp_ws = cer.load_edp(edp_path)
     _, edp_rows = cer.build_edp_index(edp_ws)
 
-    rfds_pages = rf.load_rfds_pages(open(rfds_path, 'rb').read()) if rfds_path else None
+    rfds_bytes = open(rfds_path, 'rb').read() if rfds_path else None
+    rfds_pages = rf.load_rfds_pages(rfds_bytes) if rfds_bytes else None
     site_details = cn.build_site_details(ciq_wb, rfds_pages)
 
     node_logs = {nid: (open(p).read() if p else None) for nid, p in node_log_paths.items()}
@@ -69,7 +71,7 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
         e_name = str(mm_row.get('eNodeB Name') or '').strip() if mm_row else node_id
         g_name = str(mm_row.get('gNodeB Name') or '').strip() if mm_row else None
 
-        node_checks = cn.run_node_checks(node_id, log_text, ciq_wb, edp_rows, rfds_pages)
+        node_checks = cn.run_node_checks(node_id, log_text, ciq_wb, edp_rows, rfds_pages, rfds_bytes)
         by_rule = {r['rule']: r for r in node_checks}
         if '#1' in by_rule:
             results['sw_version'].append(by_rule['#1'])
@@ -93,9 +95,7 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
         results['pci_4g'] += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
         results['pci_5g'] += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
         results['radio_type'] += cs.check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name)
-        results['sector_swap'] += cs.check_sector_swap_config(node_id, log_text, ciq_wb, e_name)
-        results['radio_sharing'] += cs.check_radio_sharing_pairs(node_id, ciq_wb)
-        results['port_uniqueness'] += cs.check_port_uniqueness(node_id, ciq_wb)
+        results['sector_swap'] += cs.check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name)
 
         gnb_row = None
         if mm_row is not None and g_name and 'gNB Info' in ciq_wb.sheetnames:
@@ -104,19 +104,40 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
                     gnb_row = r
                     break
         results['xmu_port_overlap'] += cs.check_xmu_port_overlap(node_id, enb_row, gnb_row, ciq_wb)
-        results['antenna'] += cs.check_antenna_uniqueness(node_id, ciq_wb)
         results['nbiot'] += cs.check_nbiot(node_id, log_text, ciq_wb)
 
-        nr_tac_rows = cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False)
+        nr_tac_rows = cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False, g_name)
         results['nr_tac'] += nr_tac_rows
         for r in nr_tac_rows:
             if r.get('pre_nrtac') and str(r['pre_nrtac']).isdigit() and len(str(r['pre_nrtac'])) == 7:
                 sa_note_nodes.append(node_id)
 
-        results['sef_fru'] += cs.check_sef_fru(node_id, ciq_wb)
+
+    # Site-wide checks: these compare cells against EVERY other cell in the
+    # CIQ (port uniqueness, radio sharing, antenna pairs, SEF/FRU), so they
+    # are inherently one-per-site, not one-per-node. Running them inside the
+    # per-node loop emitted every row once per node - a 3-node site showed
+    # each cell three times. They take a node_id purely as a row label, so
+    # the primary node is passed.
+    site_label = checked_nodes[0] if checked_nodes else ''
+    results['radio_sharing'] = cs.check_radio_sharing_pairs(site_label, ciq_wb)
+    results['port_uniqueness'] = cs.check_port_uniqueness(site_label, ciq_wb)
+    results['antenna'] = cs.check_antenna_uniqueness(site_label, ciq_wb)
+    results['sef_fru'] = cs.check_sef_fru(site_label, ciq_wb)
 
     results['sa_note'] = ', '.join(sorted(set(sa_note_nodes))) if sa_note_nodes else None
     results['unavailable_notes'] = unavailable_notes
+
+    # Warning text per blueprint column C/D specs, rendered beneath each table
+    results['warn_xmu'] = wt.xmu_warnings(results['xmu'])
+    results['warn_params_4g'] = wt.param_warnings(results['params_4g'])
+    results['warn_params_5g'] = wt.param_warnings(results['params_5g'])
+    results['warn_pci'] = wt.pci_warnings(results['pci_4g'] + results['pci_5g'])
+    results['warn_radio_type'] = wt.radio_type_warnings(results['radio_type'])
+    results['warn_sector_swap'] = wt.sector_swap_warnings(results['radio_type'])
+    results['warn_nr_tac'] = wt.nr_tac_warnings(results['nr_tac'], sa_note_nodes)
+    results['warn_air_radio'] = wt.air_radio_warnings(results['sef_fru']) + wt.air3283_warnings(ciq_wb)
+    results['warn_antenna'] = []  # RF-branch-count warning pending confirmation of the limit's basis
 
     pre_text, post_text = ppc.build_pre_post_config_text(node_logs, ciq_wb)
     scope_lines = sowt.scope_lines_to_readable_text(sowt.format_scope_of_work(sow, ciq_wb))
