@@ -1064,9 +1064,20 @@ def check_antenna_uniqueness(node_id, ciq_wb):
             same = a1 == a2
             band1, _ = band_label(cell)
             band2, _ = band_label(other)
-            fam1 = re.sub(r'_\d+$', '', band1) if band1 else band1
-            fam2 = re.sub(r'_\d+$', '', band2) if band2 else band2
-            aws_pcs_pair = (fam1 != fam2) and any(f and ('AWS' in f or 'PCS' in f) for f in (fam1, fam2))
+            # Band FAMILY only - AWS vs PCS - ignoring LTE/5G generation
+            # entirely. Strip both the trailing carrier number AND the '5G_'
+            # prefix, so 'PCS_1' (LTE) and '5G_PCS_1' both reduce to 'PCS'.
+            # Confirmed: same band across LTE/5G (PCS+PCS, AWS+AWS) is
+            # allowed to share; only a genuine AWS<->PCS crossing (in ANY
+            # tech combination - LTE/LTE, LTE/5G, 5G/5G) must be unique.
+            def _band_family(label):
+                if not label:
+                    return None
+                stripped = re.sub(r'_\d+$', '', label)
+                return re.sub(r'^5G_', '', stripped)
+            fam1 = _band_family(band1)
+            fam2 = _band_family(band2)
+            aws_pcs_pair = (fam1 != fam2) and fam1 in ('AWS', 'PCS') and fam2 in ('AWS', 'PCS')
             rrus = {rru_by_cell.get(cell, ''), rru_by_cell.get(other, '')}
             # Name the specific radio that triggers the exception rather than
             # lumping them together - an engineer reading the verdict needs to
