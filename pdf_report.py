@@ -80,7 +80,27 @@ def _verdict(status, ok='Match', bad='Mismatch', skip='N/A', expected='Planned')
     return {'MATCH': ok, 'MISMATCH': bad, 'EXPECTED': expected}.get(status, skip)
 
 
-def _table_if_rows(n, title, rows, columns, styles, story, widths=None):
+def _warning_block(warnings, styles, story):
+    """Renders warning text directly beneath its table, per the blueprint's
+    column C/D warning specs. Nothing renders when the list is empty."""
+    if not warnings:
+        return
+    style = ParagraphStyle('WarnText', parent=styles['Normal'], fontSize=7.8, leading=10,
+                            textColor=colors.HexColor('#8a1c1c'), leftIndent=2, spaceAfter=0.5)
+    story.append(Spacer(1, 2))
+    for w in warnings:
+        story.append(Paragraph(f'<b>Warning:</b> {w}', style))
+    story.append(Spacer(1, 2))
+
+
+# Columns whose blank value means "this cell is newly adding, so there is no
+# Pre value to compare" - the blueprint shows these as NA, not a dash.
+_NA_COLUMNS = {'Pre', 'Pre nRTAC', 'Pre TAC', 'sec_id [Pre]', 'TX/RX [PRE]',
+                'Power [pre]', 'Link [pre]', 'Link [post]', 'eNBId [PRE]', 'gNBId [PRE]',
+                'RI port'}
+
+
+def _table_if_rows(n, title, rows, columns, styles, story, widths=None, warnings=None):
     if not rows:
         return
     story.append(Spacer(1, 8))
@@ -89,14 +109,18 @@ def _table_if_rows(n, title, rows, columns, styles, story, widths=None):
     body, statuses = [], []
     for r in rows:
         line = []
-        for _, key in columns:
+        for label, key in columns:
             v = key(r) if callable(key) else r.get(key)
-            line.append('—' if v in (None, '') else str(v))
+            if v in (None, ''):
+                line.append('NA' if label in _NA_COLUMNS else '—')
+            else:
+                line.append(str(v))
         body.append(line)
         statuses.append(r['status'])
     if widths is None:
         widths = [7.0 * inch / len(columns)] * len(columns)
     story.append(_styled_table(header, body, statuses, widths))
+    _warning_block(warnings, styles, story)
     story.append(Spacer(1, 3))
 
 
@@ -218,9 +242,10 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     xmu_rows = results.get('xmu', [])
     _table_if_rows(7, 'XMU Validation', xmu_rows,
                     [('Node', 'node'), ('CIQ', lambda r: 'XMU present' if r.get('ciq_xmu') else 'No XMU'),
-                     ('RFDS', lambda r: 'XMU present' if r.get('rfds_xmu') else 'No XMU'),
+                     ('RFDS', lambda r: 'Not listed' if r.get('rfds_xmu') is None else ('XMU present' if r.get('rfds_xmu') else 'No XMU')),
                      ('Match', lambda r: _verdict(r['status']))],
-                    styles, story, [1.7 * inch, 1.7 * inch, 1.7 * inch, 1.9 * inch])
+                    styles, story, [1.7 * inch, 1.7 * inch, 1.7 * inch, 1.9 * inch],
+                    warnings=results.get('warn_xmu', []))
     story.append(PageBreak())
 
     # ---- 8) Cells verification ----
@@ -239,29 +264,35 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     _table_if_rows(10, 'Parameters Verification - 4G (Pre vs CIQ)', results.get('params_4g', []),
                     [('Cells', 'cell'), ('earfcndl', 'earfcndl'), ('earfcnul', 'earfcnul'),
                      ('dlChannelBandwidth', 'dlChannelBandwidth'), ('ulChannelBandwidth', 'ulChannelBandwidth')],
-                    styles, story, [1.7 * inch, 1.3 * inch, 1.3 * inch, 1.35 * inch, 1.35 * inch])
+                    styles, story, [1.7 * inch, 1.3 * inch, 1.3 * inch, 1.35 * inch, 1.35 * inch],
+                    warnings=results.get('warn_params_4g', []))
 
     # ---- 11) Parameters Verification - 5G ----
     _table_if_rows(11, 'Parameters Verification - 5G (Pre vs CIQ)', results.get('params_5g', []),
                     [('Cells', 'cell'), ('arfcnDL', 'arfcnDL'), ('arfcnUL', 'arfcnUL'),
                      ('bSChannelBwDL', 'bSChannelBwDL'), ('bSChannelBwUL', 'bSChannelBwUL'), ('ssbfrequency', 'ssbfrequency')],
-                    styles, story, [1.4 * inch, 1.1 * inch, 1.1 * inch, 1.1 * inch, 1.1 * inch, 1.2 * inch])
+                    styles, story, [1.4 * inch, 1.1 * inch, 1.1 * inch, 1.1 * inch, 1.1 * inch, 1.2 * inch],
+                    warnings=results.get('warn_params_5g', []))
     story.append(PageBreak())
 
     # ---- 12) PCI verification ----
     pci4g = results.get('pci_4g', [])
+    pci5g = results.get('pci_5g', [])
     if pci4g:
         story.append(_sec(12, 'PCI verification', styles))
-        body = [[r['cell'], r['group'], r['sub'], r['pci'], _verdict(r['status'])] for r in pci4g]
+        # Blueprint uses OK / Not OK here, not Match / Mismatch.
+        body = [[r['cell'], r['group'], r['sub'], r['pci'],
+                 _verdict(r['status'], ok='OK', bad='Not OK')] for r in pci4g]
         story.append(_styled_table(['Cells - 4G', 'PhysicalLayerCellIdGroup', 'physicalLayerSubCellId', 'PCI', 'Match'],
                                     body, [r['status'] for r in pci4g],
                                     [1.7 * inch, 1.7 * inch, 1.7 * inch, 0.9 * inch, 1.0 * inch]))
         story.append(Spacer(1, 3))
-    pci5g = results.get('pci_5g', [])
     if pci5g:
-        body = [[r['cell'], r['nrpci'], _verdict(r['status'])] for r in pci5g]
+        body = [[r['cell'], r['nrpci'], _verdict(r['status'], ok='OK', bad='Not OK')] for r in pci5g]
         story.append(_styled_table(['Cells - 5G', 'nRPCI', 'Match'], body, [r['status'] for r in pci5g],
                                     [3.5 * inch, 2.0 * inch, 1.5 * inch]))
+    if pci4g or pci5g:
+        _warning_block(results.get('warn_pci', []), styles, story)
         story.append(Spacer(1, 4))
 
     # ---- 13) Radio Type verification (+ sub-tables) ----
@@ -269,15 +300,23 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     _table_if_rows(13, 'Radio Type verification', radio_rows,
                     [('Cells', 'cell'), ('Pre', 'pre'), ('CIQ', 'ciq'), ('RFDS', 'rfds'),
                      ('Match', lambda r: _verdict(r['status'], bad='No Match'))],
-                    styles, story, [1.6 * inch, 1.7 * inch, 1.2 * inch, 1.6 * inch, 0.9 * inch])
+                    styles, story, [1.6 * inch, 1.7 * inch, 1.2 * inch, 1.6 * inch, 0.9 * inch],
+                    warnings=results.get('warn_radio_type', []))
 
     swap_rows = results.get('sector_swap', [])
     if swap_rows:
         story.append(Spacer(1, 8))
         story.append(_sec('13a', 'Sector/TX-RX/Power (Pre vs CIQ, best-effort)', styles))
-        body = [[r['cell'], r['sec_id'], r['pre_txrx'], r['ciq_txrx'], r['ciq_power']] for r in swap_rows]
-        story.append(_styled_table(['Cells', 'sec_id', 'TX/RX [Pre]', 'TX/RX [CIQ]', 'Power [CIQ]'], body,
-                                    ['NEUTRAL'] * len(body), [1.6 * inch, 1.0 * inch, 1.5 * inch, 1.5 * inch, 1.4 * inch]))
+        body = [[r['cell'], r.get('pre_sec_id', 'NA'), r['sec_id'], r['pre_txrx'], r['ciq_txrx'],
+                 r.get('pre_power', 'NA'), r['ciq_power'],
+                 r.get('pre_link', 'NA'), r.get('ciq_link', 'NA')] for r in swap_rows]
+        story.append(_styled_table(
+            ['Cells', 'sec_id [Pre]', 'sec_id [Post]', 'TX/RX [PRE]', 'TX/RX [CIQ]',
+             'Power [pre]', 'Power [post]', 'Link [pre]', 'Link [post]'], body,
+            ['NEUTRAL'] * len(body),
+            [1.25 * inch, 0.72 * inch, 0.72 * inch, 0.72 * inch, 0.72 * inch,
+             0.72 * inch, 0.75 * inch, 0.7 * inch, 0.7 * inch]))
+        _warning_block(results.get('warn_sector_swap', []), styles, story)
         story.append(Spacer(1, 3))
 
     share_rows = results.get('radio_sharing', [])
@@ -292,9 +331,9 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     # ---- 14) RI port Verification ----
     port_rows = results.get('port_uniqueness', [])
     _table_if_rows(14, 'RI port Verification', port_rows,
-                    [('Cells', 'cell'), ('BBU/XMU', 'bbu'), ('Port', 'port'),
+                    [('Cells', 'cell'), ('RI port', 'port'), ('RI port', lambda r: r.get('port2') or 'NA'),
                      ('Port Uniqueness', lambda r: 'Unique' if r['status'] == 'MATCH' else 'Not Unique')],
-                    styles, story, [2.2 * inch, 1.6 * inch, 1.2 * inch, 2.0 * inch])
+                    styles, story, [2.4 * inch, 1.3 * inch, 1.3 * inch, 2.0 * inch])
     xmu_overlap = results.get('xmu_port_overlap', [])
     if xmu_overlap:
         body = [[r['node'], r['du_type'], r['xmu'], r['xmu_ports'],
@@ -306,9 +345,11 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
 
     # ---- 15) Antenna Uniqueness ----
     _table_if_rows(15, 'Antenna Uniqueness', results.get('antenna', []),
-                    [('Cells', 'cell'), ('AUG/AU/ASU (1)', 'aug_au_asu_1'), ('AUG/AU/ASU (2)', 'aug_au_asu_2'),
-                     ('Match', 'verdict')],
-                    styles, story, [2.6 * inch, 1.5 * inch, 1.5 * inch, 1.4 * inch])
+                    [('Cells', 'cell'),
+                     ('AUG/AU/ASU (1)', 'aug_au_asu_1'), ('AUG/AU/ASU (2)', 'aug_au_asu_2'),
+                     ('Port Uniqueness', 'verdict')],
+                    styles, story, [2.6 * inch, 1.4 * inch, 1.4 * inch, 1.6 * inch],
+                    warnings=results.get('warn_antenna', []))
     story.append(PageBreak())
 
     # ---- 16) NBIoT ----
@@ -321,7 +362,8 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     _table_if_rows(17, 'NR TAC Verification', results.get('nr_tac', []),
                     [('Cell', 'cell'), ('Pre nRTAC', 'pre_nrtac'), ('CIQ nRTAC', 'ciq_nrtac'),
                      ('Match', lambda r: _verdict(r['status']))],
-                    styles, story, [2.5 * inch, 1.7 * inch, 1.7 * inch, 1.1 * inch])
+                    styles, story, [2.5 * inch, 1.7 * inch, 1.7 * inch, 1.1 * inch],
+                    warnings=results.get('warn_nr_tac', []))
 
     # ---- 18) Pre-existing node TAC ----
     tac_rows = results.get('tac', [])
@@ -336,7 +378,8 @@ def build_report(output_path, site_details, pre_config_text, post_config_text, s
     # ---- 19) AIR RADIO CHECKS ----
     _table_if_rows(19, 'AIR RADIO CHECKS', results.get('sef_fru', []),
                     [('Cell', 'cell'), ('RRU Type', 'rru_type'), ('SEF', 'sef'), ('RRU FieldReplaceableUnit', 'fru')],
-                    styles, story, [1.9 * inch, 1.7 * inch, 1.9 * inch, 1.5 * inch])
+                    styles, story, [1.9 * inch, 1.7 * inch, 1.9 * inch, 1.5 * inch],
+                    warnings=results.get('warn_air_radio', []))
 
     if results.get('unavailable_notes'):
         story.append(Spacer(1, 10))
