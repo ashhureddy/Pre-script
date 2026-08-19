@@ -23,11 +23,15 @@ _SW_VERSION_RE = re.compile(
 # output — 'true'/'false' (nRTACInSib1Enabled) is the one field guaranteed
 # present, so it's used as a sync point; the optional non-capturing group
 # transparently absorbs ssbDurationAutoSelected whether or not it's blank.
-_NR_CELLDU_RE = re.compile(
-    r'NRCellDU=(?P<cell>\S+)\s+(?P<cellLocalId>\S+)\s+(?P<nRTAC>\S+)\s+(?:true|false)\s+'
-    r'(?P<ssbDuration>\S+)\s+(?:\S+\s+)?(?P<ssbFrequency>\S+)',
-    re.I
-)
+# The 'nrsectorcarrier|nrcelldu ...' combo command's column SET varies between
+# nodes - some include nRTACInSib1Enabled, some don't (confirmed on one site:
+# HXL04147 has it, HXIN090147F doesn't). A positional regex that hardcodes the
+# boolean silently misaligns every later field on the other variant, which
+# showed up as ssbOffset ('0') being reported as ssbFrequency. So the header
+# line is parsed to find each attribute's index, and values are read by name.
+# Blank AutoSelected fields emit no token at all, so a plain split() is used
+# and short rows are read defensively rather than assuming full width.
+_NR_CELLDU_LINE_RE = re.compile(r'^NRCellDU=(\S+)\s+(.*)$', re.M)
 
 # Same root cause as _NR_CELLDU_RE: moshell sizes each column to the widest
 # value across ALL rows in the result (here, mixed EUtranCellFDD=... and
@@ -92,6 +96,80 @@ def extract_cell_to_sef(text):
     return {cell: sc_to_sef.get(sc) for cell, sc in cell_to_sc.items() if sc_to_sef.get(sc)}
 
 
+def extract_cell_to_radio(text):
+    """Cell -> Pre-side radio model, resolved through the full MO chain:
+
+        EUtranCellFDD -> SectorCarrier   ('hget SectorCarrier=|SectorEquipmentFunction ...')
+        SectorCarrier -> RfBranch refs   ('hget sector rfbranch')
+        RfBranch      -> FieldReplaceableUnit=RRU-N  ('hget rfbranch auport|rfportref')
+        RRU-N         -> product name    ('hget FieldReplaceableUnit product')
+
+    An earlier version stopped at the SectorEquipmentFunction number because
+    no SEF->RRU link was confirmed; the link does exist, just via RfBranch
+    rather than SEF, so the Radio Type table showed '(SEF ...=2)' where the
+    engineer needed the actual radio. Returns {cell: 'RRUS 4449'} style
+    short model names, or {} when any command in the chain is absent."""
+    if not text:
+        return {}
+
+    fru_product = {}
+    for m in re.finditer(r'^FieldReplaceableUnit=(\S+)\s+(\S+(?:\s+\S+)*?)\s{2,}',
+                          get_command_block(text, 'FieldReplaceableUnit product') or '', re.M):
+        fru_product[m.group(1)] = m.group(2).strip()
+
+    branch_to_fru = {}
+    for m in re.finditer(r'^(AntennaUnitGroup=\d+,RfBranch=\d+)\s+.*?FieldReplaceableUnit=([^,\s]+)',
+                          get_command_block(text, 'rfbranch auport|rfportref') or '', re.M):
+        branch_to_fru[m.group(1)] = m.group(2)
+
+    carrier_to_radio = {}
+    for m in re.finditer(r'^(SectorCarrier=\S+)\s+(.*)$',
+                          get_command_block(text, 'sector rfbranch') or '', re.M):
+        refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
+        models = {fru_product.get(branch_to_fru[r]) for r in refs if r in branch_to_fru}
+        models.discard(None)
+        if models:
+            carrier_to_radio[m.group(1)] = sorted(models)[0]
+
+    # Cell -> SectorCarrier, from the reservedBy cross-reference block
+    result = {}
+    block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction')
+    for m in re.finditer(r'^(SectorCarrier=\S+)\s+(.*)$', block or '', re.M):
+        carrier, rest = m.group(1), m.group(2)
+        radio = carrier_to_radio.get(carrier)
+        if not radio:
+            continue
+        for cell in re.findall(r'EUtranCellFDD=(\S+)', rest):
+            result[cell] = radio
+        for cell in re.findall(r'NRCellDU=(\S+)', rest):
+            result[cell] = radio
+    return result
+
+
+def _short_radio_name(product):
+    """Normalise a Pre productName to the CIQ's 'RRUS <model>' shape so the
+    two columns are visually comparable.
+
+        'Radio 4449 B5 B12A KRC 161 752/1 ...' -> 'RRUS 4449'
+        'Radio 4890HP 48B2/B25 48B66 M01 ...'  -> 'RRUS 4890'
+        'RRUS 32 B30 KRC 161 423/1 ...'        -> 'RRUS 32'
+        'Radio 6472 B77G ...'                  -> 'RRUS AIR6472'
+
+    Takes the token immediately after the family word (Radio/RRUS/AIR)
+    rather than the first 4-digit run anywhere in the string - the latter
+    matched serial/part numbers on models like 'RRUS 32' (2 digits) and
+    missed suffixed models like '4890HP'."""
+    if not product:
+        return None
+    m = re.match(r'\s*(?:Radio|RRUS|AIR)\s+([A-Za-z]*\d+)', product, re.I)
+    if not m:
+        return product.split()[0]
+    model = re.match(r'([A-Za-z]*\d+)', m.group(1)).group(1)
+    if re.match(r'^(?:64|66|84)\d{2}$', model):
+        return f'RRUS AIR{model}'
+    return f'RRUS {model}'
+
+
 def node_id_from_log(text):
     """The node ID as it appears at the moshell prompt, e.g. 'SCL05020'."""
     m = re.search(r'^([A-Za-z0-9_]+)>\s', text, re.M)
@@ -147,7 +225,14 @@ def extract_hardware(parsed):
             xmus.append(item)
         elif 'RRU-' in mo.upper() or item['model'].upper().startswith('RADIO'):
             radios.append(item)
-        elif item['model'].upper().startswith('BASEBAND') and 'XMU' not in mo.upper():
+        elif (item['model'].upper().startswith('BASEBAND')
+              or item['model'].upper().startswith('RAN PROCESSOR')) and 'XMU' not in mo.upper():
+            # 'RAN Processor NNNN' is the same class of board as 'Baseband
+            # NNNN' - Ericsson uses both names for the DU (confirmed: a real
+            # node reports 'RAN Processor 6651', and the RFDS Non-RF
+            # Inventory uses 'RAN PROCESSOR 6672' for the same field).
+            # Matching only 'Baseband' left that node with no board at all,
+            # which surfaced as 'NOT FOUND' in the Pre/Post configuration.
             boards.append(item)
         else:
             other.append(item)
@@ -179,17 +264,57 @@ def extract_tac(text):
     return result
 
 
-def extract_nr_tac(text):
-    """Rule #7/#8: NR TAC per 5G cell. Takes the raw log TEXT (not a parsed
-    table — see _NR_CELLDU_RE's comment for why this command needs regex
-    instead of the generic fixed-width parser)."""
-    block = get_command_block(text, 'nrsectorcarrier|nrcelldu')
-    result = {}
+def _parse_nrcell_block(block, mo_prefix, header_key='cellLocalId'):
+    """Parse NRCellCU=/NRCellDU= rows into {cell: {attr: value}}, reading
+    each attribute's CHARACTER POSITION from the block's own header line.
+
+    Two independent quirks make simpler approaches wrong here:
+      - The column set varies between nodes (one node's NRCellDU table has
+        nRTACInSib1Enabled, another's doesn't), so a positional regex with a
+        hardcoded boolean misaligns everything after it.
+      - Blank trailing/optional fields emit NO token at all, so splitting the
+        row and zipping against the header list also misaligns - confirmed:
+        a 9-attribute header with only 6 values mapped ssbFrequency onto
+        ssbOffset's '0' instead of the real 395070.
+    Slicing by the header's own column offsets handles both, since moshell
+    pads values to their column start."""
     if not block:
-        return result
-    for m in _NR_CELLDU_RE.finditer(block):
-        result[m.group('cell')] = m.group('nRTAC')
+        return {}
+    result = {}
+    spans = None
+    row_re = re.compile(r'^' + mo_prefix + r'=(\S+)')
+    for line in block.splitlines():
+        stripped = line.rstrip()
+        if stripped.startswith('MO ') and header_key in stripped:
+            spans = [(m.group(0), m.start()) for m in re.finditer(r'\S+', stripped)][1:]
+            continue
+        if not spans:
+            continue
+        m = row_re.match(stripped)
+        if not m:
+            continue
+        row = {}
+        for i, (attr, start) in enumerate(spans):
+            end = spans[i + 1][1] if i + 1 < len(spans) else len(stripped)
+            val = stripped[start:end].strip() if start < len(stripped) else ''
+            if val:
+                row[attr] = val
+        result[m.group(1)] = row
     return result
+
+
+def extract_nr_tac(text):
+    """Rule #7/#8: NR TAC per 5G cell.
+
+    Sourced from the 'hget ^NRCell|syncsignal ...' command's NRCellCU table,
+    which is a clean three-column block (cellLocalId/nCI/nRTAC) present on
+    every node checked - rather than the 'nrsectorcarrier|nrcelldu' combo
+    command, whose column set varies by node. A blank nRTAC there is a real
+    value (NSA cells report nothing), so it maps to None, not a parse
+    failure."""
+    block = get_command_block(text, 'NRCell|syncsignal sectorCarrierRef')
+    rows = _parse_nrcell_block(block, 'NRCellCU')
+    return {cell: vals['nRTAC'] for cell, vals in rows.items() if vals.get('nRTAC')}
 
 
 def extract_lte_sector_params(text):
@@ -212,24 +337,30 @@ def extract_5g_sector_params(parsed, text):
     ssbFrequency/cellLocalId/nRTAC (from NRCellDU, needs regex -- see
     _NR_CELLDU_RE). Returns {cell_name: {field: value}}."""
     result = {}
-    carrier_entry = find_command(parsed, 'arfcn|bSChannelBw|ssbfrequency')
-    for row in all_rows(carrier_entry, mo_prefix='NRSectorCarrier'):
-        cell = row['MO'].split('=', 1)[-1]
+    # NRSectorCarrier table: parsed by header character position for the same
+    # reason as _parse_nrcell_block - the generic fixed-width table parser
+    # merges these four columns into one field, because this header separates
+    # them with single spaces where that parser expects 2+ (confirmed: it
+    # returned a single 'arfcnDL arfcnUL bSChannelBwDL bSChannelBwUL' key).
+    carrier_block = get_command_block(text, 'NRSector arfcn')
+    for cell, vals in _parse_nrcell_block(carrier_block, 'NRSectorCarrier', 'arfcnDL').items():
         result.setdefault(cell, {}).update({
-            'arfcnDL': row.get('arfcnDL'),
-            'arfcnUL': row.get('arfcnUL'),
-            'bSChannelBwDL': row.get('bSChannelBwDL'),
-            'bSChannelBwUL': row.get('bSChannelBwUL'),
+            'arfcnDL': vals.get('arfcnDL'),
+            'arfcnUL': vals.get('arfcnUL'),
+            'bSChannelBwDL': vals.get('bSChannelBwDL'),
+            'bSChannelBwUL': vals.get('bSChannelBwUL'),
         })
     block = get_command_block(text, 'nrsectorcarrier|nrcelldu')
-    if block:
-        for m in _NR_CELLDU_RE.finditer(block):
-            cell = m.group('cell')
-            result.setdefault(cell, {}).update({
-                'ssbFrequency': m.group('ssbFrequency'),
-                'cellLocalId': m.group('cellLocalId'),
-                'nRTAC': m.group('nRTAC'),
-            })
+    du_rows = _parse_nrcell_block(block, 'NRCellDU')
+    for cell, vals in du_rows.items():
+        result.setdefault(cell, {}).update({
+            'ssbFrequency': vals.get('ssbFrequency'),
+            'cellLocalId': vals.get('cellLocalId'),
+        })
+    # nRTAC comes from the cleaner NRCellCU table (see extract_nr_tac)
+    nr_tacs = extract_nr_tac(text)
+    for cell, tac in nr_tacs.items():
+        result.setdefault(cell, {})['nRTAC'] = tac
     return result
 
 
