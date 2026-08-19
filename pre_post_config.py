@@ -44,6 +44,15 @@ def build_pre_post_config_text(node_logs, ciq_wb):
     mm_rows = cer.mixed_mode_rows(ciq_wb)
 
     # ---- Pre: every node with a kget-all log, flat list ----
+    # A node whose OWN log reports both eNBId and gNBId (via
+    # ENodeBFunction/GNBDUFunction) is self-contained MMBB - no separate
+    # secondary physical unit exists to show as '(S)', so it's labelled
+    # '(MMBB)' directly rather than left unmarked. Confirmed on a real
+    # rehome site: FSL02452 and FSL04452 each report both identities on
+    # their own single log, while a third log (FSNN020452) reports a
+    # gNBId that matches neither of them - so cross-node secondary pairing
+    # for deleted/out-of-CIQ nodes is deliberately NOT attempted here; it
+    # would be a guess with no CIQ/EDP data to confirm it against.
     pre_parts = []
     for node_id, text in node_logs.items():
         if not text:
@@ -54,7 +63,9 @@ def build_pre_post_config_text(node_logs, ciq_wb):
         boards = [pe.model_token(b['model']) for b in hw['boards']]
         model = boards[0] if boards else 'NOT FOUND'
         xmu_suffix = '' if not hw['xmus'] else (' + XMU' if len(hw['xmus']) == 1 else f" + {len(hw['xmus'])} XMU")
-        pre_parts.append(f"{node_id}({model}{xmu_suffix})")
+        ident = pe.extract_identity(parsed)
+        mmbb_suffix = '(MMBB)' if (ident.get('eNBId') and ident.get('gNBId')) else ''
+        pre_parts.append(f"{node_id}{mmbb_suffix}({model}{xmu_suffix})")
 
     # ---- Post: one per Mixed Mode Info row, Primary(P)/Secondary(S)(mode)(hw) ----
     post_parts = []
