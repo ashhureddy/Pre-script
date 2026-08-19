@@ -4,6 +4,7 @@ following the Blueprint's 'Pre checks validation format' sheet section-by-
 section (see pdf_report.py for the exact numbering).
 """
 import ciq_edp_reader as cer
+import pre_extract as pe
 import checks_node as cn
 import checks_sector as cs
 import rfds_extract as rf
@@ -37,6 +38,12 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
 
     deleted_nodes = {str(n).strip() for n in sow.get('deleted_nodes', [])}
     checked_nodes = [n for n in all_nodes if n not in deleted_nodes]
+
+    # Full site-wide map: {target_cell: (source_node, source_cell)}. Passed
+    # to every check needing Pre lookup by cell name - a moved-in cell's
+    # real Pre history sits on its source node's own log (confirmed on a
+    # real rehome), not the target node's, which has never seen the cell.
+    moved_map = pe.build_moved_cell_source_map(ciq_wb)
 
     retuned_cells = set()
     for r in (cer.sheet_rows_as_dicts(ciq_wb['Sector Del_Movement']) if 'Sector Del_Movement' in ciq_wb.sheetnames else []):
@@ -87,15 +94,15 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
             results['tac'].append(by_rule['#16'])
 
         results['cells_vs_rfds'] += cs.check_cells_vs_rfds(node_id, ciq_wb, rfds_pages, e_name, g_name)
-        results['cell_id_vs_rfds'] += cs.check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name)
-        results['params_4g'] += cs.check_rf_params_4g(node_id, log_text, ciq_wb, has_pre, retuned_cells)
+        results['cell_id_vs_rfds'] += cs.check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node_logs, moved_map)
+        results['params_4g'] += cs.check_rf_params_4g(node_id, log_text, ciq_wb, has_pre, retuned_cells, node_logs, moved_map)
         import log_parser as lp
         parsed = lp.parse_log(log_text) if log_text else []
-        results['params_5g'] += cs.check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre, retuned_cells)
+        results['params_5g'] += cs.check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre, retuned_cells, node_logs, moved_map)
         results['pci_4g'] += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
         results['pci_5g'] += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
-        results['radio_type'] += cs.check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name)
-        results['sector_swap'] += cs.check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name)
+        results['radio_type'] += cs.check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node_logs, moved_map)
+        results['sector_swap'] += cs.check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name, node_logs, moved_map)
 
         gnb_row = None
         if mm_row is not None and g_name and 'gNB Info' in ciq_wb.sheetnames:
@@ -106,7 +113,7 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
         results['xmu_port_overlap'] += cs.check_xmu_port_overlap(node_id, enb_row, gnb_row, ciq_wb)
         results['nbiot'] += cs.check_nbiot(node_id, log_text, ciq_wb)
 
-        nr_tac_rows = cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False, g_name)
+        nr_tac_rows = cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False, g_name, node_logs, moved_map)
         results['nr_tac'] += nr_tac_rows
         for r in nr_tac_rows:
             if r.get('pre_nrtac') and str(r['pre_nrtac']).isdigit() and len(str(r['pre_nrtac'])) == 7:
