@@ -10,6 +10,8 @@ missing").
 """
 import re
 
+import ciq_edp_reader as cer
+
 from log_parser import find_command, all_rows, get_command_block
 
 _SW_VERSION_RE = re.compile(
@@ -168,6 +170,65 @@ def _short_radio_name(product):
     if re.match(r'^(?:64|66|84)\d{2}$', model):
         return f'RRUS AIR{model}'
     return f'RRUS {model}'
+
+
+def build_moved_cell_source_map(ciq_wb):
+    """From Sector Del_Movement: {target_cell: (source_node, source_cell)}
+    for every row that has both a Source and a Target (i.e. a real move,
+    not a delete). Cells moving in from another physical node keep their
+    real Pre-side history on the SOURCE node's kget-all log under the
+    SOURCE cell name - the target node's own log has never seen them, since
+    they haven't physically moved yet at Pre-scripting time (confirmed on a
+    real rehome: FSL00452's own log has no 'FSL00452_2B_1' at all; the real
+    Pre data sits on FSL02452's log as 'FSL02452_2B_1'). Every check that
+    looks up Pre data by cell name needs this remap or it reports NA for
+    every moved-in cell despite real data being available."""
+    result = {}
+    for r in cer.sheet_rows_as_dicts(ciq_wb['Sector Del_Movement']) if 'Sector Del_Movement' in ciq_wb.sheetnames else []:
+        src_node, src_sector = r.get('Source Node name'), r.get('Source Sector')
+        tgt_node, tgt_sector = r.get('Target Node name'), r.get('Target Sector')
+        if src_node and src_sector and tgt_node and tgt_sector and str(tgt_node).strip().upper() != 'DELETE':
+            result[str(tgt_sector).strip()] = (str(src_node).strip(), str(src_sector).strip())
+    return result
+
+
+def remap_pre_dict(source_dict, cell_rename_map):
+    """cell_rename_map: {source_cell: target_cell}. Returns a new dict with
+    keys renamed to the target side, for merging a source node's Pre
+    extraction into a target node's results."""
+    return {cell_rename_map[c]: v for c, v in source_dict.items() if c in cell_rename_map}
+
+
+def merge_moved_in_pre(base_dict, node_logs, moved_map, extract_fn):
+    """base_dict: {cell: value} already extracted from this node's own log.
+    moved_map: {target_cell: (source_node, source_cell)} - typically the
+    subset from build_moved_cell_source_map() relevant to this node (or the
+    full map; entries not matching base_dict's node are simply not filled,
+    since target_cell won't be looked up by an unrelated node's checks).
+    node_logs: {node_id: text}. extract_fn: text -> {cell: value}, e.g.
+    extract_lte_sector_params, extract_nr_tac, extract_cell_to_radio.
+
+    For each target cell NOT already in base_dict, pulls the value from its
+    source node's own log (extracted fresh via the same extract_fn) under
+    the source cell name, and inserts it under the target name. This is
+    what makes a moved-in cell show real Pre data instead of NA - the
+    target node's own log has never seen it; the real history is on the
+    source node's log (confirmed on a real rehome)."""
+    merged = dict(base_dict)
+    by_source = {}
+    for target_cell, (source_node, source_cell) in moved_map.items():
+        if target_cell in merged:
+            continue
+        by_source.setdefault(source_node, {})[source_cell] = target_cell
+    for source_node, rename in by_source.items():
+        source_text = node_logs.get(source_node)
+        if not source_text:
+            continue
+        source_vals = extract_fn(source_text)
+        for source_cell, target_cell in rename.items():
+            if source_cell in source_vals:
+                merged[target_cell] = source_vals[source_cell]
+    return merged
 
 
 def node_id_from_log(text):
@@ -362,6 +423,15 @@ def extract_5g_sector_params(parsed, text):
     for cell, tac in nr_tacs.items():
         result.setdefault(cell, {})['nRTAC'] = tac
     return result
+
+
+def extract_5g_sector_params_from_text(text):
+    """Text-only adapter for extract_5g_sector_params, so it fits
+    merge_moved_in_pre's extract_fn(text) -> dict interface (that function
+    normally also needs a pre-parsed `parsed` from the caller's own log,
+    but a source node's log needs its own separate parse anyway)."""
+    import log_parser as lp
+    return extract_5g_sector_params(lp.parse_log(text), text)
 
 
 def extract_nbiot_cells(parsed):
