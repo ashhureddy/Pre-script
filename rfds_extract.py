@@ -276,6 +276,18 @@ def extract_xmu_by_node(rfds_bytes):
     return {n: True for n in nodes}
 
 
+def _has_single_equipment_record(pages):
+    """True if 'Non RF Inventory Details (Final)' has exactly one equipment
+    row (one 'BBU'/'RAN PROCESSOR'/model mention) - used to justify grouping
+    every node prefix on the page as one CommonName pair when the table
+    structure has fully collapsed (see check_nodes_present_together)."""
+    text = find_pages_by_heading(pages, 'Non RF Inventory Details (Final)')
+    if not text:
+        return None
+    records = len(re.findall(r'\bBBU\s+ERICSSON\b', text, re.I))
+    return records == 1
+
+
 def extract_common_name_groups(rfds_bytes):
     """Returns the list of CommonName node-groups from 'Non RF Inventory
     Details (Final)', e.g. [['HXL00147'], ['HXL04147','HXIN010147']].
@@ -340,6 +352,22 @@ def check_nodes_present_together(pages, node_a, node_b, rfds_bytes=None):
                 if a in upper and b in upper:
                     return True
             return False
+        # Table extraction found no usable rows at all - confirmed real case:
+        # a 33-cell LinkedCells list collapsed the entire equipment row into
+        # one merged cell, and the CommonName value itself wraps mid-digit
+        # across an interleaved 'BBU ERICSSON ...' line ('FSNN0904' + '52'),
+        # which defeats whitespace-collapse too. Fall back to a narrower but
+        # defensible signal: if the page has exactly ONE equipment record
+        # (one 'BBU'/model mention), every distinct node prefix on it
+        # necessarily belongs to that one record.
+        single_record = _has_single_equipment_record(pages)
+        if single_record is True:
+            prefixes = extract_non_rf_inventory_cells(pages)
+            node_prefixes = {re.match(r'^([A-Za-z0-9]+?)_', c).group(1) for c in prefixes
+                              if re.match(r'^([A-Za-z0-9]+?)_', c)}
+            a, b = str(node_a).strip().upper(), str(node_b).strip().upper()
+            if a in {p.upper() for p in node_prefixes} and b in {p.upper() for p in node_prefixes}:
+                return True
 
     heading = 'Non RF Inventory Details (Final)'
     text = find_pages_by_heading(pages, heading)
