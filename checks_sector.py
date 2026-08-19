@@ -19,7 +19,7 @@ def _rows(ciq_wb, sheet_name):
     return cer.sheet_rows_as_dicts(ciq_wb[sheet_name]) if sheet_name in ciq_wb.sheetnames else []
 
 
-def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name):
+def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node_logs=None, moved_map=None):
     """Blueprint section 13 'Radio Type verification' (#6). Cells | Pre |
     CIQ | RFDS | Match.
 
@@ -37,6 +37,8 @@ def check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name):
         import rfds_extract as rf
         cell_details = rf.extract_cell_details(rfds_pages)
     cell_to_radio = pe.extract_cell_to_radio(log_text) if log_text else {}
+    if node_logs and moved_map:
+        cell_to_radio = pe.merge_moved_in_pre(cell_to_radio, node_logs, moved_map, pe.extract_cell_to_radio)
 
     def _pre_for(cell):
         product = cell_to_radio.get(cell)
@@ -112,7 +114,63 @@ def check_radio_sharing_pairs(node_id, ciq_wb):
     return results
 
 
-def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None):
+def _extract_sector_config(log_text):
+    """LTE cell -> {sec_id, tx, rx, power} from the single
+    '^EUtranCell.DD|Sector ^earfcn|...' hget block - see
+    check_sector_swap_config's docstring for the exact command/table
+    structure. Returns {} if the command isn't present in this log."""
+    if not log_text:
+        return {}
+    import log_parser as lp
+    block = lp.get_command_block(log_text, '^EUtranCell.DD|Sector ^earfcn')
+    if not block:
+        return {}
+    tables = lp.parse_tables(block)
+
+    sc_power = {}
+    for t in tables:
+        if len(t['header']) > 1 and 'configuredMaxTxPower' in t['header'][1]:
+            for row in t['rows']:
+                mo = row.get('MO', '')
+                if mo.startswith('SectorCarrier='):
+                    vals = row.get('configuredMaxTxPower noOfRxAntennas noOfTxAntennas', '').split()
+                    if len(vals) >= 3:
+                        sc_power[mo.split('=', 1)[1]] = vals
+
+    cell_to_sec_id = {}
+    for m in re.finditer(r'^EUtranCellFDD=(\S+)\s.*?\[\d+\]\s*=\s*SectorCarrier=(\S+)', block, re.M):
+        cell_to_sec_id[m.group(1)] = m.group(2)
+
+    result = {}
+    for cell, sec_id in cell_to_sec_id.items():
+        pv = sc_power.get(sec_id)
+        if pv:
+            result[cell] = {'sec_id': sec_id, 'power': pv[0], 'tx': pv[2], 'rx': pv[1]}
+    return result
+
+
+def _extract_sector_config_5g(log_text):
+    """NRSectorCarrier -> {power, tx, rx} from the same hget block, 5G side."""
+    if not log_text:
+        return {}
+    import log_parser as lp
+    block = lp.get_command_block(log_text, '^EUtranCell.DD|Sector ^earfcn')
+    if not block:
+        return {}
+    result = {}
+    for t in lp.parse_tables(block):
+        if len(t['header']) > 1 and 'configuredMaxTxPower' in t['header'][1]:
+            for row in t['rows']:
+                mo = row.get('MO', '')
+                if mo.startswith('NRSectorCarrier='):
+                    cell = mo.split('=', 1)[1]
+                    vals = row.get('configuredMaxTxPower noOfRxAntennas noOfTxAntennas', '').split()
+                    if len(vals) >= 3:
+                        result[cell] = {'power': vals[0], 'tx': vals[2], 'rx': vals[1]}
+    return result
+
+
+def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None, node_logs=None, moved_map=None):
     """Blueprint section 13, rules #21/#22/#32 - sector ID, TX/RX antenna
     count, and configured power, Pre vs CIQ (per cell).
 
@@ -124,44 +182,27 @@ def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None):
     and TWO 'configuredMaxTxPower|noOfRxAntennas|noOfTxAntennas' tables, one
     keyed by SectorCarrier=<sec_id> (LTE) and one by NRSectorCarrier=<cell>
     (5G). 'Link' (DATA1/DATA2 port designation) has no confirmed CIQ column
-    and is NOT AVAILABLE rather than guessed."""
+    and is NOT AVAILABLE rather than guessed.
+
+    node_logs/moved_map: see check_rf_params_4g's docstring - a moved-in
+    cell's real sec_id/TX-RX/Power lives on its SOURCE node's log."""
     if not log_text:
         return []
-    import log_parser as lp
-    parsed = lp.parse_log(log_text)
-    block = lp.get_command_block(log_text, '^EUtranCell.DD|Sector ^earfcn')
-    tables = lp.parse_tables(block) if block else []
-
-    # LTE: SectorCarrier=<sec_id> -> power/tx/rx
-    sc_power = {}
-    for t in tables:
-        if len(t['header']) > 1 and 'configuredMaxTxPower' in t['header'][1]:
-            for row in t['rows']:
-                mo = row.get('MO', '')
-                if mo.startswith('SectorCarrier='):
-                    vals = row.get('configuredMaxTxPower noOfRxAntennas noOfTxAntennas', '').split()
-                    if len(vals) >= 3:
-                        sc_power[mo.split('=', 1)[1]] = vals
-                elif mo.startswith('NRSectorCarrier='):
-                    cell = mo.split('=', 1)[1]
-                    vals = row.get('configuredMaxTxPower noOfRxAntennas noOfTxAntennas', '').split()
-                    if len(vals) >= 3:
-                        sc_power[f'5G:{cell}'] = vals
-
-    # LTE cell -> sectorCarrierRef (the sec_id itself, e.g. 'SectorCarrier=7_1')
-    cell_to_sec_id = {}
-    for m in re.finditer(r'^EUtranCellFDD=(\S+)\s.*?\[\d+\]\s*=\s*SectorCarrier=(\S+)', block or '', re.M):
-        cell_to_sec_id[m.group(1)] = m.group(2)
+    lte_config = _extract_sector_config(log_text)
+    fiveg_config = _extract_sector_config_5g(log_text)
+    if node_logs and moved_map:
+        lte_config = pe.merge_moved_in_pre(lte_config, node_logs, moved_map, _extract_sector_config)
+        fiveg_config = pe.merge_moved_in_pre(fiveg_config, node_logs, moved_map, _extract_sector_config_5g)
 
     results = []
     for row in _rows(ciq_wb, 'eUtran Parameters'):
         cell = row.get('EutranCellFDDId')
         if not (cell and e_name and str(cell).startswith(e_name)):
             continue
-        pre_sec_id = cell_to_sec_id.get(cell, 'NOT AVAILABLE')
-        pv = sc_power.get(pre_sec_id)
-        pre_power = pv[0] if pv else 'NOT AVAILABLE'
-        pre_txrx = f'{pv[2]}x{pv[1]}' if pv else 'NOT AVAILABLE'
+        cfg = lte_config.get(cell)
+        pre_sec_id = cfg['sec_id'] if cfg else 'NOT AVAILABLE'
+        pre_power = cfg['power'] if cfg else 'NOT AVAILABLE'
+        pre_txrx = f"{cfg['tx']}x{cfg['rx']}" if cfg else 'NOT AVAILABLE'
         ciq_tx, ciq_rx = row.get('noOfTxAntennas'), row.get('noOfRxAntennas')
         ciq_txrx = f"{ciq_tx}x{ciq_rx}" if ciq_tx and ciq_rx else 'NOT FOUND'
         ciq_power = str(row.get('configuredOutputPower', '')).strip()
@@ -185,9 +226,9 @@ def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None):
             cell = row.get('NRCellDU')
             if not (cell and str(cell).startswith(g_name)):
                 continue
-            pv = sc_power.get(f'5G:{cell}')
-            pre_power = pv[0] if pv else 'NOT AVAILABLE'
-            pre_txrx = f'{pv[2]}x{pv[1]}' if pv else 'NOT AVAILABLE'
+            cfg = fiveg_config.get(cell)
+            pre_power = cfg['power'] if cfg else 'NOT AVAILABLE'
+            pre_txrx = f"{cfg['tx']}x{cfg['rx']}" if cfg else 'NOT AVAILABLE'
             ciq_tx, ciq_rx = row.get('noOfTxAntennas'), row.get('noOfRxAntennas')
             # CIQ's 5G Info tab has no TX/RX antenna count columns at all
             # (confirmed - only 'configuredMaxTxPower' exists there), so this
@@ -243,7 +284,7 @@ def check_nbiot(node_id, log_text, ciq_wb=None):
     return results
 
 
-def check_nr_tac(node_id, log_text, ciq_wb, has_pre_log, has_amf, g_name=None):
+def check_nr_tac(node_id, log_text, ciq_wb, has_pre_log, has_amf, g_name=None, node_logs=None, moved_map=None):
     """Rule #7/#8 - NR TAC. Pre kget-all vs CIQ 5G Info nRTAC, per 5G cell.
     #8's NSA(0)/SA(7-digit) branch: cells present in NR_SA tab are expected
     7-digit (SA); others expected '0' (NSA). #7's warning: if AMF is present
@@ -263,6 +304,8 @@ def check_nr_tac(node_id, log_text, ciq_wb, has_pre_log, has_amf, g_name=None):
     sa_nodes = {str(r.get('Node Name', '')).strip().upper() for r in nr_sa_rows if r.get('Node Name')}
 
     pre_nr_tac = pe.extract_nr_tac(log_text) if (has_pre_log and log_text) else {}
+    if node_logs and moved_map:
+        pre_nr_tac = pe.merge_moved_in_pre(pre_nr_tac, node_logs, moved_map, pe.extract_nr_tac)
 
     results = []
     for row in fiveg_rows:
@@ -708,7 +751,7 @@ def check_cells_vs_rfds(node_id, ciq_wb, rfds_pages, e_name, g_name):
     return results
 
 
-def check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name):
+def check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node_logs=None, moved_map=None):
     """Blueprint section 9 'Cell ID verification' (#6, #24) - Cells | Pre |
     CIQ [cellId/cellLocalId] | RFDS [RCN] | Match, LTE + 5G combined. If a
     cell is newly adding, Pre shows 'NA' per the blueprint's own example."""
@@ -719,6 +762,8 @@ def check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name)
         cell_details = rf.extract_cell_details(rfds_pages)
 
     pre_lte = pe.extract_lte_sector_params(log_text) if log_text else {}
+    if node_logs and moved_map:
+        pre_lte = pe.merge_moved_in_pre(pre_lte, node_logs, moved_map, pe.extract_lte_sector_params)
     for row in _rows(ciq_wb, 'eUtran Parameters'):
         cell = row.get('EutranCellFDDId')
         if not (cell and e_name and str(cell).startswith(e_name)):
@@ -734,6 +779,8 @@ def check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name)
 
     parsed = __import__('log_parser').parse_log(log_text) if log_text else []
     pre_5g = pe.extract_5g_sector_params(parsed, log_text) if log_text else {}
+    if node_logs and moved_map:
+        pre_5g = pe.merge_moved_in_pre(pre_5g, node_logs, moved_map, pe.extract_5g_sector_params_from_text)
     for row in _rows(ciq_wb, '5G Info'):
         cell = row.get('NRCellDU')
         if not (cell and g_name and str(cell).startswith(g_name)):
@@ -749,15 +796,25 @@ def check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name)
     return results
 
 
-def check_rf_params_4g(node_id, log_text, ciq_wb, has_pre_log, retuned_cells=None):
+def check_rf_params_4g(node_id, log_text, ciq_wb, has_pre_log, retuned_cells=None, node_logs=None, moved_map=None):
     """Blueprint section 10 'Parameters Verification - 4G' (#19). One row
     per cell, each field shown as a single 'Pre | CIQ' string per the
     confirmed compact format. Retuned cells (from SOW) still highlight red -
     the note marks them as planned so the engineer knows why, but doesn't
-    downgrade the color (per confirmed decision)."""
+    downgrade the color (per confirmed decision).
+
+    node_logs/moved_map: when a cell is moving in from another physical node
+    (Sector Del_Movement), its real Pre history sits on the SOURCE node's
+    log under the source cell name, not this node's own log - confirmed on
+    a real rehome, this node's own log has never seen the cell at all.
+    Without the merge, every moved-in cell reported NA despite real Pre
+    data being available."""
     retuned_cells = retuned_cells or set()
     pre_lte = pe.extract_lte_sector_params(log_text) if (has_pre_log and log_text) else {}
     pre_ul = pe.extract_ul_channel_bandwidth(log_text) if (has_pre_log and log_text) else {}
+    if node_logs and moved_map:
+        pre_lte = pe.merge_moved_in_pre(pre_lte, node_logs, moved_map, pe.extract_lte_sector_params)
+        pre_ul = pe.merge_moved_in_pre(pre_ul, node_logs, moved_map, pe.extract_ul_channel_bandwidth)
     results = []
     for row in _rows(ciq_wb, 'eUtran Parameters'):
         cell = row.get('EutranCellFDDId')
@@ -790,11 +847,14 @@ def check_rf_params_4g(node_id, log_text, ciq_wb, has_pre_log, retuned_cells=Non
     return results
 
 
-def check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre_log, retuned_cells=None):
+def check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre_log, retuned_cells=None, node_logs=None, moved_map=None):
     """Blueprint section 11 'Parameters Verification - 5G' (#19). Same
-    compact 'Pre | CIQ' format as the 4G table."""
+    compact 'Pre | CIQ' format as the 4G table. See check_rf_params_4g's
+    docstring for node_logs/moved_map (moved-in cell Pre lookup)."""
     retuned_cells = retuned_cells or set()
     pre_5g = pe.extract_5g_sector_params(parsed, log_text) if (has_pre_log and log_text) else {}
+    if node_logs and moved_map:
+        pre_5g = pe.merge_moved_in_pre(pre_5g, node_logs, moved_map, pe.extract_5g_sector_params_from_text)
     results = []
     for row in _rows(ciq_wb, '5G Info'):
         cell = row.get('NRCellDU')
