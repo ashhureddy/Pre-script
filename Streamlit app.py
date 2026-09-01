@@ -356,9 +356,8 @@ def render_result_tables(results, groups):
 
 
 # ── Tabs (mirrors the HTML tool's top navigation) ──────────────────────────
-(tab_consolidated, tab_rfds, tab_edp, tab_ciq, tab_audit, tab_amos, tab_crdesc) = st.tabs([
-    "Consolidated Report", "RFDS Checker", "EDP Validator",
-    "CIQ Checks", "Audit", "Pre checks (AMOS)", "CR Desc",
+(tab_consolidated, tab_rfds, tab_edp, tab_telecom) = st.tabs([
+    "Consolidated Report", "RFDS Checker", "EDP Validator", "Telecom Audit",
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -667,252 +666,264 @@ with tab_edp:
             df_download_button({"EDP Rows": state["edp_rows"]}, "\u2b07\ufe0f Export Excel", "edp_validator.xlsx", "edp_export")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB: CIQ Checks — standalone, CIQ-only site-wide checks (PCI/antenna/port
-# uniqueness, SEF-FRU, radio sharing), mirrors the HTML tool's CIQ Checks tab.
+# TAB: Telecom Audit — mirrors the HTML tool's embedded "Telecom Audit Pro"
+# module exactly: ONE tool with four internal sub-tabs (Pre checks/AMOS,
+# CIQ Checks, Audit, CR Desc) sharing a single in-memory state — upload kget
+# logs once (AMOS), upload CIQ once (CIQ Checks), and Audit/CR Desc reuse
+# both automatically with no re-upload, same as the HTML tool's shared
+# STORE object and "AMOS —"/"CIQ —" readiness dots in its navbar.
 # ═══════════════════════════════════════════════════════════════════════════
-with tab_ciq:
-    ciq_checks_file = st.file_uploader("CIQ (.xlsx)", type=["xlsx"], key="ciqchecks_ciq")
+with tab_telecom:
+    telecom = st.session_state.setdefault("telecom", {})
 
-    if st.button("Run CIQ checks", type="primary", key="ciqchecks_run"):
-        if not ciq_checks_file:
-            st.error("CIQ is required.")
-            st.stop()
-        with st.spinner("Running CIQ checks..."):
-            with tempfile.TemporaryDirectory() as tmp:
-                ciq_path = _save_upload(ciq_checks_file, tmp)
-                ciq_wb = cer.load_ciq(ciq_path)
-            mm_rows = cer.mixed_mode_rows(ciq_wb)
-            rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
+    amos_ready = bool(telecom.get("node_logs"))
+    ciq_ready = bool(telecom.get("ciq_wb"))
+    amos_dot, ciq_dot = ("\u2705" if amos_ready else "\u26aa"), ("\u2705" if ciq_ready else "\u26aa")
+    amos_label = f"({len(telecom['node_logs'])} nodes)" if amos_ready else "\u2014"
+    ciq_label = f"({len(telecom.get('mm_rows', []))} nodes)" if ciq_ready else "\u2014"
+    st.caption(f"{amos_dot} AMOS {amos_label}   \u00b7   {ciq_dot} CIQ {ciq_label}")
 
-            pci_rows, nr_pci_rows = [], []
-            node_names = []
-            for mm in mm_rows:
-                node_id = str(mm.get("Node to be built as") or "").strip()
-                if node_id:
-                    node_names.append(node_id)
-                e_name = str(mm.get("eNodeB Name") or "").strip()
-                g_name = str(mm.get("gNodeB Name") or "").strip()
-                pci_rows += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
-                nr_pci_rows += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
+    sub_amos, sub_ciq, sub_audit, sub_crdesc = st.tabs(
+        ["Pre checks (AMOS)", "CIQ Checks", "Audit", "CR Desc"])
 
-            site_label = str(mm_rows[0].get("Node to be built as") or "").strip() if mm_rows else ""
-            results = {
-                "pci_4g": pci_rows, "pci_5g": nr_pci_rows,
-                "radio_sharing": cs.check_radio_sharing_pairs(site_label, ciq_wb),
-                "port_uniqueness": cs.check_port_uniqueness(site_label, ciq_wb),
-                "antenna": cs.check_antenna_uniqueness(site_label, ciq_wb),
-                "sef_fru": cs.check_sef_fru(site_label, ciq_wb),
-            }
-        st.session_state["ciq_checks"] = {"results": results, "rev_sheet": rev_sheet,
-                                           "rev_rows": rev_rows, "node_names": node_names,
-                                           "node_integration": cv.build_node_integration(ciq_wb),
-                                           "lte_params": cv.build_param_table(ciq_wb, "eUtran Parameters", cv.LTE_PARAM_COLS),
-                                           "nr_params": cv.build_param_table(ciq_wb, "5G Info", cv.NR_PARAM_COLS)}
+    # ── Sub-tab: Pre checks (AMOS) ──────────────────────────────────────────
+    with sub_amos:
+        st.caption("Upload kget-all logs once here — the Audit and CR Desc sub-tabs below reuse them automatically.")
+        amos_log_files = st.file_uploader("Pre kget-all logs (.log / .txt) — one or more",
+                                           type=["log", "txt"], accept_multiple_files=True, key="tel_amos_logs")
+        if st.button("Parse Data", type="primary", key="tel_amos_run"):
+            if not amos_log_files:
+                st.error("At least one kget-all log is required.")
+                st.stop()
+            with st.spinner("Parsing logs..."):
+                node_logs = _decode_logs(amos_log_files)
+                summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs)
+            telecom["node_logs"] = node_logs
+            telecom["amos_summary"] = summary_rows
+            telecom["amos_lte"] = lte_rows
+            telecom["amos_nr"] = nr_rows
+            st.rerun()
 
-    state = st.session_state.get("ciq_checks")
-    if state:
-        render_revision_history(state["rev_sheet"], state["rev_rows"])
+        if telecom.get("amos_summary"):
+            st.markdown('<div class="qkx-section-label">Node Summary</div>', unsafe_allow_html=True)
+            show_rows(telecom["amos_summary"], drop=())
+            st.markdown('<div class="qkx-section-label">LTE Cells</div>', unsafe_allow_html=True)
+            show_rows(telecom["amos_lte"], drop=())
+            st.markdown('<div class="qkx-section-label">NR Cells</div>', unsafe_allow_html=True)
+            show_rows(telecom["amos_nr"], drop=())
+            st.caption("PTP status and Pre-existing DSS aren't captured by this project's Pre kget-all "
+                       "commands (confirmed limitation), so both are labelled rather than guessed.")
+            df_download_button({"Node Summary": telecom["amos_summary"], "LTE Cells": telecom["amos_lte"],
+                                 "NR Cells": telecom["amos_nr"]},
+                                "\u2b07\ufe0f Export Excel", "amos_pre_checks.xlsx", "tel_amos_export")
+            if st.button("Clear", key="tel_amos_clear"):
+                for k in ("node_logs", "amos_summary", "amos_lte", "amos_nr"):
+                    telecom.pop(k, None)
+                st.rerun()
 
-        st.markdown('<div class="qkx-section-label">Node Integration</div>', unsafe_allow_html=True)
-        show_rows(state["node_integration"], drop=())
+    # ── Sub-tab: CIQ Checks ──────────────────────────────────────────────────
+    with sub_ciq:
+        st.caption("Upload the CIQ once here — the Audit and CR Desc sub-tabs below reuse it automatically.")
+        ciq_checks_file = st.file_uploader("CIQ (.xlsx)", type=["xlsx"], key="tel_ciq_file")
+        if st.button("Load CIQ", type="primary", key="tel_ciq_run"):
+            if not ciq_checks_file:
+                st.error("CIQ is required.")
+                st.stop()
+            with st.spinner("Loading CIQ..."):
+                with tempfile.TemporaryDirectory() as tmp:
+                    ciq_path = _save_upload(ciq_checks_file, tmp)
+                    ciq_wb = cer.load_ciq(ciq_path)
+                mm_rows = cer.mixed_mode_rows(ciq_wb)
+                rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
 
-        st.markdown('<div class="qkx-section-label">LTE / NR Parameters</div>', unsafe_allow_html=True)
-        band_opts = ["All"] + sorted({r.get("eUTRA operating band") for r in state["lte_params"] if r.get("eUTRA operating band")}
-                                      | {r.get("Operating Band") for r in state["nr_params"] if r.get("Operating Band")})
-        node_opts = ["All"] + sorted({n for n in state["node_names"] if n})
-        c1, c2 = st.columns(2)
-        band_filter = c1.selectbox("Band filter", band_opts, key="ciqchecks_bandfilter")
-        node_filter = c2.selectbox("Node (eNB/gNB ID) filter", node_opts, key="ciqchecks_nodefilter")
+                pci_rows, nr_pci_rows, node_names = [], [], []
+                for mm in mm_rows:
+                    node_id = str(mm.get("Node to be built as") or "").strip()
+                    if node_id:
+                        node_names.append(node_id)
+                    e_name = str(mm.get("eNodeB Name") or "").strip()
+                    g_name = str(mm.get("gNodeB Name") or "").strip()
+                    pci_rows += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
+                    nr_pci_rows += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
+                site_label = node_names[0] if node_names else ""
+                results = {
+                    "pci_4g": pci_rows, "pci_5g": nr_pci_rows,
+                    "radio_sharing": cs.check_radio_sharing_pairs(site_label, ciq_wb),
+                    "port_uniqueness": cs.check_port_uniqueness(site_label, ciq_wb),
+                    "antenna": cs.check_antenna_uniqueness(site_label, ciq_wb),
+                    "sef_fru": cs.check_sef_fru(site_label, ciq_wb),
+                }
+            telecom["ciq_wb"] = ciq_wb
+            telecom["mm_rows"] = mm_rows
+            telecom["node_names"] = node_names
+            telecom["ciq_checks_results"] = results
+            telecom["ciq_rev_sheet"] = rev_sheet
+            telecom["ciq_rev_rows"] = rev_rows
+            telecom["node_integration"] = cv.build_node_integration(ciq_wb)
+            telecom["lte_params"] = cv.build_param_table(ciq_wb, "eUtran Parameters", cv.LTE_PARAM_COLS)
+            telecom["nr_params"] = cv.build_param_table(ciq_wb, "5G Info", cv.NR_PARAM_COLS)
+            st.rerun()
 
-        lte_view = [r for r in state["lte_params"]
-                    if (band_filter == "All" or r.get("eUTRA operating band") == band_filter)
-                    and (node_filter == "All" or str(r.get("EutranCellFDDId", "")).startswith(node_filter))]
-        nr_view = [r for r in state["nr_params"]
-                   if (band_filter == "All" or r.get("Operating Band") == band_filter)
-                   and (node_filter == "All" or str(r.get("NRCellDU", "")).startswith(node_filter))]
-        with st.expander(f"LTE eUtran Parameters ({len(lte_view)} cells)", expanded=False):
-            show_rows(lte_view, drop=())
-        with st.expander(f"5G NR Parameters ({len(nr_view)} cells)", expanded=False):
-            show_rows(nr_view, drop=())
+        if telecom.get("ciq_wb"):
+            render_revision_history(telecom.get("ciq_rev_sheet"), telecom.get("ciq_rev_rows"))
 
-        st.markdown('<div class="qkx-section-label">Site-wide Checks</div>', unsafe_allow_html=True)
-        render_result_tables(state["results"], [
-            ("PCI Uniqueness", ["pci_4g", "pci_5g"]),
-            ("Radio Sharing / Port Uniqueness / Antenna / SEF-FRU", ["radio_sharing", "port_uniqueness", "antenna", "sef_fru"]),
-        ])
-        df_download_button({**state["results"], "Node Integration": state["node_integration"],
-                             "LTE Parameters": state["lte_params"], "NR Parameters": state["nr_params"]},
-                            "\u2b07\ufe0f Export Excel", "ciq_checks.xlsx", "ciqchecks_export")
+            st.markdown('<div class="qkx-section-label">1. Node Integration</div>', unsafe_allow_html=True)
+            show_rows(telecom["node_integration"], drop=())
 
-        mismatch_count = sum(1 for rows in state["results"].values() for r in rows if r.get("status") == "MISMATCH")
-        st.markdown('<div class="qkx-section-label">Pre Integration Issue Mail</div>', unsafe_allow_html=True)
-        fa_code = st.text_input("FA Code", key="ciqchecks_fa")
-        if fa_code:
-            node_str = "/".join(state["node_names"]) or "NODE"
-            subject = f"{node_str} - {fa_code} <Pre Integration Issue>"
-            body = (f"Hi Team,\n\n{mismatch_count} CIQ check issue(s) found (PCI/antenna/port uniqueness) "
-                    f"on {node_str}. Please check and update the CIQ.")
-            link = mailto_link("eran_design@quadgen.com", "eran_scripting@quadgen.com", subject, body)
-            st.link_button("\u2709\ufe0f Compose Mail", link, use_container_width=True)
-        else:
-            st.caption("Enter a FA Code to compose the issue mail.")
+            st.markdown('<div class="qkx-section-label">2. LTE / NR Parameters</div>', unsafe_allow_html=True)
+            band_opts = ["All"] + sorted({r.get("eUTRA operating band") for r in telecom["lte_params"] if r.get("eUTRA operating band")}
+                                          | {r.get("Operating Band") for r in telecom["nr_params"] if r.get("Operating Band")})
+            node_opts = ["All"] + sorted({n for n in telecom["node_names"] if n})
+            c1, c2 = st.columns(2)
+            band_filter = c1.selectbox("Band filter", band_opts, key="tel_ciq_bandfilter")
+            node_filter = c2.selectbox("Node filter", node_opts, key="tel_ciq_nodefilter")
+            lte_view = [r for r in telecom["lte_params"]
+                        if (band_filter == "All" or r.get("eUTRA operating band") == band_filter)
+                        and (node_filter == "All" or str(r.get("EutranCellFDDId", "")).startswith(node_filter))]
+            nr_view = [r for r in telecom["nr_params"]
+                       if (band_filter == "All" or r.get("Operating Band") == band_filter)
+                       and (node_filter == "All" or str(r.get("NRCellDU", "")).startswith(node_filter))]
+            with st.expander(f"LTE eUtran Parameters ({len(lte_view)} cells)", expanded=False):
+                show_rows(lte_view, drop=())
+            with st.expander(f"5G NR Parameters ({len(nr_view)} cells)", expanded=False):
+                show_rows(nr_view, drop=())
 
-# ═══════════════════════════════════════════════════════════════════════════
-# TAB: Audit — standalone CIQ + kget-log Pre-vs-Post comparison, mirrors the
-# HTML tool's Audit -> Pre vs Post tab (no EDP needed).
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_audit:
-    c1, c2 = st.columns(2)
-    with c1:
-        audit_ciq_file = st.file_uploader("CIQ (.xlsx)", type=["xlsx"], key="audit_ciq")
-    with c2:
-        audit_log_files = st.file_uploader("Pre kget-all logs (.log / .txt) — one per node",
-                                            type=["log", "txt"], accept_multiple_files=True, key="audit_logs")
+            st.markdown('<div class="qkx-section-label">3. Antenna Uniqueness / Site-wide Checks</div>', unsafe_allow_html=True)
+            render_result_tables(telecom["ciq_checks_results"], [
+                ("PCI Uniqueness", ["pci_4g", "pci_5g"]),
+                ("Radio Sharing / Port Uniqueness / Antenna / SEF-FRU",
+                 ["radio_sharing", "port_uniqueness", "antenna", "sef_fru"]),
+            ])
+            df_download_button({**telecom["ciq_checks_results"], "Node Integration": telecom["node_integration"],
+                                 "LTE Parameters": telecom["lte_params"], "NR Parameters": telecom["nr_params"]},
+                                "\u2b07\ufe0f Export Excel", "ciq_checks.xlsx", "tel_ciq_export")
 
-    if st.button("Run Audit", type="primary", key="audit_run"):
-        if not audit_ciq_file or not audit_log_files:
-            st.error("CIQ and at least one kget-all log are required.")
-            st.stop()
-        with st.spinner("Running Audit..."):
-            with tempfile.TemporaryDirectory() as tmp:
-                ciq_path = _save_upload(audit_ciq_file, tmp)
-                ciq_wb = cer.load_ciq(ciq_path)
-            node_logs = _decode_logs(audit_log_files)
-            mm_rows = cer.mixed_mode_rows(ciq_wb)
-            rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
+            mismatch_count = sum(1 for rows in telecom["ciq_checks_results"].values()
+                                  for r in rows if r.get("status") == "MISMATCH")
+            st.markdown('<div class="qkx-section-label">FA Code / Pre Integration Issue Mail</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns([2, 1])
+            fa_code = c1.text_input("FA Code", key="tel_ciq_fa")
+            if fa_code:
+                node_str = "/".join(telecom["node_names"]) or "NODE"
+                subject = f"{node_str} - {fa_code} <Pre Integration Issue>"
+                body = (f"Hi Team,\n\n{mismatch_count} CIQ check issue(s) found (PCI/antenna/port uniqueness) "
+                        f"on {node_str}. Please check and update the CIQ.")
+                link = mailto_link("eran_design@quadgen.com", "eran_scripting@quadgen.com", subject, body)
+                c2.link_button("\u2709\ufe0f Mail", link, use_container_width=True)
+            if st.button("Reload", key="tel_ciq_reload"):
+                for k in ("ciq_wb", "mm_rows", "node_names", "ciq_checks_results", "ciq_rev_sheet",
+                          "ciq_rev_rows", "node_integration", "lte_params", "nr_params",
+                          "audit_results", "audit_pre_text", "audit_post_text", "audit_scope_lines"):
+                    telecom.pop(k, None)
+                st.rerun()
 
-            pre_pairs, pre_nodes = pci.build_pre_inventory(node_logs)
-            sow = sa.classify_carriers(ciq_wb, mm_rows, pre_pairs, pre_nodes)
-            pre_text, post_text = ppc.build_pre_post_config_text(node_logs, ciq_wb)
-            scope_lines = sowt.scope_lines_to_readable_text(sowt.format_scope_of_work(sow, ciq_wb))
+    # ── Sub-tab: Audit ───────────────────────────────────────────────────────
+    with sub_audit:
+        st.caption("Uses the logs and CIQ already loaded above — no re-upload needed.")
+        if st.button("Run Full Audit", type="primary", key="tel_audit_run"):
+            if not telecom.get("node_logs"):
+                st.error("AMOS data missing \u2014 parse AMOS logs first (Pre checks (AMOS) sub-tab).")
+                st.stop()
+            if not telecom.get("ciq_wb"):
+                st.error("CIQ data missing \u2014 load a CIQ file first (CIQ Checks sub-tab).")
+                st.stop()
+            with st.spinner("Running Audit..."):
+                ciq_wb = telecom["ciq_wb"]
+                mm_rows = telecom["mm_rows"]
+                node_logs = telecom["node_logs"]
 
-            results = {k: [] for k in ("params_4g", "params_5g", "pci_4g", "pci_5g",
-                                        "radio_type", "sector_swap", "nr_tac")}
-            for mm in mm_rows:
-                node_id = str(mm.get("Node to be built as") or "").strip()
-                e_name = str(mm.get("eNodeB Name") or "").strip()
-                g_name = str(mm.get("gNodeB Name") or "").strip()
-                log_text = node_logs.get(node_id)
-                has_pre = bool(log_text)
-                parsed = lp.parse_log(log_text) if log_text else []
+                pre_pairs, pre_nodes = pci.build_pre_inventory(node_logs)
+                sow = sa.classify_carriers(ciq_wb, mm_rows, pre_pairs, pre_nodes)
+                pre_text, post_text = ppc.build_pre_post_config_text(node_logs, ciq_wb)
+                scope_lines = sowt.scope_lines_to_readable_text(sowt.format_scope_of_work(sow, ciq_wb))
 
-                results["params_4g"] += cs.check_rf_params_4g(node_id, log_text, ciq_wb, has_pre)
-                results["params_5g"] += cs.check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre)
-                results["pci_4g"] += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
-                results["pci_5g"] += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
-                results["radio_type"] += cs.check_radio_type(node_id, log_text, ciq_wb, None, e_name, g_name)
-                results["sector_swap"] += cs.check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name)
-                results["nr_tac"] += cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False, g_name)
+                results = {k: [] for k in ("params_4g", "params_5g", "pci_4g", "pci_5g",
+                                            "radio_type", "sector_swap", "nr_tac")}
+                for mm in mm_rows:
+                    node_id = str(mm.get("Node to be built as") or "").strip()
+                    e_name = str(mm.get("eNodeB Name") or "").strip()
+                    g_name = str(mm.get("gNodeB Name") or "").strip()
+                    log_text = node_logs.get(node_id)
+                    has_pre = bool(log_text)
+                    parsed = lp.parse_log(log_text) if log_text else []
+                    results["params_4g"] += cs.check_rf_params_4g(node_id, log_text, ciq_wb, has_pre)
+                    results["params_5g"] += cs.check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre)
+                    results["pci_4g"] += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
+                    results["pci_5g"] += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
+                    results["radio_type"] += cs.check_radio_type(node_id, log_text, ciq_wb, None, e_name, g_name)
+                    results["sector_swap"] += cs.check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name)
+                    results["nr_tac"] += cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False, g_name)
 
-        st.session_state["audit"] = {"pre_text": pre_text, "post_text": post_text,
-                                      "scope_lines": scope_lines, "results": results,
-                                      "rev_sheet": rev_sheet, "rev_rows": rev_rows}
+            telecom["audit_results"] = results
+            telecom["audit_pre_text"] = pre_text
+            telecom["audit_post_text"] = post_text
+            telecom["audit_scope_lines"] = scope_lines
+            st.rerun()
 
-    state = st.session_state.get("audit")
-    if state:
-        render_revision_history(state["rev_sheet"], state["rev_rows"])
-        st.markdown('<div class="qkx-section-label">Pre / Post Configuration</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        c1.markdown(f"**Pre:** {state['pre_text'] or '—'}")
-        c2.markdown(f"**Post:** {state['post_text'] or '—'}")
+        if telecom.get("audit_results"):
+            st.markdown('<div class="qkx-section-label">Pre / Post Configuration</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns(2)
+            dash = "\u2014"
+            c1.markdown(f"**Pre:** {telecom['audit_pre_text'] or dash}")
+            c2.markdown(f"**Post:** {telecom['audit_post_text'] or dash}")
 
-        st.markdown('<div class="qkx-section-label">SOW Summary</div>', unsafe_allow_html=True)
-        if state["scope_lines"]:
-            for line in state["scope_lines"]:
-                st.markdown(f"- {line}")
-        else:
-            st.caption("No additions, deletions, sector movements, or retunes detected.")
+            st.markdown('<div class="qkx-section-label">SOW Summary</div>', unsafe_allow_html=True)
+            if telecom["audit_scope_lines"]:
+                for line in telecom["audit_scope_lines"]:
+                    st.markdown(f"- {line}")
+            else:
+                st.caption("No additions, deletions, sector movements, or retunes detected.")
 
-        st.markdown('<div class="qkx-section-label">Pre vs CIQ — RF Parameters (PRE | POST)</div>', unsafe_allow_html=True)
-        st.caption("4G")
-        render_pipe_compare_table(state["results"]["params_4g"], PIPE_FIELDS_4G, "No 4G cells with Pre data to compare.")
-        st.caption("5G")
-        render_pipe_compare_table(state["results"]["params_5g"], PIPE_FIELDS_5G, "No 5G cells with Pre data to compare.")
+            st.markdown('<div class="qkx-section-label">Pre vs CIQ \u2014 RF Parameters (PRE | POST)</div>', unsafe_allow_html=True)
+            st.caption("4G")
+            render_pipe_compare_table(telecom["audit_results"]["params_4g"], PIPE_FIELDS_4G, "No 4G cells with Pre data to compare.")
+            st.caption("5G")
+            render_pipe_compare_table(telecom["audit_results"]["params_5g"], PIPE_FIELDS_5G, "No 5G cells with Pre data to compare.")
 
-        st.markdown('<div class="qkx-section-label">Engineer Comments</div>', unsafe_allow_html=True)
-        comments = (wt.param_warnings(state["results"]["params_4g"]) + wt.param_warnings(state["results"]["params_5g"])
-                    + wt.pci_warnings(state["results"]["pci_4g"] + state["results"]["pci_5g"])
-                    + wt.radio_type_warnings(state["results"]["radio_type"])
-                    + wt.sector_swap_warnings(state["results"]["radio_type"]))
-        if comments:
-            for c in comments:
-                st.markdown(f"- {c}")
-        else:
-            st.caption("No warnings — all checked parameters match Pre.")
+            st.markdown('<div class="qkx-section-label">Engineer Comments</div>', unsafe_allow_html=True)
+            comments = (wt.param_warnings(telecom["audit_results"]["params_4g"]) + wt.param_warnings(telecom["audit_results"]["params_5g"])
+                        + wt.pci_warnings(telecom["audit_results"]["pci_4g"] + telecom["audit_results"]["pci_5g"])
+                        + wt.radio_type_warnings(telecom["audit_results"]["radio_type"])
+                        + wt.sector_swap_warnings(telecom["audit_results"]["radio_type"]))
+            if comments:
+                for c in comments:
+                    st.markdown(f"- {c}")
+            else:
+                st.caption("No warnings \u2014 all checked parameters match Pre.")
 
-        st.markdown('<div class="qkx-section-label">PCI / Radio Type / Sector Swap / NR TAC</div>', unsafe_allow_html=True)
-        render_result_tables(state["results"], [
-            ("Detail tables", ["pci_4g", "pci_5g", "radio_type", "sector_swap", "nr_tac"]),
-        ])
-        df_download_button(state["results"], "\u2b07\ufe0f Export Excel", "audit.xlsx", "audit_export")
+            st.markdown('<div class="qkx-section-label">PCI / Radio Type / Sector Swap / NR TAC</div>', unsafe_allow_html=True)
+            render_result_tables(telecom["audit_results"], [
+                ("Detail tables", ["pci_4g", "pci_5g", "radio_type", "sector_swap", "nr_tac"]),
+            ])
+            df_download_button(telecom["audit_results"], "\u2b07\ufe0f Export Excel", "audit.xlsx", "tel_audit_export")
+            if st.button("Clear", key="tel_audit_clear"):
+                for k in ("audit_results", "audit_pre_text", "audit_post_text", "audit_scope_lines"):
+                    telecom.pop(k, None)
+                st.rerun()
 
-# ═══════════════════════════════════════════════════════════════════════════
-# TAB: Pre checks (AMOS) — standalone, kget-log-only per-node cell inventory,
-# mirrors the HTML tool's Audit -> AMOS tab.
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_amos:
-    amos_log_files = st.file_uploader("Pre kget-all logs (.log / .txt) — one or more",
-                                       type=["log", "txt"], accept_multiple_files=True, key="amos_logs")
+    # ── Sub-tab: CR Desc ──────────────────────────────────────────────────────
+    with sub_crdesc:
+        if not telecom.get("audit_results"):
+            st.warning("Run **Full Audit** first (Audit sub-tab) so node and band data is available here.")
 
-    if st.button("Parse logs", type="primary", key="amos_run"):
-        if not amos_log_files:
-            st.error("At least one kget-all log is required.")
-            st.stop()
-        with st.spinner("Parsing logs..."):
-            node_logs = _decode_logs(amos_log_files)
-            summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs)
-        st.session_state["amos"] = {"summary_rows": summary_rows, "lte_rows": lte_rows, "nr_rows": nr_rows}
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            mic_mca = st.selectbox("MIC DESC", ["MIC - MCA", "MIC - CRAN"], key="tel_cr_mic")
+        with c2:
+            site_name = st.text_input("Site Name", key="tel_cr_site").strip().upper()
+        with c3:
+            fa_number = st.text_input("FA Number", key="tel_cr_fa").strip()
 
-    state = st.session_state.get("amos")
-    if state:
-        st.markdown('<div class="qkx-section-label">Node Summary</div>', unsafe_allow_html=True)
-        show_rows(state["summary_rows"], drop=())
-        st.markdown('<div class="qkx-section-label">LTE Cells</div>', unsafe_allow_html=True)
-        show_rows(state["lte_rows"], drop=())
-        st.markdown('<div class="qkx-section-label">NR Cells</div>', unsafe_allow_html=True)
-        show_rows(state["nr_rows"], drop=())
-        st.caption("PTP status and Pre-existing DSS aren't captured by this project's Pre kget-all "
-                   "commands (confirmed limitation — see run_validation.py), so both are labelled "
-                   "rather than guessed.")
-        df_download_button({"Node Summary": state["summary_rows"], "LTE Cells": state["lte_rows"],
-                             "NR Cells": state["nr_rows"]},
-                            "\u2b07\ufe0f Export Excel", "amos_pre_checks.xlsx", "amos_export")
-
-# ═══════════════════════════════════════════════════════════════════════════
-# TAB: CR Desc — CR description string generator from CIQ + kget logs,
-# mirrors the HTML tool's CR Desc tab.
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_crdesc:
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        mic_mca = st.selectbox("MIC DESC", ["MIC - MCA", "MIC - CRAN"], key="cr_mic")
-    with c2:
-        site_name = st.text_input("Site Name", key="cr_site").strip().upper()
-    with c3:
-        fa_number = st.text_input("FA Number", key="cr_fa").strip()
-
-    c1, c2 = st.columns(2)
-    with c1:
-        crdesc_ciq_file = st.file_uploader("CIQ (.xlsx)", type=["xlsx"], key="crdesc_ciq")
-    with c2:
-        crdesc_log_files = st.file_uploader("Pre kget-all logs (.log / .txt) — one per node",
-                                             type=["log", "txt"], accept_multiple_files=True, key="crdesc_logs")
-
-    if st.button("Generate CR Description", type="primary", key="crdesc_run"):
-        if not crdesc_ciq_file or not crdesc_log_files:
-            st.error("CIQ and at least one kget-all log are required.")
-            st.stop()
-        if not site_name or not fa_number:
-            st.error("Site Name and FA Number are required.")
-            st.stop()
-        with st.spinner("Building CR description..."):
-            with tempfile.TemporaryDirectory() as tmp:
-                ciq_path = _save_upload(crdesc_ciq_file, tmp)
-                ciq_wb = cer.load_ciq(ciq_path)
-            node_logs = _decode_logs(crdesc_log_files)
-            mm_rows = cer.mixed_mode_rows(ciq_wb)
-            rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
-
+        if st.button("Generate CR Description", type="primary", key="tel_cr_run"):
+            if not telecom.get("audit_results") or not telecom.get("ciq_wb"):
+                st.error("No audit data found. Please run Full Audit first.")
+                st.stop()
+            if not site_name or not fa_number:
+                st.error("Site Name and FA Number are required.")
+                st.stop()
+            ciq_wb = telecom["ciq_wb"]
+            mm_rows = telecom["mm_rows"]
+            node_logs = telecom["node_logs"]
             pre_pairs, pre_nodes = pci.build_pre_inventory(node_logs)
             sow = sa.classify_carriers(ciq_wb, mm_rows, pre_pairs, pre_nodes)
 
@@ -921,8 +932,6 @@ with tab_crdesc:
             deleted_nodes = [f"Delete_{n}" for n in sow.get("deleted_nodes", [])]
             all_nodes = regular_nodes + deleted_nodes
 
-            # Bands: every band with an ADDED cell, excluding bands that only
-            # appear via a sector MOVE or RETUNE (those aren't new config).
             added_bands = set()
             for cells in sow.get("added", {}).values():
                 for cell in cells:
@@ -944,17 +953,16 @@ with tab_crdesc:
             band_str = ("CONFIG_UPDATE_" + "/".join(bands)) if bands else "CONFIG_UPDATE"
             cr_text = f"{mic_mca_str} | {site_name} | FA {fa_number} | {node_str} | {band_str} - RSF"
 
-        st.session_state["crdesc"] = {"cr_text": cr_text, "regular_nodes": regular_nodes,
-                                       "deleted_nodes": deleted_nodes, "bands": bands,
-                                       "rev_sheet": rev_sheet, "rev_rows": rev_rows}
+            telecom["cr_text"] = cr_text
+            telecom["cr_regular_nodes"] = regular_nodes
+            telecom["cr_deleted_nodes"] = deleted_nodes
+            telecom["cr_bands"] = bands
+            st.rerun()
 
-    state = st.session_state.get("crdesc")
-    if state:
-        render_revision_history(state["rev_sheet"], state["rev_rows"])
-        st.markdown('<div class="qkx-section-label">Generated CR Description</div>', unsafe_allow_html=True)
-        st.code(state["cr_text"], language=None)
-
-        c1, c2, c3 = st.columns(3)
-        c1.markdown("**Regular Nodes**\n\n" + (", ".join(state["regular_nodes"]) or "—"))
-        c2.markdown("**Delete Nodes**\n\n" + (", ".join(state["deleted_nodes"]) or "None"))
-        c3.markdown("**Bands**\n\n" + (", ".join(state["bands"]) or "—"))
+        if telecom.get("cr_text"):
+            st.markdown('<div class="qkx-section-label">Generated CR Description</div>', unsafe_allow_html=True)
+            st.code(telecom["cr_text"], language=None)
+            c1, c2, c3 = st.columns(3)
+            c1.markdown("**Regular Nodes**\n\n" + (", ".join(telecom["cr_regular_nodes"]) or "\u2014"))
+            c2.markdown("**Delete Nodes**\n\n" + (", ".join(telecom["cr_deleted_nodes"]) or "None"))
+            c3.markdown("**Bands**\n\n" + (", ".join(telecom["cr_bands"]) or "\u2014"))
