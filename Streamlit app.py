@@ -45,10 +45,13 @@ import streamlit as st
 import urllib.parse
 
 import antenna_resolve as ar
+import amos_view as av
 import band_labels as bl
 import checks_node as cn
 import checks_sector as cs
 import ciq_edp_reader as cer
+import ciq_view as cv
+import edp_checks as ec
 import log_parser as lp
 import pre_cell_inventory as pci
 import pre_extract as pe
@@ -58,6 +61,7 @@ import rrnrbl_checklist as rc
 import run_validation as rv
 import scope_of_work_text as sowt
 import sow_analysis as sa
+import warnings_text as wt
 
 st.set_page_config(page_title="Pre-Scripting Validation", page_icon="\U0001F4E1", layout="wide")
 
@@ -162,10 +166,18 @@ STATUS_COLOR = {"MATCH": "#d1fae5", "MISMATCH": "#fee2e2", "INFO": "#dbeafe",
                 "SKIPPED": "#f1f5f9", "NA": "#f1f5f9", "WARN": "#fef3c7"}
 
 
+def _style_map(styler, func, subset):
+    """pandas 2.1 renamed Styler.applymap -> Styler.map (removed applymap in
+    later versions); this works on either."""
+    if hasattr(styler, "map"):
+        return styler.map(func, subset=subset)
+    return styler.applymap(func, subset=subset)
+
+
 def _style_status(df):
     if "status" not in df.columns:
         return df
-    return df.style.applymap(lambda v: f"background-color:{STATUS_COLOR.get(str(v), '')}", subset=["status"])
+    return _style_map(df.style, lambda v: f"background-color:{STATUS_COLOR.get(str(v), '')}", ["status"])
 
 
 def show_rows(rows, empty_msg="No data.", drop=("rule",)):
@@ -219,6 +231,69 @@ def mailto_link(to_addr, cc_addr, subject, body):
     opens the user's own mail client with subject/body pre-filled."""
     params = {"cc": cc_addr, "subject": subject, "body": body}
     return f"mailto:{to_addr}?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}"
+
+
+def render_edp_node_cards(node_results):
+    """Node cards — mirrors the HTML EDP Validator's checklist view: one
+    card per expected node, PASS/FAIL/WARN/MISSING status chip, checks
+    listed underneath with a pass/fail/warn/info icon each."""
+    icon = {"pass": "\u2705", "fail": "\u274c", "warn": "\u26a0\ufe0f", "info": "\u2139\ufe0f"}
+    status_color = {"PASS": "#059669", "FAIL": "#dc2626", "WARN": "#f59e0b", "MISSING": "#94a3b8"}
+    for n in node_results:
+        status = n["status"]
+        title = f"{n['name']} — {n['role']} — {status}"
+        with st.expander(title, expanded=(status in ("FAIL", "MISSING"))):
+            st.markdown(f"<span style='color:{status_color.get(status,'#333')};font-weight:700'>{status}</span>"
+                        + (f"  ·  {n.get('tech','')}" if n.get("tech") else ""), unsafe_allow_html=True)
+            if not n["found"]:
+                st.caption(f"EDP not published for this node — \"{n['name']}\" was not found in SITE_NAME.")
+                continue
+            st.caption(f"Cabinet: **{n.get('cabinet') or '—'}**  ·  Cabinet ID: **{n.get('cabinet_id') or '—'}**")
+            for c in n["checks"]:
+                st.markdown(f"{icon.get(c['status'], '•')} **{c['label']}** — {c['detail']}")
+
+
+def render_edp_global_checks(global_checks, unexpected):
+    st.markdown('<div class="qkx-section-label">Cross-node Conflicts</div>', unsafe_allow_html=True)
+    pc, vc = global_checks["port_clashes"], global_checks["vlan_clashes"]
+    if not pc and not vc:
+        st.caption("No port or VLAN reuse detected across the EDP file.")
+    else:
+        for p in pc:
+            st.markdown(f"- Port **{p['port']}** on **{p['device']}** — {', '.join(sorted(p['sites']))}")
+        for v in vc:
+            st.markdown(f"- Bearer VLAN **{v['vlan']}** on **{v['device']}** — {', '.join(sorted(v['sites']))}")
+
+    st.markdown('<div class="qkx-section-label">Unexpected Nodes in EDP</div>', unsafe_allow_html=True)
+    if not unexpected:
+        st.caption("Every SITE_NAME row in the EDP maps back to a node requested in the CIQ.")
+    else:
+        show_rows(unexpected, drop=())
+
+
+PIPE_FIELDS_4G = ["earfcndl", "earfcnul", "dlChannelBandwidth", "ulChannelBandwidth"]
+PIPE_FIELDS_5G = ["arfcnDL", "arfcnUL", "bSChannelBwDL", "bSChannelBwUL", "ssbfrequency"]
+
+
+def render_pipe_compare_table(rows, pipe_fields, empty_msg="No data."):
+    """Same PRE|POST colored-field format as the HTML tool's Pre-vs-Post
+    compare tables — each cell shows 'pre | ciq', green when they match,
+    red when they don't."""
+    if not rows:
+        st.caption(empty_msg)
+        return
+    df = pd.DataFrame(rows)
+    present = [f for f in pipe_fields if f in df.columns]
+
+    def _pipe_style(v):
+        parts = [p.strip() for p in str(v).split("|")]
+        if len(parts) == 2 and parts[0] and parts[0].upper() != "NA" and parts[0] != parts[1]:
+            return "background-color:#fee2e2;color:#991b1b;font-weight:600"
+        return "background-color:#d1fae5;color:#065f46;font-weight:600"
+
+    drop_cols = [c for c in ("rule",) if c in df.columns]
+    df = df.drop(columns=drop_cols)
+    st.dataframe(_style_map(df.style, _pipe_style, present), use_container_width=True, hide_index=True)
 
 
 RULE_LABELS = {
@@ -520,7 +595,7 @@ with tab_rfds:
 
             def _method_style(v):
                 return f"color:{ar.CONFIDENCE_COLOR.get(str(v), '')};font-weight:700"
-            st.dataframe(adf.style.applymap(_method_style, subset=["match_method"]),
+            st.dataframe(_style_map(adf.style, _method_style, ["match_method"]),
                          use_container_width=True, hide_index=True)
             st.caption(" · ".join(f"{m}: {ar.CONFIDENCE_LABEL[m]}" for m in ("exact", "normalised", "suffix-strip", "none")))
 
@@ -538,7 +613,7 @@ with tab_edp:
     with c1:
         edp_only_file = st.file_uploader("EDP (.xls)", type=["xls"], key="edp_only_edp")
     with c2:
-        edp_only_ciq = st.file_uploader("CIQ (.xlsx) — optional, enables Board Type / Primary-Secondary checks",
+        edp_only_ciq = st.file_uploader("CIQ (.xlsx) — optional, enables the full node checklist",
                                          type=["xlsx"], key="edp_only_ciq")
 
     if st.button("Run EDP check", type="primary", key="edp_run"):
@@ -551,35 +626,45 @@ with tab_edp:
                 ws = cer.load_edp(edp_path)
                 _, edp_rows = cer.build_edp_index(ws)
 
-                node_rows = []
+                validation = None
                 rev_sheet, rev_rows = None, []
                 if edp_only_ciq:
                     ciq_path = _save_upload(edp_only_ciq, tmp)
                     ciq_wb = cer.load_ciq(ciq_path)
-                    mm_rows = cer.mixed_mode_rows(ciq_wb)
-                    enb_rows_all = cer.enb_info_rows(ciq_wb)
                     rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
-                    for mm in mm_rows:
-                        node_id = str(mm.get("Node to be built as") or "").strip()
-                        enb_row = cer.find_enb_row(enb_rows_all, node_id)
-                        node_rows.append(cn.check_primary_secondary(node_id, edp_rows, mm))
-                        node_rows.append(cn.check_board_type(node_id, mm, enb_row, ciq_wb, edp_rows))
+                    validation = ec.run_edp_validation(ciq_wb, edp_rows)
 
-        st.session_state["edp_only"] = {"edp_rows": edp_rows, "node_rows": node_rows,
+        st.session_state["edp_only"] = {"edp_rows": edp_rows, "validation": validation,
                                          "rev_sheet": rev_sheet, "rev_rows": rev_rows}
 
     state = st.session_state.get("edp_only")
     if state:
         render_revision_history(state["rev_sheet"], state["rev_rows"])
-        st.markdown('<div class="qkx-section-label">EDP Rows (raw)</div>', unsafe_allow_html=True)
-        show_rows(state["edp_rows"], empty_msg="No EDP rows found.", drop=())
 
-        if state["node_rows"]:
-            st.markdown('<div class="qkx-section-label">Node Checks (Primary/Secondary, Board Type)</div>', unsafe_allow_html=True)
-            show_rows(state["node_rows"])
+        if state["validation"]:
+            v = state["validation"]
+            total = len(v["node_results"])
+            counts = {}
+            for n in v["node_results"]:
+                counts[n["status"]] = counts.get(n["status"], 0) + 1
+            st.markdown('<div class="qkx-section-label">Node Checklist</div>', unsafe_allow_html=True)
+            st.write(" &nbsp; ".join(f"**{k}**: {v_}" for k, v_ in {"Total": total, **counts}.items()))
+            render_edp_node_cards(v["node_results"])
+            render_edp_global_checks(v["global_checks"], v["unexpected"])
 
-        df_download_button({"EDP Rows": state["edp_rows"], "Node Checks": state["node_rows"]},
-                            "\u2b07\ufe0f Export Excel", "edp_validator.xlsx", "edp_export")
+            flat_checks = []
+            for n in v["node_results"]:
+                for c in n["checks"]:
+                    flat_checks.append({"node": n["name"], "role": n["role"], "status_node": n["status"],
+                                        "check": c["label"], "check_status": c["status"], "detail": c["detail"]})
+            df_download_button({"EDP Rows": state["edp_rows"], "Node Checklist": flat_checks,
+                                 "Unexpected Nodes": v["unexpected"]},
+                                "\u2b07\ufe0f Export Excel", "edp_validator.xlsx", "edp_export")
+        else:
+            st.markdown('<div class="qkx-section-label">EDP Rows (raw)</div>', unsafe_allow_html=True)
+            show_rows(state["edp_rows"], empty_msg="No EDP rows found.", drop=())
+            st.caption("Upload a CIQ too for the full per-node checklist (cabinet, ports, VLANs, IPv6).")
+            df_download_button({"EDP Rows": state["edp_rows"]}, "\u2b07\ufe0f Export Excel", "edp_validator.xlsx", "edp_export")
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAB: CIQ Checks — standalone, CIQ-only site-wide checks (PCI/antenna/port
@@ -619,16 +704,45 @@ with tab_ciq:
                 "sef_fru": cs.check_sef_fru(site_label, ciq_wb),
             }
         st.session_state["ciq_checks"] = {"results": results, "rev_sheet": rev_sheet,
-                                           "rev_rows": rev_rows, "node_names": node_names}
+                                           "rev_rows": rev_rows, "node_names": node_names,
+                                           "node_integration": cv.build_node_integration(ciq_wb),
+                                           "lte_params": cv.build_param_table(ciq_wb, "eUtran Parameters", cv.LTE_PARAM_COLS),
+                                           "nr_params": cv.build_param_table(ciq_wb, "5G Info", cv.NR_PARAM_COLS)}
 
     state = st.session_state.get("ciq_checks")
     if state:
         render_revision_history(state["rev_sheet"], state["rev_rows"])
+
+        st.markdown('<div class="qkx-section-label">Node Integration</div>', unsafe_allow_html=True)
+        show_rows(state["node_integration"], drop=())
+
+        st.markdown('<div class="qkx-section-label">LTE / NR Parameters</div>', unsafe_allow_html=True)
+        band_opts = ["All"] + sorted({r.get("eUTRA operating band") for r in state["lte_params"] if r.get("eUTRA operating band")}
+                                      | {r.get("Operating Band") for r in state["nr_params"] if r.get("Operating Band")})
+        node_opts = ["All"] + sorted({n for n in state["node_names"] if n})
+        c1, c2 = st.columns(2)
+        band_filter = c1.selectbox("Band filter", band_opts, key="ciqchecks_bandfilter")
+        node_filter = c2.selectbox("Node (eNB/gNB ID) filter", node_opts, key="ciqchecks_nodefilter")
+
+        lte_view = [r for r in state["lte_params"]
+                    if (band_filter == "All" or r.get("eUTRA operating band") == band_filter)
+                    and (node_filter == "All" or str(r.get("EutranCellFDDId", "")).startswith(node_filter))]
+        nr_view = [r for r in state["nr_params"]
+                   if (band_filter == "All" or r.get("Operating Band") == band_filter)
+                   and (node_filter == "All" or str(r.get("NRCellDU", "")).startswith(node_filter))]
+        with st.expander(f"LTE eUtran Parameters ({len(lte_view)} cells)", expanded=False):
+            show_rows(lte_view, drop=())
+        with st.expander(f"5G NR Parameters ({len(nr_view)} cells)", expanded=False):
+            show_rows(nr_view, drop=())
+
+        st.markdown('<div class="qkx-section-label">Site-wide Checks</div>', unsafe_allow_html=True)
         render_result_tables(state["results"], [
             ("PCI Uniqueness", ["pci_4g", "pci_5g"]),
-            ("Site-wide Checks", ["radio_sharing", "port_uniqueness", "antenna", "sef_fru"]),
+            ("Radio Sharing / Port Uniqueness / Antenna / SEF-FRU", ["radio_sharing", "port_uniqueness", "antenna", "sef_fru"]),
         ])
-        df_download_button(state["results"], "\u2b07\ufe0f Export Excel", "ciq_checks.xlsx", "ciqchecks_export")
+        df_download_button({**state["results"], "Node Integration": state["node_integration"],
+                             "LTE Parameters": state["lte_params"], "NR Parameters": state["nr_params"]},
+                            "\u2b07\ufe0f Export Excel", "ciq_checks.xlsx", "ciqchecks_export")
 
         mismatch_count = sum(1 for rows in state["results"].values() for r in rows if r.get("status") == "MISMATCH")
         st.markdown('<div class="qkx-section-label">Pre Integration Issue Mail</div>', unsafe_allow_html=True)
@@ -709,10 +823,26 @@ with tab_audit:
         else:
             st.caption("No additions, deletions, sector movements, or retunes detected.")
 
-        st.markdown('<div class="qkx-section-label">Pre vs CIQ — cell/node-wise</div>', unsafe_allow_html=True)
+        st.markdown('<div class="qkx-section-label">Pre vs CIQ — RF Parameters (PRE | POST)</div>', unsafe_allow_html=True)
+        st.caption("4G")
+        render_pipe_compare_table(state["results"]["params_4g"], PIPE_FIELDS_4G, "No 4G cells with Pre data to compare.")
+        st.caption("5G")
+        render_pipe_compare_table(state["results"]["params_5g"], PIPE_FIELDS_5G, "No 5G cells with Pre data to compare.")
+
+        st.markdown('<div class="qkx-section-label">Engineer Comments</div>', unsafe_allow_html=True)
+        comments = (wt.param_warnings(state["results"]["params_4g"]) + wt.param_warnings(state["results"]["params_5g"])
+                    + wt.pci_warnings(state["results"]["pci_4g"] + state["results"]["pci_5g"])
+                    + wt.radio_type_warnings(state["results"]["radio_type"])
+                    + wt.sector_swap_warnings(state["results"]["radio_type"]))
+        if comments:
+            for c in comments:
+                st.markdown(f"- {c}")
+        else:
+            st.caption("No warnings — all checked parameters match Pre.")
+
+        st.markdown('<div class="qkx-section-label">PCI / Radio Type / Sector Swap / NR TAC</div>', unsafe_allow_html=True)
         render_result_tables(state["results"], [
-            ("RF Parameters", ["params_4g", "params_5g"]),
-            ("PCI / Radio Type / Sector Swap / NR TAC", ["pci_4g", "pci_5g", "radio_type", "sector_swap", "nr_tac"]),
+            ("Detail tables", ["pci_4g", "pci_5g", "radio_type", "sector_swap", "nr_tac"]),
         ])
         df_download_button(state["results"], "\u2b07\ufe0f Export Excel", "audit.xlsx", "audit_export")
 
@@ -730,24 +860,22 @@ with tab_amos:
             st.stop()
         with st.spinner("Parsing logs..."):
             node_logs = _decode_logs(amos_log_files)
-            summary_rows, cell_rows = [], []
-            for node_id, text in node_logs.items():
-                sw = pe.extract_sw_version(text) or {}
-                cells = sorted(pci.extract_pre_cells_for_node(text))
-                summary_rows.append({"node": node_id, "sw_version": sw.get("sw_version", "NOT FOUND"),
-                                      "sw_package": sw.get("sw_package", "NOT FOUND"), "cell_count": len(cells)})
-                for cell in cells:
-                    band, sector = bl.band_label(cell)
-                    cell_rows.append({"node": node_id, "cell": cell, "band": band or "-", "sector": sector or "-"})
-        st.session_state["amos"] = {"summary_rows": summary_rows, "cell_rows": cell_rows}
+            summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs)
+        st.session_state["amos"] = {"summary_rows": summary_rows, "lte_rows": lte_rows, "nr_rows": nr_rows}
 
     state = st.session_state.get("amos")
     if state:
         st.markdown('<div class="qkx-section-label">Node Summary</div>', unsafe_allow_html=True)
         show_rows(state["summary_rows"], drop=())
-        st.markdown('<div class="qkx-section-label">Pre Cell Inventory</div>', unsafe_allow_html=True)
-        show_rows(state["cell_rows"], drop=())
-        df_download_button({"Node Summary": state["summary_rows"], "Cell Inventory": state["cell_rows"]},
+        st.markdown('<div class="qkx-section-label">LTE Cells</div>', unsafe_allow_html=True)
+        show_rows(state["lte_rows"], drop=())
+        st.markdown('<div class="qkx-section-label">NR Cells</div>', unsafe_allow_html=True)
+        show_rows(state["nr_rows"], drop=())
+        st.caption("PTP status and Pre-existing DSS aren't captured by this project's Pre kget-all "
+                   "commands (confirmed limitation — see run_validation.py), so both are labelled "
+                   "rather than guessed.")
+        df_download_button({"Node Summary": state["summary_rows"], "LTE Cells": state["lte_rows"],
+                             "NR Cells": state["nr_rows"]},
                             "\u2b07\ufe0f Export Excel", "amos_pre_checks.xlsx", "amos_export")
 
 # ═══════════════════════════════════════════════════════════════════════════
