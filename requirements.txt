@@ -1,0 +1,6 @@
+streamlit
+openpyxl
+xlrd
+reportlab
+Pillow
+pdfplumber
