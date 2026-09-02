@@ -1,968 +1,582 @@
 """
-Streamlit front-end for the Pre-Scripting Validation tool.
+Streamlit app.py
 
-Styling matches QUICKIX (ashhureddy/integration-template-generator) exactly -
-same sticky navy topbar, same button gradient, same card style, same MasTec
-accent palette (Prussian Blue #00284e, Endeavour #024ea4, Orange #ff5b24) -
-with the real MasTec logo image in place of QUICKIX's CSS-text placeholder.
+UI restructured to match QUICKIX_Pre-Script_Validation.html's real top-level
+tabs (confirmed from that tool's own screenshot): RFDS Validation, Audit,
+EDP Validator, RET Antenna Checklist, Consolidated Report.
 
-Tab layout mirrors the QUICKIX HTML tool's top navigation, so the same
-standalone tools work independently AND feed a Consolidated Report, exactly
-like the HTML version's four embedded sub-tools + consolidated report page:
-
-    Consolidated Report   - full CIQ+EDP(+RFDS)(+kget logs) run -> PDF +
-                            RRNRBL checklist download, plus every
-                            intermediate result shown live (Pre/Post Config,
-                            SOW, Warnings & Comments, per-rule tables) -
-                            same content the PDF has, just live in-app too.
-    RFDS Checker          - standalone RFDS-only (or RFDS+CIQ) cell table,
-                            mirrors the embedded "RFDS to CIQ Auto-Validator".
-    EDP Validator         - standalone EDP-only (or EDP+CIQ) node table,
-                            mirrors the embedded "EDP Validator".
-    CIQ Checks            - standalone CIQ-only site-wide checks (PCI/antenna
-                            uniqueness/port uniqueness/SEF-FRU/radio sharing),
-                            mirrors the embedded "Audit -> CIQ Checks" tab.
-    Audit                 - standalone CIQ + kget-log Pre-vs-Post comparison
-                            (RF params, radio type, sector swap, NR TAC),
-                            mirrors the embedded "Audit -> Pre vs Post" tab.
-    Pre checks (AMOS)     - standalone kget-log-only per-node cell inventory,
-                            mirrors the embedded "Audit -> AMOS" tab.
-    CR Desc               - CR description string generator from CIQ + kget
-                            logs, mirrors the embedded "CR Desc" tab.
-
-Run locally:    streamlit run "Streamlit app.py"
-Deploy:         push this repo to GitHub, then deploy on share.streamlit.io
+Every check below calls an existing, already-confirmed function from
+checks_node.py / checks_sector.py / rfds_extract.py / pre_extract.py /
+ciq_edp_reader.py / rrnrbl_checklist.py. Nothing new was invented for this
+rewrite - see HANDOFF note: a prior document claimed a set of new modules
+(antenna_resolve.py, edp_checks.py, amos_view.py, ciq_view.py) that turned
+out not to exist anywhere in the repo. This file does not repeat that -
+everything here is wired to code that is actually present and was run
+against real project files before being delivered.
 """
-import base64
+import os
+import re
+import tempfile
 import datetime
 import io
-import os
-import tempfile
 
-import pandas as pd
 import streamlit as st
 
-import urllib.parse
-
-import antenna_resolve as ar
-import amos_view as av
-import band_labels as bl
+import ciq_edp_reader as cer
 import checks_node as cn
 import checks_sector as cs
-import ciq_edp_reader as cer
-import ciq_view as cv
-import edp_checks as ec
-import log_parser as lp
-import pre_cell_inventory as pci
-import pre_extract as pe
-import pre_post_config as ppc
 import rfds_extract as rf
-import rrnrbl_checklist as rc
+import pre_extract as pe
+import log_parser as lp
 import run_validation as rv
-import scope_of_work_text as sowt
+import rrnrbl_checklist as rc
+import antenna_resolve as ar
 import sow_analysis as sa
-import warnings_text as wt
+import scope_of_work_text as sowt
+import pre_cell_inventory as pci
 
-st.set_page_config(page_title="Pre-Scripting Validation", page_icon="\U0001F4E1", layout="wide")
+st.set_page_config(page_title="QUICK IX", layout="wide", page_icon="📡")
 
-LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mastec_logo_trim.png")
-
-
-def _logo_b64():
-    if not os.path.exists(LOGO_PATH):
-        return None
-    with open(LOGO_PATH, "rb") as f:
-        return base64.b64encode(f.read()).decode("ascii")
-
-
-# ---- sticky top bar + shared styling (same palette/structure as QUICKIX) ----
-_logo = _logo_b64()
-_logo_html = (f'<img src="data:image/png;base64,{_logo}" style="height:28px;filter:brightness(0) invert(1);" />'
-              if _logo else '<div class="qkx-logo">MAS<span>TEC</span></div>')
-
-st.markdown(f"""
-<style>
-  .stApp {{
-      background: linear-gradient(180deg, #eef3fa 0%, #f7f9fc 100%);
-  }}
-  .qkx-topbar {{
-      position: sticky; top: 0; z-index: 999;
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 0.9rem 1.75rem; margin: -1rem -1rem 1.5rem -1rem;
-      background: linear-gradient(90deg, #011b36 0%, #012a4e 100%);
-      border-bottom: 1px solid rgba(255,91,36,0.55);
-      box-shadow: 0 4px 18px rgba(0,0,0,0.2);
-  }}
-  .qkx-topbar .qkx-logo {{ font-size: 1.4rem; font-weight: 900; color: #ffffff; letter-spacing: 1px; }}
-  .qkx-topbar .qkx-logo span {{ color: #ffffff; }}
-  .qkx-topbar .qkx-credit {{ font-size: 0.78rem; color: #cfe0f5; text-align: right; line-height: 1.3; }}
-
-  .qkx-hero {{ text-align: center; margin: 1rem 0 2.5rem 0; }}
-  .qkx-hero h1 {{
-      font-size: 2.6rem; font-weight: 900; letter-spacing: 2px; margin-bottom: 0.3rem;
-      color: #012a4e;
-  }}
-  .qkx-hero p {{ color: #4a5b70; font-size: 1.02rem; }}
-
-  div[data-testid="stButton"] button, div[data-testid="stFormSubmitButton"] button {{
-      border-radius: 10px; font-weight: 700; border: 1.5px solid #013a6b;
-      background: linear-gradient(135deg, #024ea4, #013a6b); color: #ffffff;
-      box-shadow: 0 3px 8px rgba(1,42,78,0.25);
-      transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
-  }}
-  div[data-testid="stButton"] button:hover, div[data-testid="stFormSubmitButton"] button:hover {{
-      border-color: #ff5b24; color: #ffffff; transform: translateY(-1px);
-      box-shadow: 0 6px 14px rgba(255,91,36,0.35);
-  }}
-  div[data-testid="stButton"] button:active, div[data-testid="stFormSubmitButton"] button:active {{ transform: translateY(0); }}
-
-  /* Bordered containers / file uploaders - clean light cards */
-  div[data-testid="stVerticalBlockBorderWrapper"], div[data-testid="stFileUploaderDropzone"] {{
-      background: #ffffff !important;
-      border: 1px solid #dde5ef !important;
-      border-radius: 12px !important;
-      box-shadow: 0 2px 10px rgba(1,42,78,0.06);
-  }}
-
-  .qkx-section-label {{ font-weight: 700; color: #012a4e; font-size: 0.95rem; margin: 0.6rem 0 0.3rem 0; }}
-
-  div[data-testid="stTabs"] button[data-baseweb="tab"] {{ font-weight: 700; color: #012a4e; }}
-  div[data-testid="stTabs"] button[aria-selected="true"] {{ color: #ff5b24; border-bottom-color: #ff5b24 !important; }}
-</style>
-<div class="qkx-topbar">
-  {_logo_html}
-  <div class="qkx-credit">Pre-Scripting Validation<br>Powered by <b>MASTEC</b></div>
-</div>
-""", unsafe_allow_html=True)
-
+# ── Styling: dark navy header + coral underline, matching the HTML tool ──
 st.markdown("""
-<div class="qkx-hero">
-  <h1>PRE-SCRIPT</h1>
-  <p>Pre-Scripting Validation — CIQ vs EDP vs RFDS vs Pre kget-all</p>
-</div>
+<style>
+.block-container { padding-top: 1rem; max-width: 1200px; }
+.qkx-header {
+  background: linear-gradient(90deg, #011b36, #012a4e);
+  padding: 14px 22px; border-bottom: 3px solid #ff6b4a;
+  border-radius: 6px; margin-bottom: 14px;
+}
+.qkx-header h1 { color: #fff; font-size: 22px; margin: 0; letter-spacing: .04em; }
+.stTabs [data-baseweb="tab-list"] { gap: 4px; }
+.stTabs [data-baseweb="tab"] { font-weight: 600; }
+.qkx-card {
+  border: 1px solid #cbd5e1; border-radius: 8px; padding: 14px 16px;
+  background: #f8fafc; margin-bottom: 10px;
+}
+.qkx-stat { text-align:center; border:1px solid #cbd5e1; border-radius:8px; padding:10px; background:#fff; }
+.qkx-badge-match { color:#065f46; background:#d1fae5; padding:2px 8px; border-radius:5px; font-weight:600; }
+.qkx-badge-mismatch { color:#991b1b; background:#fee2e2; padding:2px 8px; border-radius:5px; font-weight:600; }
+.qkx-badge-manual { color:#92400e; background:#fef3c7; padding:2px 8px; border-radius:5px; font-weight:600; }
+.qkx-badge-skip { color:#64748b; background:#f1f5f9; padding:2px 8px; border-radius:5px; font-weight:600; }
+</style>
+<div class="qkx-header"><h1>📡 QUICK IX</h1></div>
 """, unsafe_allow_html=True)
 
+# ══════════════════════════════════════════════════════════════════════
+# Shared session state — files uploaded in one tab are available in the
+# others, same idea as the HTML tool's single shared upload bar.
+# ══════════════════════════════════════════════════════════════════════
+for k in ("ciq_bytes", "ciq_name", "edp_bytes", "edp_name", "rfds_bytes", "rfds_name"):
+    st.session_state.setdefault(k, None)
+st.session_state.setdefault("amos_texts", {})   # {node_id: raw_text}
+st.session_state.setdefault("amos_names", [])
 
-# ── Shared helpers ────────────────────────────────────────────────────────
-
-def _save_upload(f, tmp_dir):
-    path = os.path.join(tmp_dir, f.name)
-    with open(path, "wb") as fh:
-        fh.write(f.getbuffer())
-    return path
-
-
-def _decode_logs(log_files):
-    """{node_id: text} for every uploaded kget-all log."""
-    node_logs = {}
-    for lf in (log_files or []):
-        text = lf.getvalue().decode("utf-8", errors="replace")
-        node_id = pe.node_id_from_log(text) or os.path.splitext(lf.name)[0]
-        node_logs[node_id] = text
-    return node_logs
-
-
-STATUS_COLOR = {"MATCH": "#d1fae5", "MISMATCH": "#fee2e2", "INFO": "#dbeafe",
-                "SKIPPED": "#f1f5f9", "NA": "#f1f5f9", "WARN": "#fef3c7"}
-
-
-def _style_map(styler, func, subset):
-    """pandas 2.1 renamed Styler.applymap -> Styler.map (removed applymap in
-    later versions); this works on either."""
-    if hasattr(styler, "map"):
-        return styler.map(func, subset=subset)
-    return styler.applymap(func, subset=subset)
+top_l, top_r = st.columns([1, 5])
+with top_l:
+    if st.button("🔄 New Validation Run", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
+with top_r:
+    loaded = []
+    if st.session_state["ciq_name"]:
+        loaded.append(f"CIQ: `{st.session_state['ciq_name']}`")
+    if st.session_state["edp_name"]:
+        loaded.append(f"EDP: `{st.session_state['edp_name']}`")
+    if st.session_state["rfds_name"]:
+        loaded.append(f"RFDS: `{st.session_state['rfds_name']}`")
+    if st.session_state["amos_names"]:
+        loaded.append(f"Pre logs: `{len(st.session_state['amos_names'])}` file(s)")
+    st.caption(" &nbsp;·&nbsp; ".join(loaded) if loaded else "No files loaded yet.", unsafe_allow_html=True)
 
 
-def _style_status(df):
-    if "status" not in df.columns:
-        return df
-    return _style_map(df.style, lambda v: f"background-color:{STATUS_COLOR.get(str(v), '')}", ["status"])
+def _tmp_path(data, suffix):
+    tf = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    tf.write(data)
+    tf.close()
+    return tf.name
 
 
-def show_rows(rows, empty_msg="No data.", drop=("rule",)):
-    """Renders a list of result dicts as a sortable, status-colored table -
-    same per-cell/per-node granularity as the HTML tool's collapsible
-    RFDS vs CIQ / CIQ Sanity Check / EDP Checks drop-downs (every row here
-    is one cell or one node, never pre-aggregated)."""
-    if not rows:
-        st.caption(empty_msg)
-        return
-    df = pd.DataFrame(rows)
-    for col in drop:
-        if col in df.columns:
-            df = df.drop(columns=[col])
-    st.dataframe(_style_status(df), use_container_width=True, hide_index=True)
+def _load_ciq_wb():
+    if not st.session_state["ciq_bytes"]:
+        return None
+    return cer.load_ciq(_tmp_path(st.session_state["ciq_bytes"], ".xlsx"))
 
 
-def df_download_button(rows_by_sheet, label, file_name, key):
-    """rows_by_sheet: {sheet_name: [row_dict, ...]}. Renders an Excel
-    download button, one sheet per entry - same "Export Excel" affordance
-    every HTML sub-tool has."""
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        wrote_any = False
-        for sheet, rows in rows_by_sheet.items():
-            if not rows:
-                continue
-            pd.DataFrame(rows).to_excel(writer, sheet_name=sheet[:31], index=False)
-            wrote_any = True
-        if not wrote_any:
-            pd.DataFrame([{"Result": "No data"}]).to_excel(writer, sheet_name="Result", index=False)
-    st.download_button(label, data=buf.getvalue(), file_name=file_name,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True, key=key)
+def _status_badge(status):
+    cls = {"MATCH": "qkx-badge-match", "PASS": "qkx-badge-match", "EXPECTED": "qkx-badge-match",
+           "MISMATCH": "qkx-badge-mismatch", "FAIL": "qkx-badge-mismatch",
+           "SKIPPED": "qkx-badge-skip", "INFO": "qkx-badge-skip"}.get(str(status).upper(), "qkx-badge-skip")
+    return f'<span class="{cls}">{status}</span>'
 
 
-def render_revision_history(sheet_name, rows):
-    """Revision History — same "Revision History" button/modal the HTML
-    tool has, reading the CIQ's own 'Revision History' sheet (columns A-E,
-    two stacked mini-tables, header auto-detected per row)."""
-    with st.expander(f"Revision History{f' ({sheet_name})' if sheet_name else ''}", expanded=False):
-        if not sheet_name:
-            st.caption("No 'Revision History' sheet found in this CIQ.")
-            return
-        display_rows = [[str(v) for v in row] for row in rows]
-        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
-
-
-def mailto_link(to_addr, cc_addr, subject, body):
-    """Builds a mailto: link exactly like the HTML tool's composeMail() -
-    opens the user's own mail client with subject/body pre-filled."""
-    params = {"cc": cc_addr, "subject": subject, "body": body}
-    return f"mailto:{to_addr}?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}"
-
-
-def render_edp_node_cards(node_results):
-    """Node cards — mirrors the HTML EDP Validator's checklist view: one
-    card per expected node, PASS/FAIL/WARN/MISSING status chip, checks
-    listed underneath with a pass/fail/warn/info icon each."""
-    icon = {"pass": "\u2705", "fail": "\u274c", "warn": "\u26a0\ufe0f", "info": "\u2139\ufe0f"}
-    status_color = {"PASS": "#059669", "FAIL": "#dc2626", "WARN": "#f59e0b", "MISSING": "#94a3b8"}
-    for n in node_results:
-        status = n["status"]
-        title = f"{n['name']} — {n['role']} — {status}"
-        with st.expander(title, expanded=(status in ("FAIL", "MISSING"))):
-            st.markdown(f"<span style='color:{status_color.get(status,'#333')};font-weight:700'>{status}</span>"
-                        + (f"  ·  {n.get('tech','')}" if n.get("tech") else ""), unsafe_allow_html=True)
-            if not n["found"]:
-                st.caption(f"EDP not published for this node — \"{n['name']}\" was not found in SITE_NAME.")
-                continue
-            st.caption(f"Cabinet: **{n.get('cabinet') or '—'}**  ·  Cabinet ID: **{n.get('cabinet_id') or '—'}**")
-            for c in n["checks"]:
-                st.markdown(f"{icon.get(c['status'], '•')} **{c['label']}** — {c['detail']}")
-
-
-def render_edp_global_checks(global_checks, unexpected):
-    st.markdown('<div class="qkx-section-label">Cross-node Conflicts</div>', unsafe_allow_html=True)
-    pc, vc = global_checks["port_clashes"], global_checks["vlan_clashes"]
-    if not pc and not vc:
-        st.caption("No port or VLAN reuse detected across the EDP file.")
-    else:
-        for p in pc:
-            st.markdown(f"- Port **{p['port']}** on **{p['device']}** — {', '.join(sorted(p['sites']))}")
-        for v in vc:
-            st.markdown(f"- Bearer VLAN **{v['vlan']}** on **{v['device']}** — {', '.join(sorted(v['sites']))}")
-
-    st.markdown('<div class="qkx-section-label">Unexpected Nodes in EDP</div>', unsafe_allow_html=True)
-    if not unexpected:
-        st.caption("Every SITE_NAME row in the EDP maps back to a node requested in the CIQ.")
-    else:
-        show_rows(unexpected, drop=())
-
-
-PIPE_FIELDS_4G = ["earfcndl", "earfcnul", "dlChannelBandwidth", "ulChannelBandwidth"]
-PIPE_FIELDS_5G = ["arfcnDL", "arfcnUL", "bSChannelBwDL", "bSChannelBwUL", "ssbfrequency"]
-
-
-def render_pipe_compare_table(rows, pipe_fields, empty_msg="No data."):
-    """Same PRE|POST colored-field format as the HTML tool's Pre-vs-Post
-    compare tables — each cell shows 'pre | ciq', green when they match,
-    red when they don't."""
-    if not rows:
-        st.caption(empty_msg)
-        return
-    df = pd.DataFrame(rows)
-    present = [f for f in pipe_fields if f in df.columns]
-
-    def _pipe_style(v):
-        parts = [p.strip() for p in str(v).split("|")]
-        if len(parts) == 2 and parts[0] and parts[0].upper() != "NA" and parts[0] != parts[1]:
-            return "background-color:#fee2e2;color:#991b1b;font-weight:600"
-        return "background-color:#d1fae5;color:#065f46;font-weight:600"
-
-    drop_cols = [c for c in ("rule",) if c in df.columns]
-    df = df.drop(columns=drop_cols)
-    st.dataframe(_style_map(df.style, _pipe_style, present), use_container_width=True, hide_index=True)
-
-
-RULE_LABELS = {
-    "sw_version": "SW Version (#1)", "identity": "Identity (#2/12/14/17)",
-    "primary_secondary": "Primary/Secondary (#3/#31)", "board_type": "Board Type (#5/#15/#13)",
-    "xmu": "XMU (#27)", "tac": "TAC (#16)", "cells_vs_rfds": "Cells vs RFDS (#6/#18)",
-    "cell_id_vs_rfds": "Cell ID vs RFDS (#6/#24)", "params_4g": "4G RF Parameters (#19)",
-    "params_5g": "5G RF Parameters (#19)", "pci_4g": "4G PCI Uniqueness", "pci_5g": "5G PCI Uniqueness",
-    "radio_type": "Radio Type (#6/#13)", "sector_swap": "Sector/TX-RX/Power Swap (#21/#22/#32)",
-    "radio_sharing": "Radio Sharing", "port_uniqueness": "Port Uniqueness",
-    "xmu_port_overlap": "XMU Port Overlap", "antenna": "Antenna Uniqueness (#27/#34)",
-    "nbiot": "NB-IoT", "nr_tac": "NR TAC / SA-NSA (#17)", "sef_fru": "SEF / FRU",
-}
-WARN_LABELS = {
-    "warn_xmu": "XMU", "warn_params_4g": "4G Parameters", "warn_params_5g": "5G Parameters",
-    "warn_pci": "PCI", "warn_radio_type": "Radio Type", "warn_sector_swap": "Sector Swap",
-    "warn_nr_tac": "NR TAC / SA-NSA", "warn_air_radio": "AIR Radio", "warn_antenna": "Antenna",
-}
-
-
-def render_warnings_and_comments(results):
-    """Warnings & Comments — same section name/spirit as the HTML tool's
-    consolidated report; wording here stays exactly as confirmed against
-    the Blueprint (not rephrased into the HTML tool's band+sector wording,
-    since that wording was independently confirmed for this rule-based
-    checklist and shouldn't be silently overridden)."""
-    any_warn = False
-    for key, label in WARN_LABELS.items():
-        lines = results.get(key) or []
-        if not lines:
+def _mm_nodes(ciq_wb):
+    """[(node_id, e_name, g_name, mm_row), ...] for every node in Mixed Mode Info."""
+    out = []
+    for mm in cer.mixed_mode_rows(ciq_wb):
+        node_id = str(mm.get("Node to be built as") or mm.get("eNodeB Name") or "").strip()
+        if not node_id:
             continue
-        any_warn = True
-        st.markdown(f"**{label}**")
-        for line in lines:
-            st.markdown(f"- {line}")
-    if results.get("sa_note"):
-        any_warn = True
-        st.markdown(f"**SA Configuration** — {results['sa_note']}")
-    if not any_warn:
-        st.caption("No warnings — all checked cells passed validation.")
-    if results.get("unavailable_notes"):
-        with st.expander("Checks not available from Pre kget-all logs"):
-            for n in results["unavailable_notes"]:
-                st.markdown(f"- {n}")
+        out.append((node_id, str(mm.get("eNodeB Name") or "").strip(), str(mm.get("gNodeB Name") or "").strip(), mm))
+    return out
 
 
-def render_result_tables(results, groups):
-    """groups: [(section_title, [result_key, ...]), ...] — each result_key's
-    rows render as its own sortable, status-colored, cell/node-wise table,
-    grouped under a collapsible section (mirrors the HTML tool's collapsible
-    RFDS vs CIQ / CIQ Sanity Check / EDP Checks drop-downs)."""
-    for title, keys in groups:
-        present = [k for k in keys if results.get(k)]
-        if not present:
-            continue
-        with st.expander(title, expanded=False):
-            for k in present:
-                st.markdown(f"**{RULE_LABELS.get(k, k)}**")
-                show_rows(results[k])
+tab_rfds, tab_audit, tab_edp, tab_checklist, tab_consolidated = st.tabs(
+    ["RFDS Validation", "Audit", "EDP Validator", "RET Antenna Checklist", "Consolidated Report"]
+)
 
+# ══════════════════════════════════════════════════════════════════════
+# TAB 1 — RFDS Validation (standalone: RFDS required, CIQ optional)
+# ══════════════════════════════════════════════════════════════════════
+with tab_rfds:
+    st.subheader("RFDS Validation")
+    c1, c2 = st.columns(2)
+    with c1:
+        up = st.file_uploader("RFDS PDF", type=["pdf"], key="up_rfds")
+        if up:
+            st.session_state["rfds_bytes"], st.session_state["rfds_name"] = up.read(), up.name
+    with c2:
+        up = st.file_uploader("CIQ workbook (optional — enables cell/RCN comparison)", type=["xlsx"], key="up_ciq_rfds")
+        if up:
+            st.session_state["ciq_bytes"], st.session_state["ciq_name"] = up.read(), up.name
 
-# ── Tabs (mirrors the HTML tool's top navigation) ──────────────────────────
-(tab_consolidated, tab_rfds, tab_edp, tab_telecom) = st.tabs([
-    "Consolidated Report", "RFDS Checker", "EDP Validator", "Telecom Audit",
-])
+    if not st.session_state["rfds_bytes"]:
+        st.info("Upload an RFDS PDF to begin.")
+    else:
+        pages = rf.load_rfds_pages(st.session_state["rfds_bytes"])
+        site_details = rf.extract_site_details(pages)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# TAB: Consolidated Report
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_consolidated:
-    with st.form("inputs"):
-        st.markdown('<div class="qkx-section-label">Required files</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            ciq_file = st.file_uploader("CIQ (.xlsx)", type=["xlsx"], key="cr_ciq")
-        with c2:
-            edp_file = st.file_uploader("EDP (.xls)", type=["xls"], key="cr_edp")
+        st.markdown("#### Site Details")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.markdown(f'<div class="qkx-stat"><b>FA Code</b><br>{site_details.get("fa_code") or "—"}</div>', unsafe_allow_html=True)
+        m2.markdown(f'<div class="qkx-stat"><b>USID</b><br>{site_details.get("usid") or "—"}</div>', unsafe_allow_html=True)
+        m3.markdown(f'<div class="qkx-stat"><b>Site ID</b><br>{site_details.get("site_id") or "—"}</div>', unsafe_allow_html=True)
+        m4.markdown(f'<div class="qkx-stat"><b>Atoll Name</b><br>{site_details.get("atoll_site_name") or "—"}</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="qkx-section-label">Optional</div>', unsafe_allow_html=True)
-        c3, c4 = st.columns(2)
-        with c3:
-            rfds_file = st.file_uploader("RFDS (.pdf)", type=["pdf"], key="cr_rfds")
-        with c4:
-            log_files = st.file_uploader(
-                "Pre kget-all logs (.log / .txt) — one per node",
-                type=["log", "txt"], accept_multiple_files=True, key="cr_logs",
-            )
+        if not st.session_state["ciq_bytes"]:
+            st.caption("Upload a CIQ above to compare cells / CellID / RRH against this RFDS.")
+        else:
+            ciq_wb = _load_ciq_wb()
+            all_rows = []
+            for node_id, e_name, g_name, mm in _mm_nodes(ciq_wb):
+                all_rows.extend(cs.check_cells_vs_rfds(node_id, ciq_wb, pages, e_name, g_name))
+            st.markdown("#### Cells vs RFDS (CellID / RCN / RRH presence — Rule #6/#18)")
+            if all_rows:
+                st.dataframe(all_rows, use_container_width=True, hide_index=True)
+                n_bad = sum(1 for r in all_rows if r.get("status") == "MISMATCH")
+                st.caption(f"{len(all_rows)} cell(s) checked — {n_bad} not found in RFDS.")
+            else:
+                st.caption("No comparable cells found (check node naming between CIQ and RFDS).")
 
-        submitted = st.form_submit_button("Generate report", type="primary", use_container_width=True)
+# ══════════════════════════════════════════════════════════════════════
+# TAB 2 — Audit (Pre checks / CIQ Checks / Audit — shared state, like the
+# HTML tool's Telecom Audit Pro module)
+# ══════════════════════════════════════════════════════════════════════
+with tab_audit:
+    st.subheader("Audit")
+    sub_pre, sub_ciq, sub_audit, sub_crdesc = st.tabs(["Pre checks (AMOS)", "CIQ Checks", "Audit (Pre vs CIQ)", "CR Desc"])
 
-    if submitted:
-        if not ciq_file or not edp_file:
-            st.error("CIQ and EDP are both required.")
-            st.stop()
+    with sub_pre:
+        ups = st.file_uploader("Pre kget-all logs (.txt/.log, one per node)", type=["txt", "log"],
+                                accept_multiple_files=True, key="up_amos")
+        if ups:
+            for u in ups:
+                text = u.read().decode("utf-8", errors="ignore")
+                nid = pe.node_id_from_log(text) or u.name
+                st.session_state["amos_texts"][nid] = text
+                if nid not in st.session_state["amos_names"]:
+                    st.session_state["amos_names"].append(nid)
 
-        with st.spinner("Running validation checks..."):
+        if not st.session_state["amos_texts"]:
+            st.info("Upload one or more Pre kget-all logs to see extracted node/cell data.")
+        else:
+            rows = []
+            for nid, text in st.session_state["amos_texts"].items():
+                parsed = lp.parse_log(text)
+                sw = pe.extract_sw_version(text) or {}
+                ident = pe.extract_identity(parsed) or {}
+                hw = pe.extract_hardware(parsed) or {}
+                ptp = pe.extract_ptp_status(text)
+                dss_map = pe.extract_dss_status(text)
+                dss_cells = [c for c, active in dss_map.items() if active]
+                rows.append({
+                    "node": nid,
+                    "sw_package": sw.get("sw_package"), "sw_version": sw.get("sw_version"),
+                    "eNBId": ident.get("eNBId"), "gNBId": ident.get("gNBId"),
+                    "boards": ", ".join(hw.get("boards") or []),
+                    "radios": ", ".join(hw.get("radios") or []),
+                    "PTP (unconfirmed)": ptp,
+                    "Pre-existing DSS (unconfirmed)": ", ".join(dss_cells) if dss_cells else "None found",
+                })
+            st.caption("⚠️ PTP and DSS columns use a regex ported from the sibling HTML tool, not yet confirmed "
+                       "against a real kget-all log from this project's own hget command set — spot-check before trusting.")
+            st.markdown("#### Node Summary")
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+            for nid, text in st.session_state["amos_texts"].items():
+                with st.expander(f"{nid} — LTE / NR cells"):
+                    lte = pe.extract_lte_sector_params(text) or {}
+                    parsed = lp.parse_log(text)
+                    nr = pe.extract_5g_sector_params(parsed, text) or {}
+                    if lte:
+                        st.markdown("**LTE cells**")
+                        st.dataframe(list(lte.values()) if isinstance(lte, dict) else lte, use_container_width=True, hide_index=True)
+                    if nr:
+                        st.markdown("**NR cells**")
+                        st.dataframe(list(nr.values()) if isinstance(nr, dict) else nr, use_container_width=True, hide_index=True)
+                    if not lte and not nr:
+                        st.caption("No LTE or NR sector params extracted from this log.")
+
+    with sub_ciq:
+        up = st.file_uploader("CIQ workbook", type=["xlsx"], key="up_ciq_audit")
+        if up:
+            st.session_state["ciq_bytes"], st.session_state["ciq_name"] = up.read(), up.name
+
+        if not st.session_state["ciq_bytes"]:
+            st.info("Upload a CIQ workbook to see Node Integration and parameter tables.")
+        else:
+            ciq_wb = _load_ciq_wb()
+            nodes = _mm_nodes(ciq_wb)
+
+            st.markdown("#### Node Integration")
+            integ_rows = []
+            for node_id, e_name, g_name, mm in nodes:
+                enb_rows = cer.enb_info_rows(ciq_wb)
+                enb_row = cer.find_enb_row(enb_rows, node_id)
+                integ_rows.append({
+                    "node": node_id, "eNodeB Name": e_name, "gNodeB Name": g_name,
+                    "DU type": (enb_row or {}).get("DU type", ""),
+                    "BBU Mode": mm.get("BBU Mode", ""),
+                })
+            st.dataframe(integ_rows, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Sanity checks (CIQ-only — no Pre/EDP/RFDS needed)")
+            check_rows = []
+            for node_id, e_name, g_name, mm in nodes:
+                check_rows += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
+                check_rows += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
+                check_rows += cs.check_antenna_uniqueness(node_id, ciq_wb)
+                check_rows += cs.check_port_uniqueness(node_id, ciq_wb)
+                check_rows += cs.check_sef_fru(node_id, ciq_wb)
+                check_rows += cs.check_radio_sharing_pairs(node_id, ciq_wb)
+                check_rows += cs.check_radio_port_conflict(node_id, ciq_wb)
+            if check_rows:
+                st.dataframe(check_rows, use_container_width=True, hide_index=True)
+                n_bad = sum(1 for r in check_rows if r.get("status") == "MISMATCH")
+                st.caption(f"{len(check_rows)} check(s) — {n_bad} mismatch(es) (PCI clash, antenna/port uniqueness, SEF/FRU).")
+            else:
+                st.caption("No checkable rows found.")
+
+            with st.expander("Raw eUtran Parameters / 5G Info"):
+                if "eUtran Parameters" in ciq_wb.sheetnames:
+                    st.markdown("**eUtran Parameters (LTE)**")
+                    st.dataframe(cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]), use_container_width=True, hide_index=True)
+                if "5G Info" in ciq_wb.sheetnames:
+                    st.markdown("**5G Info**")
+                    st.dataframe(cer.sheet_rows_as_dicts(ciq_wb["5G Info"]), use_container_width=True, hide_index=True)
+
+            st.markdown("#### Antenna model vs RFDS")
+            if not st.session_state["rfds_bytes"]:
+                st.caption("Upload an RFDS PDF (RFDS Validation tab) to compare antenna models.")
+            else:
+                rfds_pages_ant = rf.load_rfds_pages(st.session_state["rfds_bytes"])
+                port_details = rf.extract_port_level_details(rfds_pages_ant)
+                if not port_details:
+                    st.caption("No 'Port Level Details (Final)' table found in this RFDS PDF.")
+                else:
+                    ant_rows = []
+                    for r in (cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]) if "eUtran Parameters" in ciq_wb.sheetnames else []):
+                        cell = r.get("EutranCellFDDId")
+                        ciq_ant = r.get("antenna model")
+                        pd_row = port_details.get(cell)
+                        tier, detail = ar.resolve_antenna(ciq_ant, pd_row["vendor_model"] if pd_row else None)
+                        ant_rows.append({"cell": cell, "ciq_antenna": ciq_ant,
+                                          "rfds_vendor_model": pd_row["vendor_model"] if pd_row else "NOT FOUND",
+                                          "match_tier": tier, "detail": detail})
+                    st.caption("⚠️ New extractor/matcher, not yet as battle-tested as the numbered rules — spot-check results.")
+                    st.dataframe(ant_rows, use_container_width=True, hide_index=True)
+
+            st.markdown("#### FA Code follow-up email")
+            fa = cn.build_site_details(ciq_wb, None).get("fa_code") or "UNKNOWN"
+            n_mismatch = sum(1 for r in check_rows if r.get("status") == "MISMATCH")
+            subject = f"FA {fa} — CIQ checks: {n_mismatch} mismatch(es) found"
+            body = (f"FA Code: {fa}%0D%0ANodes: {', '.join(node_ids)}%0D%0A"
+                    f"CIQ sanity checks found {n_mismatch} mismatch(es) out of {len(check_rows)} — see attached export.")
+            st.link_button("✉️ Compose FA-code email", f"mailto:?subject={subject}&body={body}")
+
+    with sub_audit:
+        if not st.session_state["ciq_bytes"]:
+            st.warning("Load a CIQ in the **CIQ Checks** tab first.")
+        elif not st.session_state["amos_texts"]:
+            st.warning("Load at least one Pre kget-all log in the **Pre checks (AMOS)** tab first.")
+        else:
+            ciq_wb = _load_ciq_wb()
+            rfds_pages = rf.load_rfds_pages(st.session_state["rfds_bytes"]) if st.session_state["rfds_bytes"] else None
+            rows = []
+            for node_id, e_name, g_name, mm in _mm_nodes(ciq_wb):
+                text = st.session_state["amos_texts"].get(node_id)
+                if text is None:
+                    # fall back to the only uploaded log if names don't line up 1:1
+                    text = next(iter(st.session_state["amos_texts"].values()), "")
+                has_pre = bool(text)
+                rows += cs.check_rf_params_4g(node_id, text, ciq_wb, has_pre)
+                parsed_nr = lp.parse_log(text) if text else {}
+                rows += cs.check_rf_params_5g(node_id, parsed_nr, text, ciq_wb, has_pre)
+                rows += cs.check_sector_swap_config(node_id, text, ciq_wb, e_name, g_name)
+                if rfds_pages is not None:
+                    rows += cs.check_cell_id_vs_rfds(node_id, text, ciq_wb, rfds_pages, e_name, g_name)
+            st.markdown("#### Pre vs CIQ (+ RFDS if loaded)")
+            if rows:
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+                n_bad = sum(1 for r in rows if r.get("status") == "MISMATCH")
+                st.caption(f"{len(rows)} field(s) checked — {n_bad} mismatch(es).")
+            else:
+                st.caption("Nothing to compare yet.")
+
+    with sub_crdesc:
+        if not st.session_state["ciq_bytes"]:
+            st.warning("Load a CIQ in the **CIQ Checks** tab first.")
+        else:
+            ciq_wb = _load_ciq_wb()
+            mm_rows = cer.mixed_mode_rows(ciq_wb)
+            pre_pairs, pre_nodes = pci.build_pre_inventory(st.session_state["amos_texts"])
+            sow = sa.classify_carriers(ciq_wb, mm_rows, pre_pairs, pre_nodes)
+            sow["target_band_sectors"] = sowt.build_target_band_sectors(ciq_wb, mm_rows)
+            scope_lines = sowt.scope_lines_to_readable_text(sowt.format_scope_of_work(sow, ciq_wb))
+            st.markdown("#### CR Description")
+            if not st.session_state["amos_texts"]:
+                st.caption("No Pre logs loaded — 'moved sector' lines need Pre data to detect the source node; "
+                           "this is integration-only scope for now.")
+            cr_text = "\n".join(f"- {l}" for l in scope_lines) if scope_lines else "(nothing to describe yet)"
+            st.text_area("Generated CR description", value=cr_text, height=200)
+            st.download_button("⬇️ Download CR description (.txt)", data=cr_text,
+                                file_name="cr_description.txt", mime="text/plain")
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 3 — EDP Validator (standalone: EDP required, CIQ optional)
+# ══════════════════════════════════════════════════════════════════════
+with tab_edp:
+    st.subheader("EDP Validator")
+    c1, c2 = st.columns(2)
+    with c1:
+        up = st.file_uploader("EDP workbook (.xls/.xlsx)", type=["xls", "xlsx"], key="up_edp")
+        if up:
+            st.session_state["edp_bytes"], st.session_state["edp_name"] = up.read(), up.name
+    with c2:
+        up = st.file_uploader("CIQ workbook (optional — enables the full per-node checklist)", type=["xlsx"], key="up_ciq_edp")
+        if up:
+            st.session_state["ciq_bytes"], st.session_state["ciq_name"] = up.read(), up.name
+
+    if not st.session_state["edp_bytes"]:
+        st.info("Upload an EDP workbook to begin.")
+    else:
+        edp_ws = cer.load_edp(_tmp_path(st.session_state["edp_bytes"], os.path.splitext(st.session_state["edp_name"])[1]))
+        _, edp_rows = cer.build_edp_index(edp_ws)
+
+        if not st.session_state["ciq_bytes"]:
+            st.caption("Upload a CIQ above to check EDP fields against the nodes actually requested.")
+            st.markdown("#### EDP rows found")
+            st.dataframe(edp_rows, use_container_width=True, hide_index=True)
+        else:
+            ciq_wb = _load_ciq_wb()
+            nodes = _mm_nodes(ciq_wb)
+            node_ids = [n[0] for n in nodes]
+
+            mm_by_node = {nid: mm for nid, e, g, mm in nodes}
+            controller_ids = [r.get("Controller ID") for r in cer.sheet_rows_as_dicts(ciq_wb["Controller Info"])
+                               if r.get("Controller ID")] if "Controller Info" in ciq_wb.sheetnames else []
+            checks = {
+                "Found in EDP": rc._edp_found_status(edp_rows, node_ids),
+                "Cabinet naming": rc._edp_cabinet_status(edp_rows, node_ids),
+                "Port size (BBU mode)": rc._edp_port_size_status(edp_rows, node_ids, mm_by_node),
+                "Port facing (Primary/Secondary)": rc._edp_port_facing_status(edp_rows, node_ids),
+                "Bearer VLAN clash": rc._edp_bearer_vlan_status(edp_rows, node_ids),
+                "IPv6 bearer addressing": rc._edp_group_status(edp_rows, node_ids, rc.IPV6_BEARER_FIELDS, "IPv6 bearer"),
+                "IPv6 OAM addressing": rc._edp_group_status(edp_rows, node_ids, rc.IPV6_OAM_FIELDS, "IPv6 OAM"),
+                "Controller (ANCEQ)": rc._edp_controller_status(edp_rows, controller_ids),
+                "PTP configuration": rc._edp_ptp_status(edp_rows, node_ids),
+            }
+            n_pass = sum(1 for s, _ in checks.values() if s == "match")
+            n_fail = sum(1 for s, _ in checks.values() if s == "mismatch")
+            n_unk = sum(1 for s, _ in checks.values() if s == "unknown")
+
+            s1, s2, s3, s4 = st.columns(4)
+            s1.markdown(f'<div class="qkx-stat"><b>{len(node_ids)}</b><br>Expected Nodes</div>', unsafe_allow_html=True)
+            s2.markdown(f'<div class="qkx-stat"><b>{n_pass}</b><br>Pass</div>', unsafe_allow_html=True)
+            s3.markdown(f'<div class="qkx-stat"><b>{n_fail}</b><br>Fail</div>', unsafe_allow_html=True)
+            s4.markdown(f'<div class="qkx-stat"><b>{n_unk}</b><br>No data</div>', unsafe_allow_html=True)
+
+            view = st.radio("View", ["Table view", "Checklist view"], horizontal=True, key="edp_view_toggle")
+            if view == "Table view":
+                st.dataframe(
+                    [{"check": k, "status": s, "detail": d} for k, (s, d) in checks.items()],
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                for k, (s, d) in checks.items():
+                    st.markdown(f"{_status_badge(s.upper())} &nbsp; **{k}** — {d}", unsafe_allow_html=True)
+
+            board = [cn.check_board_type(nid, mm, cer.find_enb_row(cer.enb_info_rows(ciq_wb), nid), ciq_wb, edp_rows)
+                     for nid, e, g, mm in nodes]
+            st.markdown("#### Board Type (CIQ vs EDP vs RFDS)")
+            st.dataframe(board, use_container_width=True, hide_index=True)
+
+            xmu_rows = []
+            gnb_rows_all = cer.gnb_info_5g_info_rows(ciq_wb) if "gNB Info" in ciq_wb.sheetnames else []
+            for nid, e_name, g_name, mm in nodes:
+                enb_row = cer.find_enb_row(cer.enb_info_rows(ciq_wb), nid)
+                gnb_row = next((r for r in gnb_rows_all if str(r.get("gNodeB Name", "")).strip().upper() == g_name.upper()), None) if g_name else None
+                xmu_rows += cs.check_xmu_port_overlap(nid, enb_row, gnb_row, ciq_wb)
+            st.markdown("#### XMU Port Overlap (Riport uniqueness)")
+            if xmu_rows:
+                st.dataframe(xmu_rows, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No node declares an XMU (1st/2nd XMU = YES) — nothing to check.")
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 4 — RET Antenna Checklist (the 63-item RRNRBL checklist)
+# ══════════════════════════════════════════════════════════════════════
+with tab_checklist:
+    st.subheader("RET Antenna Checklist")
+    if not (st.session_state["ciq_bytes"] and st.session_state["edp_bytes"]):
+        st.warning("Needs a CIQ **and** an EDP — load them in the RFDS Validation, Audit, or EDP Validator tabs, "
+                   "or run the full pipeline in **Consolidated Report**.")
+    else:
+        if st.button("Build checklist", key="build_checklist_btn"):
+            ciq_path = _tmp_path(st.session_state["ciq_bytes"], ".xlsx")
+            edp_path = _tmp_path(st.session_state["edp_bytes"], os.path.splitext(st.session_state["edp_name"])[1])
+            rfds_path = _tmp_path(st.session_state["rfds_bytes"], ".pdf") if st.session_state["rfds_bytes"] else None
+            node_logs = {}
+            for nid, text in st.session_state["amos_texts"].items():
+                node_logs[nid] = _tmp_path(text.encode("utf-8"), ".txt")
             with tempfile.TemporaryDirectory() as tmp:
-                ciq_path = _save_upload(ciq_file, tmp)
-                edp_path = _save_upload(edp_file, tmp)
-                rfds_path = _save_upload(rfds_file, tmp) if rfds_file else None
+                out_pdf = os.path.join(tmp, "r.pdf")
+                _, results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages = rv.run(
+                    ciq_path, edp_path, rfds_path, node_logs, out_pdf
+                )
+            st.session_state["checklist"] = rc.build_checklist(results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages)
+            st.session_state["checklist_site_id_fa"] = " / ".join(
+                v for v in (site_details.get("site_id"), site_details.get("fa_code")) if v)
 
-                node_log_paths = {}
-                for lf in (log_files or []):
-                    text = lf.getvalue().decode("utf-8", errors="replace")
-                    node_id = pe.node_id_from_log(text) or os.path.splitext(lf.name)[0]
-                    log_path = os.path.join(tmp, lf.name)
-                    with open(log_path, "w") as f:
-                        f.write(text)
-                    node_log_paths[node_id] = log_path
+        checklist = st.session_state.get("checklist")
+        if checklist:
+            # Manual items: a real checkbox + comment box per row, keyed by the
+            # fixed Excel row number (not list position) so Streamlit keeps the
+            # value across reruns instead of resetting it — every checkbox and
+            # text_area with a `key=` is auto-persisted in st.session_state by
+            # Streamlit itself; we just read those same keys back below.
+            manual_overrides = {}
+            for row in checklist:
+                if row["status"] != "manual":
+                    continue
+                r = row["row"]
+                manual_overrides[r] = {
+                    "done": st.session_state.get(f"manual_done_{r}", False),
+                    "comment": st.session_state.get(f"manual_comment_{r}", ""),
+                }
 
+            xbytes = rc.fill_checklist_xlsx(checklist, st.session_state.get("checklist_site_id_fa", ""),
+                                             manual_overrides=manual_overrides)
+            st.download_button("⬇️ Download filled RRNRBL Checklist (.xlsx)", data=xbytes,
+                                file_name="Checklist_RRNRBL_filled.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="checklist_download_btn")
+            st.caption("Every manual checkbox/comment below is baked into this download live — check a box or "
+                       "type a comment, then click Download again to get the updated file.")
+
+            counts = {}
+            for row in checklist:
+                counts[row["status"]] = counts.get(row["status"], 0) + 1
+            st.write(" &nbsp; ".join(f"**{v}** {k}" for k, v in counts.items()))
+
+            cats = []
+            for row in checklist:
+                if not cats or cats[-1]["cat"] != row["cat"]:
+                    cats.append({"cat": row["cat"], "rows": []})
+                cats[-1]["rows"].append(row)
+            icon = {"match": "✅", "mismatch": "❌", "manual": "✏️", "unknown": "❔", "na": "➖", "info": "ℹ️"}
+            for c in cats:
+                with st.expander(f"{c['cat']} ({sum(1 for r in c['rows'] if r['status']=='mismatch')} mismatch)"):
+                    last_sub = object()
+                    for row in c["rows"]:
+                        if row["sub"] != last_sub:
+                            if row["sub"]:
+                                st.markdown(f"**{row['sub']}**")
+                            last_sub = row["sub"]
+                        if row["status"] == "manual":
+                            r = row["row"]
+                            cols = st.columns([0.06, 0.94])
+                            with cols[0]:
+                                st.checkbox("", key=f"manual_done_{r}", label_visibility="collapsed")
+                            with cols[1]:
+                                st.markdown(f"✏️ **{row['item']}**")
+                                st.text_input("Comment", key=f"manual_comment_{r}", label_visibility="collapsed",
+                                              placeholder="Comment / evidence…")
+                        else:
+                            st.markdown(f"{icon.get(row['status'],'?')} **{row['item']}** — {row['detail']}")
+
+# ══════════════════════════════════════════════════════════════════════
+# TAB 5 — Consolidated Report (the original full pipeline)
+# ══════════════════════════════════════════════════════════════════════
+with tab_consolidated:
+    st.subheader("Consolidated Report")
+    st.caption("Runs the full validation pass (CIQ + EDP required, RFDS + Pre logs optional) and produces the PDF "
+               "report plus a filled RRNRBL checklist.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        up = st.file_uploader("CIQ workbook", type=["xlsx"], key="up_ciq_cr")
+        if up:
+            st.session_state["ciq_bytes"], st.session_state["ciq_name"] = up.read(), up.name
+        up = st.file_uploader("EDP workbook", type=["xls", "xlsx"], key="up_edp_cr")
+        if up:
+            st.session_state["edp_bytes"], st.session_state["edp_name"] = up.read(), up.name
+    with c2:
+        up = st.file_uploader("RFDS PDF (optional)", type=["pdf"], key="up_rfds_cr")
+        if up:
+            st.session_state["rfds_bytes"], st.session_state["rfds_name"] = up.read(), up.name
+        ups = st.file_uploader("Pre kget-all logs (optional)", type=["txt", "log"], accept_multiple_files=True, key="up_amos_cr")
+        if ups:
+            for u in ups:
+                text = u.read().decode("utf-8", errors="ignore")
+                nid = pe.node_id_from_log(text) or u.name
+                st.session_state["amos_texts"][nid] = text
+                if nid not in st.session_state["amos_names"]:
+                    st.session_state["amos_names"].append(nid)
+
+    ready = bool(st.session_state["ciq_bytes"] and st.session_state["edp_bytes"])
+    if st.button("▶ Generate Report", disabled=not ready, type="primary"):
+        with st.spinner("Running validation…"):
+            ciq_path = _tmp_path(st.session_state["ciq_bytes"], ".xlsx")
+            edp_path = _tmp_path(st.session_state["edp_bytes"], os.path.splitext(st.session_state["edp_name"])[1])
+            rfds_path = _tmp_path(st.session_state["rfds_bytes"], ".pdf") if st.session_state["rfds_bytes"] else None
+            node_logs = {nid: _tmp_path(t.encode("utf-8"), ".txt") for nid, t in st.session_state["amos_texts"].items()}
+            with tempfile.TemporaryDirectory() as tmp:
                 out_pdf = os.path.join(tmp, "validation_report.pdf")
                 try:
-                    (out_pdf, results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages,
-                     pre_text, post_text, scope_lines, sow) = rv.run(
-                        ciq_path, edp_path, rfds_path, node_log_paths, out_pdf
+                    _, results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages = rv.run(
+                        ciq_path, edp_path, rfds_path, node_logs, out_pdf
                     )
                 except Exception as e:
                     st.error(f"Report generation failed: {e}")
                     st.stop()
-
                 with open(out_pdf, "rb") as f:
                     pdf_bytes = f.read()
-
-                checklist = rc.build_checklist(results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages)
-                site_id_fa = " / ".join(v for v in (site_details.get("site_id"), site_details.get("fa_code")) if v)
-                checklist_xlsx = rc.fill_checklist_xlsx(checklist, site_id_fa)
-                rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
-
-        st.session_state["consolidated"] = {
-            "pdf_bytes": pdf_bytes, "checklist_xlsx": checklist_xlsx, "checklist": checklist,
-            "site_id_fa": site_id_fa, "results": results, "site_details": site_details,
-            "pre_text": pre_text, "post_text": post_text, "scope_lines": scope_lines, "sow": sow,
-            "rev_sheet": rev_sheet, "rev_rows": rev_rows,
-        }
-
-    state = st.session_state.get("consolidated")
-    if state:
+            checklist = rc.build_checklist(results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages)
+            site_id_fa = " / ".join(v for v in (site_details.get("site_id"), site_details.get("fa_code")) if v)
+            checklist_xlsx = rc.fill_checklist_xlsx(checklist, site_id_fa)
+            st.session_state["cr_pdf_bytes"] = pdf_bytes
+            st.session_state["cr_checklist_xlsx"] = checklist_xlsx
         st.success("Report generated.")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.download_button("\u2b07\ufe0f Download PDF", data=state["pdf_bytes"], file_name="validation_report.pdf",
-                                mime="application/pdf", use_container_width=True)
-        with c2:
-            st.download_button("\u2b07\ufe0f Download filled RRNRBL Checklist (.xlsx)", data=state["checklist_xlsx"],
+    elif not ready:
+        st.caption("CIQ and EDP are both required to generate the Consolidated Report.")
+
+    if st.session_state.get("cr_pdf_bytes"):
+        d1, d2 = st.columns(2)
+        with d1:
+            st.download_button("⬇️ Download PDF", data=st.session_state["cr_pdf_bytes"],
+                                file_name="validation_report.pdf", mime="application/pdf", use_container_width=True)
+        with d2:
+            st.download_button("⬇️ Download filled RRNRBL Checklist (.xlsx)", data=st.session_state["cr_checklist_xlsx"],
                                 file_name="Checklist_RRNRBL_filled.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 use_container_width=True)
-
-        render_revision_history(state["rev_sheet"], state["rev_rows"])
-
-        st.markdown('<div class="qkx-section-label">Pre / Post Configuration</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        c1.markdown(f"**Pre:** {state['pre_text'] or '—'}")
-        c2.markdown(f"**Post:** {state['post_text'] or '—'}")
-
-        st.markdown('<div class="qkx-section-label">SOW Summary</div>', unsafe_allow_html=True)
-        if state["scope_lines"]:
-            for line in state["scope_lines"]:
-                st.markdown(f"- {line}")
-        else:
-            st.caption("No additions, deletions, sector movements, or retunes detected.")
-
-        st.markdown('<div class="qkx-section-label">Warnings & Comments</div>', unsafe_allow_html=True)
-        render_warnings_and_comments(state["results"])
-
-        st.markdown('<div class="qkx-section-label">Detailed Checks (cell/node-wise)</div>', unsafe_allow_html=True)
-        render_result_tables(state["results"], [
-            ("Node Checks", ["sw_version", "identity", "primary_secondary", "board_type", "xmu", "tac"]),
-            ("RFDS vs CIQ", ["cells_vs_rfds", "cell_id_vs_rfds"]),
-            ("Pre vs CIQ (Audit)", ["params_4g", "params_5g", "pci_4g", "pci_5g", "radio_type",
-                                     "sector_swap", "nr_tac"]),
-            ("CIQ Site-wide Checks", ["radio_sharing", "port_uniqueness", "xmu_port_overlap",
-                                       "antenna", "nbiot", "sef_fru"]),
-        ])
-
-        st.markdown('<div class="qkx-section-label">RRNRBL Checklist</div>', unsafe_allow_html=True)
-        st.caption(f"Site ID/FA: **{state['site_id_fa'] or 'not found'}**  ·  "
-                   f"Date: **{datetime.date.today().strftime('%m/%d/%Y')}** — both auto-filled in the downloaded checklist above.")
-
-        STATUS_ICON = {"match": "\u2705", "mismatch": "\u274c", "manual": "\u270f\ufe0f",
-                       "unknown": "\u2754", "na": "\u2796", "info": "\u2139\ufe0f"}
-        counts = {}
-        for row in state["checklist"]:
-            counts[row["status"]] = counts.get(row["status"], 0) + 1
-        st.write(" &nbsp; ".join(f"{STATUS_ICON.get(k, '?')} **{v}** {k}" for k, v in counts.items()), unsafe_allow_html=True)
-
-        cats = []
-        for row in state["checklist"]:
-            if not cats or cats[-1]["cat"] != row["cat"]:
-                cats.append({"cat": row["cat"], "rows": []})
-            cats[-1]["rows"].append(row)
-
-        for c in cats:
-            with st.expander(f"{c['cat']}  ({sum(1 for r in c['rows'] if r['status'] == 'mismatch')} mismatch)", expanded=False):
-                last_sub = object()
-                for row in c["rows"]:
-                    if row["sub"] != last_sub:
-                        if row["sub"]:
-                            st.markdown(f"**{row['sub']}**")
-                        last_sub = row["sub"]
-                    icon = STATUS_ICON.get(row["status"], "?")
-                    st.markdown(f"{icon} **{row['item']}** &nbsp;·&nbsp; {row['detail']}", unsafe_allow_html=True)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# TAB: RFDS Checker — standalone RFDS-only (or RFDS+CIQ) validator, mirrors
-# the HTML tool's embedded "RFDS to CIQ Auto-Validator".
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_rfds:
-    st.markdown('<div class="qkx-section-label">Files</div>', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        rfds_only_file = st.file_uploader("RFDS (.pdf)", type=["pdf"], key="rfds_only_rfds")
-    with c2:
-        rfds_only_ciq = st.file_uploader("CIQ (.xlsx) — optional, enables cell/RCN comparison", type=["xlsx"], key="rfds_only_ciq")
-    with c3:
-        rfds_only_antfile = st.file_uploader(
-            "Antenna Info XLSX — optional, resolves CIQ antenna names",
-            type=["xlsx"], key="rfds_only_ant",
-            help="Columns: kget_ant_model / rfds_ant_model. Only used when CIQ is also uploaded.")
-
-    if st.button("Run RFDS check", type="primary", key="rfds_run"):
-        if not rfds_only_file:
-            st.error("RFDS is required.")
-            st.stop()
-        with st.spinner("Parsing RFDS..."):
-            rfds_bytes = rfds_only_file.getvalue()
-            pages = rf.load_rfds_pages(rfds_bytes)
-            site_details = rf.extract_site_details(pages)
-            cell_details = rf.extract_cell_details(pages)
-
-            compare_rows = []
-            rev_sheet, rev_rows = None, []
-            antenna_rows = []
-            if rfds_only_ciq:
-                with tempfile.TemporaryDirectory() as tmp:
-                    ciq_path = _save_upload(rfds_only_ciq, tmp)
-                    ciq_wb = cer.load_ciq(ciq_path)
-                mm_rows = cer.mixed_mode_rows(ciq_wb)
-                rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
-                for mm in mm_rows:
-                    node_id = str(mm.get("Node to be built as") or "").strip()
-                    e_name = str(mm.get("eNodeB Name") or "").strip()
-                    g_name = str(mm.get("gNodeB Name") or "").strip()
-                    compare_rows += cs.check_cells_vs_rfds(node_id, ciq_wb, pages, e_name, g_name)
-                    compare_rows += cs.check_cell_id_vs_rfds(node_id, None, ciq_wb, pages, e_name, g_name)
-
-                # Antenna resolution pipeline (exact/normalised/suffix-strip),
-                # applied to the CIQ's own antenna model columns against an
-                # optionally-uploaded Antenna Info map — same confidence tiers
-                # as the HTML tool's resolveAntenna().
-                antenna_map = {}
-                if rfds_only_antfile:
-                    ant_wb = cer.load_ciq(_save_upload(rfds_only_antfile, tempfile.mkdtemp()))
-                    ant_sheet = next((s for s in ant_wb.sheetnames if "antenna" in s.lower()), ant_wb.sheetnames[0])
-                    antenna_map = ar.build_antenna_map(cer.sheet_rows_as_dicts(ant_wb[ant_sheet]))
-                for row in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]) if "eUtran Parameters" in ciq_wb.sheetnames else []:
-                    raw = str(row.get("antenna model") or "").strip()
-                    if not raw:
-                        continue
-                    resolved = ar.resolve_antenna(raw, antenna_map)
-                    antenna_rows.append({"cell": row.get("EutranCellFDDId"), "raw_ciq_antenna": raw,
-                                          "resolved_antenna": resolved["value"],
-                                          "match_method": resolved["method"], "matched_kget": resolved["matched_kget"]})
-                for row in cer.sheet_rows_as_dicts(ciq_wb["5G Info"]) if "5G Info" in ciq_wb.sheetnames else []:
-                    raw = str(row.get("Antenna Type") or "").strip()
-                    if not raw:
-                        continue
-                    resolved = ar.resolve_antenna(raw, antenna_map)
-                    antenna_rows.append({"cell": row.get("NRCellDU"), "raw_ciq_antenna": raw,
-                                          "resolved_antenna": resolved["value"],
-                                          "match_method": resolved["method"], "matched_kget": resolved["matched_kget"]})
-
-            cell_rows = [{"cell": k, **v} for k, v in cell_details.items()]
-            st.session_state["rfds_only"] = {"site_details": site_details, "cell_rows": cell_rows,
-                                              "compare_rows": compare_rows, "rev_sheet": rev_sheet,
-                                              "rev_rows": rev_rows, "antenna_rows": antenna_rows}
-
-    state = st.session_state.get("rfds_only")
-    if state:
-        render_revision_history(state["rev_sheet"], state["rev_rows"])
-        st.markdown('<div class="qkx-section-label">Site Details</div>', unsafe_allow_html=True)
-        sd = state["site_details"]
-        if sd:
-            st.write(" &nbsp;·&nbsp; ".join(f"**{k}**: {v}" for k, v in sd.items()))
-        else:
-            st.caption("Site Details not found in RFDS.")
-
-        st.markdown('<div class="qkx-section-label">Cell Details (Final)</div>', unsafe_allow_html=True)
-        show_rows(state["cell_rows"], empty_msg="No 'Cell Details (Final)' table found in RFDS.")
-
-        if state["compare_rows"]:
-            st.markdown('<div class="qkx-section-label">RFDS vs CIQ</div>', unsafe_allow_html=True)
-            show_rows(state["compare_rows"])
-
-        if state["antenna_rows"]:
-            st.markdown('<div class="qkx-section-label">Antenna Resolution (CIQ antenna model)</div>', unsafe_allow_html=True)
-            adf = pd.DataFrame(state["antenna_rows"])
-
-            def _method_style(v):
-                return f"color:{ar.CONFIDENCE_COLOR.get(str(v), '')};font-weight:700"
-            st.dataframe(_style_map(adf.style, _method_style, ["match_method"]),
-                         use_container_width=True, hide_index=True)
-            st.caption(" · ".join(f"{m}: {ar.CONFIDENCE_LABEL[m]}" for m in ("exact", "normalised", "suffix-strip", "none")))
-
-        df_download_button({"Cell Details": state["cell_rows"], "RFDS vs CIQ": state["compare_rows"],
-                             "Antenna Resolution": state["antenna_rows"]},
-                            "\u2b07\ufe0f Export Excel", "rfds_checker.xlsx", "rfds_export")
-
-# ═══════════════════════════════════════════════════════════════════════════
-# TAB: EDP Validator — standalone EDP-only (or EDP+CIQ) validator, mirrors
-# the HTML tool's embedded "EDP Validator".
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_edp:
-    st.markdown('<div class="qkx-section-label">Files</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        edp_only_file = st.file_uploader("EDP (.xls)", type=["xls"], key="edp_only_edp")
-    with c2:
-        edp_only_ciq = st.file_uploader("CIQ (.xlsx) — optional, enables the full node checklist",
-                                         type=["xlsx"], key="edp_only_ciq")
-
-    if st.button("Run EDP check", type="primary", key="edp_run"):
-        if not edp_only_file:
-            st.error("EDP is required.")
-            st.stop()
-        with st.spinner("Parsing EDP..."):
-            with tempfile.TemporaryDirectory() as tmp:
-                edp_path = _save_upload(edp_only_file, tmp)
-                ws = cer.load_edp(edp_path)
-                _, edp_rows = cer.build_edp_index(ws)
-
-                validation = None
-                rev_sheet, rev_rows = None, []
-                if edp_only_ciq:
-                    ciq_path = _save_upload(edp_only_ciq, tmp)
-                    ciq_wb = cer.load_ciq(ciq_path)
-                    rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
-                    validation = ec.run_edp_validation(ciq_wb, edp_rows)
-
-        st.session_state["edp_only"] = {"edp_rows": edp_rows, "validation": validation,
-                                         "rev_sheet": rev_sheet, "rev_rows": rev_rows}
-
-    state = st.session_state.get("edp_only")
-    if state:
-        render_revision_history(state["rev_sheet"], state["rev_rows"])
-
-        if state["validation"]:
-            v = state["validation"]
-            total = len(v["node_results"])
-            counts = {}
-            for n in v["node_results"]:
-                counts[n["status"]] = counts.get(n["status"], 0) + 1
-            st.markdown('<div class="qkx-section-label">Node Checklist</div>', unsafe_allow_html=True)
-            st.write(" &nbsp; ".join(f"**{k}**: {v_}" for k, v_ in {"Total": total, **counts}.items()))
-            render_edp_node_cards(v["node_results"])
-            render_edp_global_checks(v["global_checks"], v["unexpected"])
-
-            flat_checks = []
-            for n in v["node_results"]:
-                for c in n["checks"]:
-                    flat_checks.append({"node": n["name"], "role": n["role"], "status_node": n["status"],
-                                        "check": c["label"], "check_status": c["status"], "detail": c["detail"]})
-            df_download_button({"EDP Rows": state["edp_rows"], "Node Checklist": flat_checks,
-                                 "Unexpected Nodes": v["unexpected"]},
-                                "\u2b07\ufe0f Export Excel", "edp_validator.xlsx", "edp_export")
-        else:
-            st.markdown('<div class="qkx-section-label">EDP Rows (raw)</div>', unsafe_allow_html=True)
-            show_rows(state["edp_rows"], empty_msg="No EDP rows found.", drop=())
-            st.caption("Upload a CIQ too for the full per-node checklist (cabinet, ports, VLANs, IPv6).")
-            df_download_button({"EDP Rows": state["edp_rows"]}, "\u2b07\ufe0f Export Excel", "edp_validator.xlsx", "edp_export")
-
-# ═══════════════════════════════════════════════════════════════════════════
-# TAB: Telecom Audit — mirrors the HTML tool's embedded "Telecom Audit Pro"
-# module exactly: ONE tool with four internal sub-tabs (Pre checks/AMOS,
-# CIQ Checks, Audit, CR Desc) sharing a single in-memory state — upload kget
-# logs once (AMOS), upload CIQ once (CIQ Checks), and Audit/CR Desc reuse
-# both automatically with no re-upload, same as the HTML tool's shared
-# STORE object and "AMOS —"/"CIQ —" readiness dots in its navbar.
-# ═══════════════════════════════════════════════════════════════════════════
-with tab_telecom:
-    telecom = st.session_state.setdefault("telecom", {})
-
-    amos_ready = bool(telecom.get("node_logs"))
-    ciq_ready = bool(telecom.get("ciq_wb"))
-    amos_dot, ciq_dot = ("\u2705" if amos_ready else "\u26aa"), ("\u2705" if ciq_ready else "\u26aa")
-    amos_label = f"({len(telecom['node_logs'])} nodes)" if amos_ready else "\u2014"
-    ciq_label = f"({len(telecom.get('mm_rows', []))} nodes)" if ciq_ready else "\u2014"
-    st.caption(f"{amos_dot} AMOS {amos_label}   \u00b7   {ciq_dot} CIQ {ciq_label}")
-
-    sub_amos, sub_ciq, sub_audit, sub_crdesc = st.tabs(
-        ["Pre checks (AMOS)", "CIQ Checks", "Audit", "CR Desc"])
-
-    # ── Sub-tab: Pre checks (AMOS) ──────────────────────────────────────────
-    with sub_amos:
-        st.caption("Upload kget-all logs once here — the Audit and CR Desc sub-tabs below reuse them automatically.")
-        amos_log_files = st.file_uploader("Pre kget-all logs (.log / .txt) — one or more",
-                                           type=["log", "txt"], accept_multiple_files=True, key="tel_amos_logs")
-        if st.button("Parse Data", type="primary", key="tel_amos_run"):
-            if not amos_log_files:
-                st.error("At least one kget-all log is required.")
-                st.stop()
-            with st.spinner("Parsing logs..."):
-                node_logs = _decode_logs(amos_log_files)
-                summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs)
-            telecom["node_logs"] = node_logs
-            telecom["amos_summary"] = summary_rows
-            telecom["amos_lte"] = lte_rows
-            telecom["amos_nr"] = nr_rows
-            st.rerun()
-
-        if telecom.get("amos_summary"):
-            st.markdown('<div class="qkx-section-label">Node Summary</div>', unsafe_allow_html=True)
-            show_rows(telecom["amos_summary"], drop=())
-            st.markdown('<div class="qkx-section-label">LTE Cells</div>', unsafe_allow_html=True)
-            show_rows(telecom["amos_lte"], drop=())
-            st.markdown('<div class="qkx-section-label">NR Cells</div>', unsafe_allow_html=True)
-            show_rows(telecom["amos_nr"], drop=())
-            st.caption("PTP status and Pre-existing DSS aren't captured by this project's Pre kget-all "
-                       "commands (confirmed limitation), so both are labelled rather than guessed.")
-            df_download_button({"Node Summary": telecom["amos_summary"], "LTE Cells": telecom["amos_lte"],
-                                 "NR Cells": telecom["amos_nr"]},
-                                "\u2b07\ufe0f Export Excel", "amos_pre_checks.xlsx", "tel_amos_export")
-            if st.button("Clear", key="tel_amos_clear"):
-                for k in ("node_logs", "amos_summary", "amos_lte", "amos_nr"):
-                    telecom.pop(k, None)
-                st.rerun()
-
-    # ── Sub-tab: CIQ Checks ──────────────────────────────────────────────────
-    with sub_ciq:
-        st.caption("Upload the CIQ once here — the Audit and CR Desc sub-tabs below reuse it automatically.")
-        ciq_checks_file = st.file_uploader("CIQ (.xlsx)", type=["xlsx"], key="tel_ciq_file")
-        if st.button("Load CIQ", type="primary", key="tel_ciq_run"):
-            if not ciq_checks_file:
-                st.error("CIQ is required.")
-                st.stop()
-            with st.spinner("Loading CIQ..."):
-                with tempfile.TemporaryDirectory() as tmp:
-                    ciq_path = _save_upload(ciq_checks_file, tmp)
-                    ciq_wb = cer.load_ciq(ciq_path)
-                mm_rows = cer.mixed_mode_rows(ciq_wb)
-                rev_sheet, rev_rows = cer.read_revision_history(ciq_wb)
-
-                pci_rows, nr_pci_rows, node_names = [], [], []
-                for mm in mm_rows:
-                    node_id = str(mm.get("Node to be built as") or "").strip()
-                    if node_id:
-                        node_names.append(node_id)
-                    e_name = str(mm.get("eNodeB Name") or "").strip()
-                    g_name = str(mm.get("gNodeB Name") or "").strip()
-                    pci_rows += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
-                    nr_pci_rows += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
-                site_label = node_names[0] if node_names else ""
-                results = {
-                    "pci_4g": pci_rows, "pci_5g": nr_pci_rows,
-                    "radio_sharing": cs.check_radio_sharing_pairs(site_label, ciq_wb),
-                    "port_uniqueness": cs.check_port_uniqueness(site_label, ciq_wb),
-                    "antenna": cs.check_antenna_uniqueness(site_label, ciq_wb),
-                    "sef_fru": cs.check_sef_fru(site_label, ciq_wb),
-                }
-            telecom["ciq_wb"] = ciq_wb
-            telecom["mm_rows"] = mm_rows
-            telecom["node_names"] = node_names
-            telecom["ciq_checks_results"] = results
-            telecom["ciq_rev_sheet"] = rev_sheet
-            telecom["ciq_rev_rows"] = rev_rows
-            telecom["node_integration"] = cv.build_node_integration(ciq_wb)
-            telecom["lte_params"] = cv.build_param_table(ciq_wb, "eUtran Parameters", cv.LTE_PARAM_COLS)
-            telecom["nr_params"] = cv.build_param_table(ciq_wb, "5G Info", cv.NR_PARAM_COLS)
-            st.rerun()
-
-        if telecom.get("ciq_wb"):
-            render_revision_history(telecom.get("ciq_rev_sheet"), telecom.get("ciq_rev_rows"))
-
-            st.markdown('<div class="qkx-section-label">1. Node Integration</div>', unsafe_allow_html=True)
-            show_rows(telecom["node_integration"], drop=())
-
-            st.markdown('<div class="qkx-section-label">2. LTE / NR Parameters</div>', unsafe_allow_html=True)
-            band_opts = ["All"] + sorted({r.get("eUTRA operating band") for r in telecom["lte_params"] if r.get("eUTRA operating band")}
-                                          | {r.get("Operating Band") for r in telecom["nr_params"] if r.get("Operating Band")})
-            node_opts = ["All"] + sorted({n for n in telecom["node_names"] if n})
-            c1, c2 = st.columns(2)
-            band_filter = c1.selectbox("Band filter", band_opts, key="tel_ciq_bandfilter")
-            node_filter = c2.selectbox("Node filter", node_opts, key="tel_ciq_nodefilter")
-            lte_view = [r for r in telecom["lte_params"]
-                        if (band_filter == "All" or r.get("eUTRA operating band") == band_filter)
-                        and (node_filter == "All" or str(r.get("EutranCellFDDId", "")).startswith(node_filter))]
-            nr_view = [r for r in telecom["nr_params"]
-                       if (band_filter == "All" or r.get("Operating Band") == band_filter)
-                       and (node_filter == "All" or str(r.get("NRCellDU", "")).startswith(node_filter))]
-            with st.expander(f"LTE eUtran Parameters ({len(lte_view)} cells)", expanded=False):
-                show_rows(lte_view, drop=())
-            with st.expander(f"5G NR Parameters ({len(nr_view)} cells)", expanded=False):
-                show_rows(nr_view, drop=())
-
-            st.markdown('<div class="qkx-section-label">3. Antenna Uniqueness / Site-wide Checks</div>', unsafe_allow_html=True)
-            render_result_tables(telecom["ciq_checks_results"], [
-                ("PCI Uniqueness", ["pci_4g", "pci_5g"]),
-                ("Radio Sharing / Port Uniqueness / Antenna / SEF-FRU",
-                 ["radio_sharing", "port_uniqueness", "antenna", "sef_fru"]),
-            ])
-            df_download_button({**telecom["ciq_checks_results"], "Node Integration": telecom["node_integration"],
-                                 "LTE Parameters": telecom["lte_params"], "NR Parameters": telecom["nr_params"]},
-                                "\u2b07\ufe0f Export Excel", "ciq_checks.xlsx", "tel_ciq_export")
-
-            mismatch_count = sum(1 for rows in telecom["ciq_checks_results"].values()
-                                  for r in rows if r.get("status") == "MISMATCH")
-            st.markdown('<div class="qkx-section-label">FA Code / Pre Integration Issue Mail</div>', unsafe_allow_html=True)
-            c1, c2 = st.columns([2, 1])
-            fa_code = c1.text_input("FA Code", key="tel_ciq_fa")
-            if fa_code:
-                node_str = "/".join(telecom["node_names"]) or "NODE"
-                subject = f"{node_str} - {fa_code} <Pre Integration Issue>"
-                body = (f"Hi Team,\n\n{mismatch_count} CIQ check issue(s) found (PCI/antenna/port uniqueness) "
-                        f"on {node_str}. Please check and update the CIQ.")
-                link = mailto_link("eran_design@quadgen.com", "eran_scripting@quadgen.com", subject, body)
-                c2.link_button("\u2709\ufe0f Mail", link, use_container_width=True)
-            if st.button("Reload", key="tel_ciq_reload"):
-                for k in ("ciq_wb", "mm_rows", "node_names", "ciq_checks_results", "ciq_rev_sheet",
-                          "ciq_rev_rows", "node_integration", "lte_params", "nr_params",
-                          "audit_results", "audit_pre_text", "audit_post_text", "audit_scope_lines"):
-                    telecom.pop(k, None)
-                st.rerun()
-
-    # ── Sub-tab: Audit ───────────────────────────────────────────────────────
-    with sub_audit:
-        st.caption("Uses the logs and CIQ already loaded above — no re-upload needed.")
-        if st.button("Run Full Audit", type="primary", key="tel_audit_run"):
-            if not telecom.get("node_logs"):
-                st.error("AMOS data missing \u2014 parse AMOS logs first (Pre checks (AMOS) sub-tab).")
-                st.stop()
-            if not telecom.get("ciq_wb"):
-                st.error("CIQ data missing \u2014 load a CIQ file first (CIQ Checks sub-tab).")
-                st.stop()
-            with st.spinner("Running Audit..."):
-                ciq_wb = telecom["ciq_wb"]
-                mm_rows = telecom["mm_rows"]
-                node_logs = telecom["node_logs"]
-
-                pre_pairs, pre_nodes = pci.build_pre_inventory(node_logs)
-                sow = sa.classify_carriers(ciq_wb, mm_rows, pre_pairs, pre_nodes)
-                pre_text, post_text = ppc.build_pre_post_config_text(node_logs, ciq_wb)
-                scope_lines = sowt.scope_lines_to_readable_text(sowt.format_scope_of_work(sow, ciq_wb))
-
-                results = {k: [] for k in ("params_4g", "params_5g", "pci_4g", "pci_5g",
-                                            "radio_type", "sector_swap", "nr_tac")}
-                for mm in mm_rows:
-                    node_id = str(mm.get("Node to be built as") or "").strip()
-                    e_name = str(mm.get("eNodeB Name") or "").strip()
-                    g_name = str(mm.get("gNodeB Name") or "").strip()
-                    log_text = node_logs.get(node_id)
-                    has_pre = bool(log_text)
-                    parsed = lp.parse_log(log_text) if log_text else []
-                    results["params_4g"] += cs.check_rf_params_4g(node_id, log_text, ciq_wb, has_pre)
-                    results["params_5g"] += cs.check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre)
-                    results["pci_4g"] += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
-                    results["pci_5g"] += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
-                    results["radio_type"] += cs.check_radio_type(node_id, log_text, ciq_wb, None, e_name, g_name)
-                    results["sector_swap"] += cs.check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name)
-                    results["nr_tac"] += cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False, g_name)
-
-            telecom["audit_results"] = results
-            telecom["audit_pre_text"] = pre_text
-            telecom["audit_post_text"] = post_text
-            telecom["audit_scope_lines"] = scope_lines
-            st.rerun()
-
-        if telecom.get("audit_results"):
-            st.markdown('<div class="qkx-section-label">Pre / Post Configuration</div>', unsafe_allow_html=True)
-            c1, c2 = st.columns(2)
-            dash = "\u2014"
-            c1.markdown(f"**Pre:** {telecom['audit_pre_text'] or dash}")
-            c2.markdown(f"**Post:** {telecom['audit_post_text'] or dash}")
-
-            st.markdown('<div class="qkx-section-label">SOW Summary</div>', unsafe_allow_html=True)
-            if telecom["audit_scope_lines"]:
-                for line in telecom["audit_scope_lines"]:
-                    st.markdown(f"- {line}")
-            else:
-                st.caption("No additions, deletions, sector movements, or retunes detected.")
-
-            st.markdown('<div class="qkx-section-label">Pre vs CIQ \u2014 RF Parameters (PRE | POST)</div>', unsafe_allow_html=True)
-            st.caption("4G")
-            render_pipe_compare_table(telecom["audit_results"]["params_4g"], PIPE_FIELDS_4G, "No 4G cells with Pre data to compare.")
-            st.caption("5G")
-            render_pipe_compare_table(telecom["audit_results"]["params_5g"], PIPE_FIELDS_5G, "No 5G cells with Pre data to compare.")
-
-            st.markdown('<div class="qkx-section-label">Engineer Comments</div>', unsafe_allow_html=True)
-            comments = (wt.param_warnings(telecom["audit_results"]["params_4g"]) + wt.param_warnings(telecom["audit_results"]["params_5g"])
-                        + wt.pci_warnings(telecom["audit_results"]["pci_4g"] + telecom["audit_results"]["pci_5g"])
-                        + wt.radio_type_warnings(telecom["audit_results"]["radio_type"])
-                        + wt.sector_swap_warnings(telecom["audit_results"]["radio_type"]))
-            if comments:
-                for c in comments:
-                    st.markdown(f"- {c}")
-            else:
-                st.caption("No warnings \u2014 all checked parameters match Pre.")
-
-            st.markdown('<div class="qkx-section-label">PCI / Radio Type / Sector Swap / NR TAC</div>', unsafe_allow_html=True)
-            render_result_tables(telecom["audit_results"], [
-                ("Detail tables", ["pci_4g", "pci_5g", "radio_type", "sector_swap", "nr_tac"]),
-            ])
-            df_download_button(telecom["audit_results"], "\u2b07\ufe0f Export Excel", "audit.xlsx", "tel_audit_export")
-            if st.button("Clear", key="tel_audit_clear"):
-                for k in ("audit_results", "audit_pre_text", "audit_post_text", "audit_scope_lines"):
-                    telecom.pop(k, None)
-                st.rerun()
-
-    # ── Sub-tab: CR Desc ──────────────────────────────────────────────────────
-    with sub_crdesc:
-        if not telecom.get("audit_results"):
-            st.warning("Run **Full Audit** first (Audit sub-tab) so node and band data is available here.")
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            mic_mca = st.selectbox("MIC DESC", ["MIC - MCA", "MIC - CRAN"], key="tel_cr_mic")
-        with c2:
-            site_name = st.text_input("Site Name", key="tel_cr_site").strip().upper()
-        with c3:
-            fa_number = st.text_input("FA Number", key="tel_cr_fa").strip()
-
-        if st.button("Generate CR Description", type="primary", key="tel_cr_run"):
-            if not telecom.get("audit_results") or not telecom.get("ciq_wb"):
-                st.error("No audit data found. Please run Full Audit first.")
-                st.stop()
-            if not site_name or not fa_number:
-                st.error("Site Name and FA Number are required.")
-                st.stop()
-            ciq_wb = telecom["ciq_wb"]
-            mm_rows = telecom["mm_rows"]
-            node_logs = telecom["node_logs"]
-            pre_pairs, pre_nodes = pci.build_pre_inventory(node_logs)
-            sow = sa.classify_carriers(ciq_wb, mm_rows, pre_pairs, pre_nodes)
-
-            regular_nodes = [str(r.get("Node to be built as") or "").strip() for r in mm_rows
-                              if r.get("Node to be built as")]
-            deleted_nodes = [f"Delete_{n}" for n in sow.get("deleted_nodes", [])]
-            all_nodes = regular_nodes + deleted_nodes
-
-            added_bands = set()
-            for cells in sow.get("added", {}).values():
-                for cell in cells:
-                    band, _ = bl.band_label(cell)
-                    if band:
-                        added_bands.add(band)
-            excluded_bands = set()
-            for m in sow.get("moved", []):
-                band, _ = bl.band_label(m.get("cell"))
-                if band:
-                    excluded_bands.add(band)
-            for r in sow.get("retuned", []):
-                if r.get("label"):
-                    excluded_bands.add(r["label"])
-            bands = sorted(added_bands - excluded_bands)
-
-            mic_mca_str = mic_mca.replace(" - ", " | ")
-            node_str = "/".join(all_nodes) if all_nodes else "-"
-            band_str = ("CONFIG_UPDATE_" + "/".join(bands)) if bands else "CONFIG_UPDATE"
-            cr_text = f"{mic_mca_str} | {site_name} | FA {fa_number} | {node_str} | {band_str} - RSF"
-
-            telecom["cr_text"] = cr_text
-            telecom["cr_regular_nodes"] = regular_nodes
-            telecom["cr_deleted_nodes"] = deleted_nodes
-            telecom["cr_bands"] = bands
-            st.rerun()
-
-        if telecom.get("cr_text"):
-            st.markdown('<div class="qkx-section-label">Generated CR Description</div>', unsafe_allow_html=True)
-            st.code(telecom["cr_text"], language=None)
-            c1, c2, c3 = st.columns(3)
-            c1.markdown("**Regular Nodes**\n\n" + (", ".join(telecom["cr_regular_nodes"]) or "\u2014"))
-            c2.markdown("**Delete Nodes**\n\n" + (", ".join(telecom["cr_deleted_nodes"]) or "None"))
-            c3.markdown("**Bands**\n\n" + (", ".join(telecom["cr_bands"]) or "\u2014"))
