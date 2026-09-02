@@ -13,6 +13,7 @@ MME Region, NR_SA tab, FA Code CIQ-vs-RFDS), or left 'manual' when no
 reliable signal exists. Nothing here fabricates a pass.
 """
 import datetime
+import io
 import os
 import re
 
@@ -299,6 +300,62 @@ def _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages):
 # for a manual item.
 # ══════════════════════════════════════════════════════════════════════
 
+def _edp_controller_status(edp_rows, controller_ids):
+    """NEW - Controller/ANCEQ checks (cabinet naming/port-size/etc. above are
+    Primary/Secondary-only). controller_ids: list of EDP SITE_NAME values for
+    Controller rows (= the CIQ's Controller Info 'Controller ID').
+    IPv6 ANCEQ fields are checked as informational only - a real, valid EDP
+    row was found with every IPv6 ANCEQ_* field genuinely blank, so treating
+    it as a required field would be a false mismatch."""
+    if not controller_ids:
+        return "na", "No Controller node in this CIQ's Controller Info sheet."
+    bad, checked = [], 0
+    ipv6_present = 0
+    for cid in controller_ids:
+        rows = cer.edp_rows_for_site(edp_rows, cid)
+        if not rows:
+            bad.append(f"{cid}: not published in EDP")
+            continue
+        r = rows[0]
+        checked += 1
+        missing = [f for f in ("ANCEQ_TYPE", "ANCEQ_NAME", "ANCEQ_SIAD_IP_HOST_1", "ANCEQ_SIAD_IP_HOST_2") if not _norm(r.get(f))]
+        if missing:
+            bad.append(f"{cid}: missing {', '.join(missing)}")
+        if _norm(r.get("ANCEQ_SIAD_IPV6_HOST_1")):
+            ipv6_present += 1
+    if not checked:
+        return "unknown", "; ".join(bad) if bad else "No EDP rows to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} controller(s) checked (IPv4 required fields all present; {ipv6_present} also have IPv6)."
+
+
+def _edp_ptp_status(edp_rows, node_ids):
+    """NEW - EDP's own PTP fields (SIAD_PTP_VLAN_ID + the PTP_VLAN_SUBNET_30 /
+    PTP_SIAD_INTERFACE_IP / PTP_CAB_INTERFACE_IP group), confirmed present on
+    a real published EDP row. Separate from the kget-log-side PTP guess in
+    pre_extract.extract_ptp_status() - this one reads data this backend
+    definitely has."""
+    rows = _edp_node_rows(edp_rows, node_ids)
+    bad, checked, no_ptp = [], 0, 0
+    for nid, r in rows.items():
+        if r is None:
+            continue
+        vlan = _norm(r.get("SIAD_PTP_VLAN_ID"))
+        if not vlan:
+            no_ptp += 1
+            continue
+        checked += 1
+        missing = [f for f in ("PTP_VLAN_SUBNET_30", "PTP_SIAD_INTERFACE_IP", "PTP_CAB_INTERFACE_IP") if not _norm(r.get(f))]
+        if missing:
+            bad.append(f"{nid}: PTP VLAN {vlan} set but missing {', '.join(missing)}")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        return "match", f"{checked} node(s) with PTP configured, all required fields present."
+    return "info", f"No node declares a PTP VLAN in EDP ({no_ptp} checked) — PTP may not be in scope for this build."
+
+
 def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_pages=None):
     mm_rows = cer.mixed_mode_rows(ciq_wb) if ciq_wb else []
     mm_by_node = {}
@@ -408,8 +465,65 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
 # Fill the real template.
 # ══════════════════════════════════════════════════════════════════════
 
+_FPB_PART = "xl/featurePropertyBag/featurePropertyBag.xml"
+_FPB_CONTENT_TYPE = "application/vnd.ms-excel.featurepropertybag+xml"
+_FPB_REL_TYPE = "http://schemas.microsoft.com/office/2022/11/relationships/FeaturePropertyBag"
+
+
+def _restore_native_checkboxes(filled_bytes, template_path):
+    """openpyxl's save() silently drops xl/featurePropertyBag/featurePropertyBag.xml
+    - the part that marks C-column cells as Excel's native interactive
+    Checkbox control (confirmed by a real load->set value->save round-trip:
+    the part vanishes even though the underlying boolean cell value is
+    preserved). Without it, Excel still shows the right TRUE/FALSE value but
+    the checkbox widget itself is gone. This copies that part (and its two
+    small registration entries) from the original template's zip into the
+    filled workbook's zip after openpyxl is done, so the checkboxes stay
+    exactly as clickable as they were in the template you uploaded."""
+    import zipfile
+
+    with zipfile.ZipFile(template_path) as tz:
+        if _FPB_PART not in tz.namelist():
+            return filled_bytes  # template has no native checkboxes to restore
+        fpb_xml = tz.read(_FPB_PART)
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(filled_bytes)) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                text = data.decode("utf-8")
+                if _FPB_PART.split("xl/")[1] not in text and "featurePropertyBag" not in text:
+                    text = text.replace(
+                        "</Types>",
+                        f'<Override PartName="/{_FPB_PART}" ContentType="{_FPB_CONTENT_TYPE}"/></Types>',
+                    )
+                data = text.encode("utf-8")
+            elif item.filename == "xl/_rels/workbook.xml.rels":
+                text = data.decode("utf-8")
+                if _FPB_REL_TYPE not in text:
+                    existing_ids = [int(rid) for rid in re.findall(r'Id="rId(\d+)"', text)]
+                    new_id = f"rId{max(existing_ids, default=0) + 1}"
+                    text = text.replace(
+                        "</Relationships>",
+                        f'<Relationship Id="{new_id}" Type="{_FPB_REL_TYPE}" '
+                        f'Target="featurePropertyBag/featurePropertyBag.xml"/></Relationships>',
+                    )
+                data = text.encode("utf-8")
+            dst.writestr(item, data)
+        if _FPB_PART not in src.namelist():
+            dst.writestr(_FPB_PART, fpb_xml)
+    out.seek(0)
+    return out.read()
+
+
 def fill_checklist_xlsx(checklist, site_id_fa, engineer_name=None, sow=None, date_str=None,
-                         template_path=TEMPLATE_PATH):
+                         template_path=TEMPLATE_PATH, manual_overrides=None):
+    """manual_overrides: optional {row_number: {'done': bool, 'comment': str}}
+    for rows whose status is 'manual' - lets a person's own checkbox/comment
+    (entered in the Streamlit UI) override the generic 'no automated check'
+    placeholder text before this gets written out."""
+    manual_overrides = manual_overrides or {}
     wb = openpyxl.load_workbook(template_path)
     ws = wb["Legacy - N2e Engineer Checklist"]
 
@@ -422,13 +536,18 @@ def fill_checklist_xlsx(checklist, site_id_fa, engineer_name=None, sow=None, dat
 
     for entry in checklist:
         r = entry["row"]
+        override = manual_overrides.get(r)
+        if entry["status"] == "manual" and override is not None:
+            ws[f"C{r}"] = bool(override.get("done"))
+            comment = (override.get("comment") or "").strip()
+            ws[f"E{r}"] = f"[MANUAL — user-confirmed] {comment}" if comment else "[MANUAL — marked done, no comment]" if override.get("done") else "[MANUAL] Not yet reviewed."
+            continue
         ws[f"C{r}"] = (entry["status"] == "match")
         label, _ = STATUS_META.get(entry["status"], ("", False))
         comment = entry["detail"] or ""
         ws[f"E{r}"] = f"[{label}] {comment}" if label else comment
 
-    import io
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    return buf.read()
+    return _restore_native_checkboxes(buf.read(), template_path)
