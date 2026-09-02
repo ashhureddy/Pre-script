@@ -65,7 +65,7 @@ st.set_page_config(page_title="QUICK IX", layout="wide", page_icon="📡")
 # ══════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-.block-container { padding-top: 1rem; max-width: 1300px; }
+.block-container { padding-top: 1rem; max-width: 1500px; }
 .qkx-header {
   background: linear-gradient(90deg, #011b36, #012a4e);
   padding: 14px 22px; border-bottom: 3px solid #ff6b4a;
@@ -75,16 +75,17 @@ st.markdown("""
 .stTabs [data-baseweb="tab-list"] { gap: 4px; }
 .stTabs [data-baseweb="tab"] { font-weight: 600; }
 .qkx-stat { text-align:center; border:1px solid #cbd5e1; border-radius:8px; padding:10px; background:#fff; }
-.qkx-table-wrap { overflow-x:auto; border:1px solid #cbd5e1; border-radius:8px; margin-bottom:14px; }
-.qkx-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+.qkx-table-wrap { overflow-x:auto; border:1px solid #cbd5e1; border-radius:8px; margin-bottom:18px; }
+.qkx-table { width:100%; border-collapse:collapse; font-size:13.5px; line-height:1.5; }
 .qkx-table th {
   background:#dde3f7; color:#101F90; font-weight:700; text-align:left;
-  padding:6px 9px; border-bottom:2px solid #b7c2e8; border-right:1px solid #eef1fa;
+  padding:9px 14px; border-bottom:2px solid #b7c2e8; border-right:1px solid #eef1fa;
   white-space:nowrap;
 }
-.qkx-table td { padding:5px 9px; border-bottom:1px solid #e6e9f0; border-right:1px solid #e6e9f0; vertical-align:top; }
+.qkx-table td { padding:9px 14px; border-bottom:1px solid #e6e9f0; border-right:1px solid #e6e9f0; vertical-align:top; min-width:110px; }
 .qkx-table tr:last-child td { border-bottom:none; }
 .qkx-table td:last-child, .qkx-table th:last-child { border-right:none; }
+.qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #94a3b8; }
 .qkx-empty { padding:12px 4px; color:#64748b; font-style:italic; font-size:13px; }
 .qkx-section-title {
   font-weight:700; font-size:15px; color:#0f1720; margin: 14px 0 8px 0;
@@ -146,13 +147,13 @@ def render_table_with_comments(rows, columns, status_key="status", note_key="not
     Board Type, and XMU Validation — no separate Match/Note columns."""
     if not rows:
         return '<div class="qkx-empty">No data.</div>'
-    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + "<th>Comments</th>"
+    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + '<th style="min-width:220px;">Comments</th>'
     body = []
     for r in rows:
         cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
         is_bad = r.get(status_key) == bad_value
-        style = "color:#991b1b;font-weight:600;" if is_bad else "color:#334155;"
-        cells += f'<td style="{style}">{esc(r.get(note_key, ""))}</td>'
+        style = "color:#991b1b;font-weight:700;" if is_bad else "color:#334155;"
+        cells += f'<td style="min-width:220px;{style}">{esc(r.get(note_key, ""))}</td>'
         body.append(f"<tr>{cells}</tr>")
     return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
@@ -222,25 +223,27 @@ def render_rfds_grouped_table(rows):
     if not rows:
         return '<div class="qkx-empty">No data.</div>'
 
-    def gcell(val, status):
+    def gcell(val, status, group_start=False):
         color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
-        return f'<td style="background:{bg};color:{color};">{esc(val)}</td>'
+        cls = ' class="qkx-group-start"' if group_start else ""
+        return f'<td{cls} style="background:{bg};color:{color};">{esc(val)}</td>'
 
-    head1 = ('<th colspan="2">Cell verification</th><th colspan="2">RRU verification</th>'
-             '<th colspan="2">Antenna verification</th><th colspan="2">Cell id</th>'
-             '<th rowspan="2">Antenna info</th><th rowspan="2">Losses &amp; Delays</th>'
-             '<th rowspan="2">Warning</th>')
+    head1 = ('<th colspan="2">Cell verification</th><th colspan="2" class="qkx-group-start">RRU verification</th>'
+             '<th colspan="2" class="qkx-group-start">Antenna verification</th>'
+             '<th colspan="2" class="qkx-group-start">Cell id</th>'
+             '<th rowspan="2" class="qkx-group-start">Antenna info</th><th rowspan="2">Losses &amp; Delays</th>'
+             '<th rowspan="2" style="min-width:200px;">Warning</th>')
     head2 = '<th>RFDS</th><th>CIQ</th>' * 4
     body = []
     for r in rows:
-        warn_cell = (f'<td style="color:#991b1b;font-weight:600;">{esc(r["warning"])}</td>'
-                     if r["warning"] != "—" else '<td>—</td>')
+        warn_cell = (f'<td style="min-width:200px;color:#991b1b;font-weight:700;">{esc(r["warning"])}</td>'
+                     if r["warning"] != "—" else '<td style="min-width:200px;">—</td>')
         tds = (
             gcell(r["cell_rfds"], r["cell_status"]) + gcell(r["cell_ciq"], r["cell_status"])
-            + gcell(r["rru_rfds"], r["rru_status"]) + gcell(r["rru_ciq"], r["rru_status"])
-            + gcell(r["ant_rfds"], r["ant_status"]) + gcell(r["ant_ciq"], r["ant_status"])
-            + gcell(r["cellid_rfds"], r["cellid_status"]) + gcell(r["cellid_ciq"], r["cellid_status"])
-            + f'<td>{esc(r["ant_info"])}</td>' + f'<td>{esc(r["losses_delays"])}</td>' + warn_cell
+            + gcell(r["rru_rfds"], r["rru_status"], True) + gcell(r["rru_ciq"], r["rru_status"])
+            + gcell(r["ant_rfds"], r["ant_status"], True) + gcell(r["ant_ciq"], r["ant_status"])
+            + gcell(r["cellid_rfds"], r["cellid_status"], True) + gcell(r["cellid_ciq"], r["cellid_status"])
+            + f'<td class="qkx-group-start">{esc(r["ant_info"])}</td>' + f'<td>{esc(r["losses_delays"])}</td>' + warn_cell
         )
         body.append(f"<tr>{tds}</tr>")
     return (f'<div class="qkx-table-wrap"><table class="qkx-table">'
