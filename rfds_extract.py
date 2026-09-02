@@ -184,6 +184,59 @@ def extract_site_details(pages):
     return out
 
 
+_PORT_ROW_START_RE = re.compile(r'\b([A-Z]-\d{1,2})\s+')
+_CELL_TOKEN_RE = re.compile(r'\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b')
+
+
+def extract_port_level_details(pages):
+    """NEW (not part of the original confirmed Blueprint rule set) — antenna
+    Vendor/Model per cell, from 'Port Level Details (Final)'. Ported from the
+    sibling HTML tool's antenna-model comparison, adapted to this backend's
+    plain-text (not pdf.js-coordinate) extraction. Final-only, same policy
+    as extract_cell_details().
+
+    Tested against 6 real RFDS PDFs in the project sample set (2 with a
+    genuine '(Final)' table); heuristic row-splitting on Sec-Pos tokens
+    (e.g. 'A-1', 'B-2') since a port's model/cell list can wrap across
+    several source lines. Not yet run against enough real sites to carry
+    the same 'confirmed' bar as the numbered Blueprint rules — spot-check
+    results before trusting them on an unfamiliar RFDS layout.
+
+    Returns {cell_name: {'sec_pos':, 'vendor_model':}}.
+    """
+    text = find_pages_by_heading(pages, 'Port Level Details (Final)')
+    if not text:
+        return {}
+    clean = text.replace('\r\n', ' ').replace('\n', ' ')
+    clean = re.sub(r'Sec-Pos\s+Vendor\s+Model\s+Port\s+Cells\s+Gain\s+Elec\s+Tilt\s+Azimuth\s+Offset\s+Coax\s+Type\s+Coax\s+Length', ' ', clean)
+    clean = re.sub(r'Port Level Details \(Final\)', ' ', clean)
+    clean = re.sub(r'Page \d+ of \d+', ' ', clean)
+    clean = re.sub(r'\s+', ' ', clean).strip()
+
+    starts = [m.start() for m in _PORT_ROW_START_RE.finditer(clean)]
+    starts.append(len(clean))
+    result = {}
+    for i in range(len(starts) - 1):
+        chunk = clean[starts[i]:starts[i + 1]].strip()
+        m = _PORT_ROW_START_RE.match(chunk + ' ')
+        if not m:
+            continue
+        sec_pos = m.group(1)
+        rest = chunk[m.end():].strip()
+        cells = _CELL_TOKEN_RE.findall(rest)
+        if not cells:
+            continue
+        pre = rest[:rest.find(cells[0])].strip()
+        pre_tokens = pre.split()
+        while pre_tokens and re.fullmatch(r'\d{1,3}', pre_tokens[-1]):
+            pre_tokens.pop()
+        vendor_model = ' '.join(pre_tokens)
+        for c in cells:
+            if c not in result:  # first (most specific) row wins if a cell appears twice
+                result[c] = {'sec_pos': sec_pos, 'vendor_model': vendor_model}
+    return result
+
+
 def load_rfds_tables(rfds_bytes):
     """Returns {page_number: [[row, ...], ...]} using pdfplumber's table
     extraction - genuine PDFs only (returns {} for the zip-bundle format,
