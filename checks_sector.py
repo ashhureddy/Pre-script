@@ -945,6 +945,45 @@ def check_xmu_port_overlap(node_id, enb_row, gnb_row, ciq_wb):
               'note': 'Unique.' if unique else f'XMU ports reused elsewhere: {sorted(used_elsewhere)}'}]
 
 
+def check_radio_port_conflict(node_id, ciq_wb):
+    """NEW - not part of the confirmed Blueprint rule set. General Radio Map
+    port-conflict check (the HTML tool's 'Port Conflict (Multiple Radios)'):
+    does the same (DUS/XMU board, DUS/XMU Port) get declared for cells
+    belonging to more than one distinct RRU type? Broader than
+    check_xmu_port_overlap(), which only looks at a node's own declared
+    1st/2nd XMU ports - this looks at every LTE cell's port assignment
+    regardless of XMU declaration. Tested against real CIQs; not yet run
+    against enough real *conflicting* sites to carry the 'confirmed' bar."""
+    port_to_rrus = {}
+    port_to_cells = {}
+    for row in _rows(ciq_wb, 'eUtran Parameters'):
+        cell = row.get('EutranCellFDDId')
+        if not cell or not (node_id and str(cell).startswith(node_id)):
+            continue
+        board = str(row.get('DUS / XMU') or '').strip()
+        port = str(row.get('DUS / XMU Port') or '').strip()
+        rru = str(row.get('RRU type') or '').strip()
+        if not (board and port):
+            continue
+        key = (board, port)
+        port_to_rrus.setdefault(key, set()).add(rru)
+        port_to_cells.setdefault(key, set()).add(cell)
+
+    results = []
+    for key, rrus in port_to_rrus.items():
+        board, port = key
+        cells = sorted(port_to_cells[key])
+        if len(rrus) > 1:
+            results.append({'rule': 'NEW', 'node': node_id, 'cell': ', '.join(cells),
+                             'board': board, 'port': port, 'status': 'MISMATCH',
+                             'note': f"Port {port} on board {board} used by {len(rrus)} different RRU types: {', '.join(sorted(rrus))}"})
+        else:
+            results.append({'rule': 'NEW', 'node': node_id, 'cell': ', '.join(cells),
+                             'board': board, 'port': port, 'status': 'MATCH',
+                             'note': 'Single RRU type on this port.'})
+    return results
+
+
 def check_pci_uniqueness(node_id, ciq_wb, e_name=None):
     """Rule #23 - PCI uniqueness within same band. PCI = PhysicalLayerCellIdGroup*3
     + physicalLayerSubCellId (verified against CIQ's own 'PCI' column); flags
