@@ -74,18 +74,15 @@ st.markdown("""
 .qkx-header h1 { color: #fff; font-size: 22px; margin: 0; letter-spacing: .04em; }
 .stTabs [data-baseweb="tab-list"] { gap: 4px; }
 .stTabs [data-baseweb="tab"] { font-weight: 600; }
-.qkx-stat { text-align:center; border:1px solid #cbd5e1; border-radius:8px; padding:10px; background:#fff; }
-.qkx-table-wrap { overflow-x:auto; border:1px solid #cbd5e1; border-radius:8px; margin-bottom:18px; }
-.qkx-table { width:100%; border-collapse:collapse; font-size:13.5px; line-height:1.5; }
+.qkx-stat { text-align:center; border:1px solid #94a3b8; border-radius:4px; padding:8px; background:#fff; }
+.qkx-table-wrap { overflow-x:auto; border:1px solid #64748b; border-radius:3px; margin-bottom:16px; }
+.qkx-table { width:100%; border-collapse:collapse; font-size:12.8px; line-height:1.3; }
 .qkx-table th {
   background:#dde3f7; color:#101F90; font-weight:700; text-align:left;
-  padding:9px 14px; border-bottom:2px solid #b7c2e8; border-right:1px solid #eef1fa;
-  white-space:nowrap;
+  padding:6px 10px; border:1px solid #8b97b8; white-space:nowrap;
 }
-.qkx-table td { padding:9px 14px; border-bottom:1px solid #e6e9f0; border-right:1px solid #e6e9f0; vertical-align:top; min-width:110px; }
-.qkx-table tr:last-child td { border-bottom:none; }
-.qkx-table td:last-child, .qkx-table th:last-child { border-right:none; }
-.qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #94a3b8; }
+.qkx-table td { padding:6px 10px; border:1px solid #a8b0c2; vertical-align:top; }
+.qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #334155; }
 .qkx-empty { padding:12px 4px; color:#64748b; font-style:italic; font-size:13px; }
 .qkx-section-title {
   font-weight:700; font-size:15px; color:#0f1720; margin: 14px 0 8px 0;
@@ -146,12 +143,12 @@ def render_table_with_comments(rows, columns, status_key="status", note_key="not
     column holding the note text — no separate Status/Note columns."""
     if not rows:
         return '<div class="qkx-empty">No data.</div>'
-    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + '<th style="min-width:220px;">Comments</th>'
+    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + '<th style="min-width:170px;">Comments</th>'
     body = []
     for r in rows:
         color, bg = STATUS_COLORS.get(str(r.get(status_key, "")), DEFAULT_COLOR)
         cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
-        cells += f'<td style="min-width:220px;">{esc(r.get(note_key, ""))}</td>'
+        cells += f'<td style="min-width:170px;">{esc(r.get(note_key, ""))}</td>'
         body.append(f'<tr style="background:{bg};color:{color};">{cells}</tr>')
     return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
@@ -230,12 +227,12 @@ def render_rfds_grouped_table(rows):
              '<th colspan="2" class="qkx-group-start">Antenna verification</th>'
              '<th colspan="2" class="qkx-group-start">Cell id</th>'
              '<th rowspan="2" class="qkx-group-start">Antenna info</th><th rowspan="2">Losses &amp; Delays</th>'
-             '<th rowspan="2" style="min-width:200px;">Warning</th>')
+             '<th rowspan="2" style="min-width:160px;">Warning</th>')
     head2 = '<th>RFDS</th><th>CIQ</th>' * 4
     body = []
     for r in rows:
-        warn_cell = (f'<td style="min-width:200px;color:#991b1b;font-weight:700;">{esc(r["warning"])}</td>'
-                     if r["warning"] != "—" else '<td style="min-width:200px;">—</td>')
+        warn_cell = (f'<td style="min-width:160px;color:#991b1b;font-weight:700;">{esc(r["warning"])}</td>'
+                     if r["warning"] != "—" else '<td style="min-width:160px;">—</td>')
         tds = (
             gcell(r["cell_rfds"], r["cell_status"]) + gcell(r["cell_ciq"], r["cell_status"])
             + gcell(r["rru_rfds"], r["rru_status"], True) + gcell(r["rru_ciq"], r["rru_status"])
