@@ -139,6 +139,115 @@ def render_table(rows, columns=None, status_key="status", empty_msg="No data."):
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
+def render_table_with_comments(rows, columns, status_key="status", note_key="note", bad_value="MISMATCH"):
+    """Plain bordered table (no per-row background) ending in one
+    'Comments' column whose TEXT turns red+bold when rows[i][status_key]
+    == bad_value. Matches the confirmed HTML layout for Primary/Secondary,
+    Board Type, and XMU Validation — no separate Match/Note columns."""
+    if not rows:
+        return '<div class="qkx-empty">No data.</div>'
+    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + "<th>Comments</th>"
+    body = []
+    for r in rows:
+        cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
+        is_bad = r.get(status_key) == bad_value
+        style = "color:#991b1b;font-weight:600;" if is_bad else "color:#334155;"
+        cells += f'<td style="{style}">{esc(r.get(note_key, ""))}</td>'
+        body.append(f"<tr>{cells}</tr>")
+    return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
+def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
+    """One row per cell, merging Cell verification / RRU verification /
+    Antenna verification / Cell id / Antenna info / Losses & Delays /
+    Warning — matches the confirmed HTML grouped-header table."""
+    cell_map = {}
+    for r in results.get("cells_vs_rfds", []):
+        cell_map.setdefault(r["cell"], {})["cv"] = r
+    for r in results.get("radio_type", []):
+        cell_map.setdefault(r["cell"], {})["rt"] = r
+    for r in results.get("cell_id_vs_rfds", []):
+        cell_map.setdefault(r["cell"], {})["ci"] = r
+
+    port_details = rf.extract_port_level_details(rfds_pages) if rfds_pages is not None else {}
+    ant_by_cell = {}
+    if "eUtran Parameters" in ciq_wb.sheetnames:
+        for r in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]):
+            cell = r.get("EutranCellFDDId")
+            if not cell:
+                continue
+            ciq_ant = r.get("antenna model")
+            pd_row = port_details.get(cell)
+            tier, detail = ar.resolve_antenna(ciq_ant, pd_row["vendor_model"] if pd_row else None)
+            ant_by_cell[cell] = {"ciq": ciq_ant or "—", "rfds": (pd_row or {}).get("vendor_model", "NOT FOUND"),
+                                  "tier": tier, "found": pd_row is not None}
+
+    rows = []
+    for cell, parts in cell_map.items():
+        cv, rt, ci = parts.get("cv", {}), parts.get("rt", {}), parts.get("ci", {})
+        an = ant_by_cell.get(cell, {})
+        cell_status = cv.get("status", "SKIPPED")
+        rru_status = rt.get("status", "SKIPPED")
+        cellid_status = ci.get("status", "SKIPPED")
+        ant_tier = an.get("tier")
+        ant_status = "MATCH" if ant_tier == "EXACT" else ("MISMATCH" if ant_tier else "SKIPPED")
+
+        warnings = []
+        if cell_status == "MISMATCH":
+            warnings.append("Cell mismatch")
+        if rru_status == "MISMATCH":
+            warnings.append("RRU mismatch")
+        if ant_status == "MISMATCH":
+            warnings.append("Antenna mismatch")
+        if cellid_status == "MISMATCH":
+            warnings.append("Cell ID mismatch")
+
+        rows.append({
+            "node": cv.get("node") or rt.get("node") or ci.get("node") or "",
+            "cell_rfds": cv.get("rfds_cell", "—"), "cell_ciq": cv.get("ciq_cell", "—") or cell, "cell_status": cell_status,
+            "rru_rfds": rt.get("rfds", "—"), "rru_ciq": rt.get("ciq", "—"), "rru_status": rru_status,
+            "ant_rfds": an.get("rfds", "—"), "ant_ciq": an.get("ciq", "—"), "ant_status": ant_status,
+            "cellid_rfds": ci.get("rfds_rcn", "—"), "cellid_ciq": ci.get("ciq", "—"), "cellid_status": cellid_status,
+            "ant_info": "FOUND" if an.get("found") else "NOT FOUND",
+            "losses_delays": "NOT AVAILABLE",
+            "warning": "; ".join(warnings) if warnings else "—",
+            "overall": "FAIL" if warnings else "PASS",
+        })
+    rows.sort(key=lambda r: r["cell_ciq"] or "")
+    return rows
+
+
+def render_rfds_grouped_table(rows):
+    if not rows:
+        return '<div class="qkx-empty">No data.</div>'
+
+    def gcell(val, status):
+        color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
+        return f'<td style="background:{bg};color:{color};">{esc(val)}</td>'
+
+    head1 = ('<th colspan="2">Cell verification</th><th colspan="2">RRU verification</th>'
+             '<th colspan="2">Antenna verification</th><th colspan="2">Cell id</th>'
+             '<th rowspan="2">Antenna info</th><th rowspan="2">Losses &amp; Delays</th>'
+             '<th rowspan="2">Warning</th>')
+    head2 = '<th>RFDS</th><th>CIQ</th>' * 4
+    body = []
+    for r in rows:
+        warn_cell = (f'<td style="color:#991b1b;font-weight:600;">{esc(r["warning"])}</td>'
+                     if r["warning"] != "—" else '<td>—</td>')
+        tds = (
+            gcell(r["cell_rfds"], r["cell_status"]) + gcell(r["cell_ciq"], r["cell_status"])
+            + gcell(r["rru_rfds"], r["rru_status"]) + gcell(r["rru_ciq"], r["rru_status"])
+            + gcell(r["ant_rfds"], r["ant_status"]) + gcell(r["ant_ciq"], r["ant_status"])
+            + gcell(r["cellid_rfds"], r["cellid_status"]) + gcell(r["cellid_ciq"], r["cellid_status"])
+            + f'<td>{esc(r["ant_info"])}</td>' + f'<td>{esc(r["losses_delays"])}</td>' + warn_cell
+        )
+        body.append(f"<tr>{tds}</tr>")
+    return (f'<div class="qkx-table-wrap"><table class="qkx-table">'
+            f'<thead><tr>{head1}</tr><tr>{head2}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
 def section_title(text):
     st.markdown(f'<div class="qkx-section-title">{esc(text)}</div>', unsafe_allow_html=True)
 
@@ -342,42 +451,34 @@ with tab_rfds:
 
     section_title("Primary & Secondary Node (Rule #3/#31)")
     rows = results.get("primary_secondary", [])
-    st.markdown(render_table(rows, columns=[("node", "Node"), ("ciq", "CIQ"), ("edp", "EDP"),
-                                             ("rfds", "RFDS"), ("status", "Status"), ("note", "Note")]),
+    st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq", "CIQ"),
+                                                           ("edp", "EDP"), ("rfds", "RFDS")]),
                 unsafe_allow_html=True)
 
     section_title("Board Type (Rule #5/#15/#13)")
     rows = results.get("board_type", [])
-    st.markdown(render_table(rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"), ("edp_model", "EDP Model"),
-                                             ("rfds_agrees", "RFDS Agrees"), ("status", "Status"), ("note", "Note")]),
+    st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
+                                                           ("edp_model", "EDP Model"), ("rfds_agrees", "RFDS Agrees")]),
                 unsafe_allow_html=True)
 
     section_title("XMU Validation (Rule #27)")
     rows = results.get("xmu", [])
-    st.markdown(render_table(rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"), ("rfds_xmu", "RFDS XMU"),
-                                             ("status", "Status"), ("note", "Note")]),
+    st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
+                                                           ("rfds_xmu", "RFDS XMU")]),
                 unsafe_allow_html=True)
 
-    section_title("Cells vs RFDS — CellID / RCN / RRH presence (Rule #6/#18)")
-    rows = results.get("cells_vs_rfds", [])
-    st.markdown(render_table(rows, columns=[("node", "Node"), ("cell", "Cell"), ("ciq_cell", "CIQ Cell"),
-                                             ("rfds_cell", "RFDS Cell"), ("status", "Status"), ("note", "Note")]),
-                unsafe_allow_html=True)
-    count_caption(rows, noun="cell")
-
-    section_title("Cell ID / RCN vs RFDS (Rule #6/#24)")
-    rows = results.get("cell_id_vs_rfds", [])
-    st.markdown(render_table(rows, columns=[("node", "Node"), ("cell", "Cell"), ("pre", "Pre"), ("ciq", "CIQ"),
-                                             ("rfds_rcn", "RFDS RCN"), ("status", "Status"), ("note", "Note")]),
-                unsafe_allow_html=True)
-    count_caption(rows, noun="cell")
-
-    section_title("Radio Type vs RFDS (Rule #6)")
-    rows = results.get("radio_type", [])
-    st.markdown(render_table(rows, columns=[("node", "Node"), ("cell", "Cell"), ("pre", "Pre"), ("ciq", "CIQ"),
-                                             ("rfds", "RFDS"), ("status", "Status"), ("note", "Note")]),
-                unsafe_allow_html=True)
-    count_caption(rows, noun="cell")
+    grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages)
+    n_fail = sum(1 for r in grouped_rows if r["overall"] == "FAIL")
+    n_pass = len(grouped_rows) - n_fail
+    st.markdown(
+        f'<div style="text-align:right;font-weight:700;margin:10px 0 4px;">'
+        f'Total: {len(grouped_rows)} &nbsp;|&nbsp; '
+        f'<span style="color:#065f46;">PASS: {n_pass}</span> &nbsp;|&nbsp; '
+        f'<span style="color:#991b1b;">FAIL: {n_fail}</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(render_rfds_grouped_table(grouped_rows), unsafe_allow_html=True)
+    st.caption('"Losses & Delays" has no extractor in this backend yet — always shows NOT AVAILABLE, not a fabricated pass.')
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 2 — Audit: Pre checks (AMOS) / CIQ Checks / Audit (Pre vs CIQ) / CR Desc
