@@ -57,21 +57,46 @@ import amos_view as av
 st.set_page_config(page_title="QUICK IX", layout="wide", page_icon="📡")
 
 # ══════════════════════════════════════════════════════════════════════
-# Styling — dark navy header + coral underline (QUICKIX branding), plus a
-# generic bordered/colour-coded HTML table renderer reused for every
-# comparison table. Colours match the RRNRBL checklist's own status
-# palette and the PDF report's header banner (navy #101F90 / #dde3f7),
-# so the same status reads the same way in the PDF, the xlsx, and here.
+# Styling — ported from the QUICKIX report-feature branch's own CSS
+# (sticky navy topbar with MAS/TEC logo + credit, gradient buttons, white
+# bordered cards for st.container(border=True)) so both features share one
+# visual language ahead of being combined, plus this file's own bordered/
+# colour-coded HTML table renderer for every comparison table. Table
+# colours match the RRNRBL checklist's palette and the PDF report's header
+# banner (navy #101F90 / #dde3f7), so a status reads the same everywhere.
 # ══════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
+.stApp { background: linear-gradient(180deg, #eef3fa 0%, #f7f9fc 100%); }
 .block-container { padding-top: 1rem; max-width: 1500px; }
-.qkx-header {
-  background: linear-gradient(90deg, #011b36, #012a4e);
-  padding: 14px 22px; border-bottom: 3px solid #ff6b4a;
-  border-radius: 6px; margin-bottom: 14px;
+.qkx-topbar {
+  position: sticky; top: 0; z-index: 999;
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0.9rem 1.75rem; margin: -1rem -1rem 1.5rem -1rem;
+  background: linear-gradient(90deg, #011b36 0%, #012a4e 100%);
+  border-bottom: 1px solid rgba(255,91,36,0.55);
+  box-shadow: 0 4px 18px rgba(0,0,0,0.2);
 }
-.qkx-header h1 { color: #fff; font-size: 22px; margin: 0; letter-spacing: .04em; }
+.qkx-topbar .qkx-logo { font-size: 1.3rem; font-weight: 900; color: #ffffff; letter-spacing: 1px; }
+.qkx-topbar .qkx-logo span { color: #ffffff; }
+.qkx-topbar .qkx-title { font-size: 0.95rem; color: #cfe0f5; margin-left: 14px; font-weight: 600; }
+.qkx-topbar .qkx-credit { font-size: 0.78rem; color: #cfe0f5; text-align: right; line-height: 1.3; }
+div[data-testid="stButton"] button {
+  border-radius: 10px; font-weight: 700; border: 1.5px solid #013a6b;
+  background: linear-gradient(135deg, #024ea4, #013a6b); color: #ffffff;
+  box-shadow: 0 3px 8px rgba(1,42,78,0.25);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+div[data-testid="stButton"] button:hover {
+  border-color: #ff5b24; color: #ffffff; transform: translateY(-1px);
+  box-shadow: 0 6px 14px rgba(255,91,36,0.35);
+}
+div[data-testid="stButton"] button:active { transform: translateY(0); }
+div[data-testid="stVerticalBlockBorderWrapper"] {
+  background: #ffffff !important; border: 1px solid #dde5ef !important;
+  border-radius: 12px !important; box-shadow: 0 2px 10px rgba(1,42,78,0.06);
+  padding: 4px 2px;
+}
 .stTabs [data-baseweb="tab-list"] { gap: 4px; }
 .stTabs [data-baseweb="tab"] { font-weight: 600; }
 .qkx-stat { text-align:center; border:1px solid #94a3b8; border-radius:4px; padding:8px; background:#fff; }
@@ -98,7 +123,10 @@ st.markdown("""
 }
 .qkx-count-pill { font-size:11.5px; color:#334155; margin-right:14px; }
 </style>
-<div class="qkx-header"><h1>📡 QUICK IX — Pre-Script Validation</h1></div>
+<div class="qkx-topbar">
+  <div><span class="qkx-logo">MAS<span>TEC</span></span><span class="qkx-title">QUICK IX — Pre-Script Validation</span></div>
+  <div class="qkx-credit">Made by <b>AKSHATHA KALLUR</b><br>Powered by <b>MASTEC</b></div>
+</div>
 """, unsafe_allow_html=True)
 
 STATUS_COLORS = {
@@ -447,36 +475,40 @@ with tab_rfds:
     if rfds_pages is None:
         st.info("No RFDS PDF was loaded for this run — RFDS-dependent comparisons below are skipped.")
 
-    section_title("Primary & Secondary Node")
-    rows = results.get("primary_secondary", [])
-    st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq", "CIQ"),
-                                                           ("edp", "EDP"), ("rfds", "RFDS")]),
-                unsafe_allow_html=True)
+    with st.container(border=True):
+        section_title("Primary & Secondary Node")
+        rows = results.get("primary_secondary", [])
+        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq", "CIQ"),
+                                                               ("edp", "EDP"), ("rfds", "RFDS")]),
+                    unsafe_allow_html=True)
 
-    section_title("Board Type")
-    rows = results.get("board_type", [])
-    st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
-                                                           ("edp_model", "EDP Model"), ("rfds_agrees", "RFDS Agrees")]),
-                unsafe_allow_html=True)
+    with st.container(border=True):
+        section_title("Board Type")
+        rows = results.get("board_type", [])
+        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
+                                                               ("edp_model", "EDP Model"), ("rfds_agrees", "RFDS Agrees")]),
+                    unsafe_allow_html=True)
 
-    section_title("XMU Validation")
-    rows = results.get("xmu", [])
-    st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
-                                                           ("rfds_xmu", "RFDS XMU")]),
-                unsafe_allow_html=True)
+    with st.container(border=True):
+        section_title("XMU Validation")
+        rows = results.get("xmu", [])
+        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
+                                                               ("rfds_xmu", "RFDS XMU")]),
+                    unsafe_allow_html=True)
 
-    grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages)
-    n_fail = sum(1 for r in grouped_rows if r["overall"] == "FAIL")
-    n_pass = len(grouped_rows) - n_fail
-    st.markdown(
-        f'<div style="text-align:right;font-weight:700;margin:10px 0 4px;">'
-        f'Total: {len(grouped_rows)} &nbsp;|&nbsp; '
-        f'<span style="color:#065f46;">PASS: {n_pass}</span> &nbsp;|&nbsp; '
-        f'<span style="color:#991b1b;">FAIL: {n_fail}</span></div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown(render_rfds_grouped_table(grouped_rows), unsafe_allow_html=True)
-    st.caption('"Losses & Delays" has no extractor in this backend yet — always shows NOT AVAILABLE, not a fabricated pass.')
+    with st.container(border=True):
+        grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages)
+        n_fail = sum(1 for r in grouped_rows if r["overall"] == "FAIL")
+        n_pass = len(grouped_rows) - n_fail
+        st.markdown(
+            f'<div style="text-align:right;font-weight:700;margin:0 0 8px;">'
+            f'Total: {len(grouped_rows)} &nbsp;|&nbsp; '
+            f'<span style="color:#065f46;">PASS: {n_pass}</span> &nbsp;|&nbsp; '
+            f'<span style="color:#991b1b;">FAIL: {n_fail}</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(render_rfds_grouped_table(grouped_rows), unsafe_allow_html=True)
+        st.caption('"Losses & Delays" has no extractor in this backend yet — always shows NOT AVAILABLE, not a fabricated pass.')
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 2 — Audit: Pre checks (AMOS) / CIQ Checks / Audit (Pre vs CIQ) / CR Desc
