@@ -282,6 +282,40 @@ def node_id_from_log(text):
     return m.group(1) if m else None
 
 
+def extract_ptp_status(text):
+    """NEW - not part of the confirmed Blueprint rule set. PTP presence/state,
+    ported from the sibling HTML tool's regex (Transport=1...Ptp=1...
+    operationalState). UNCONFIRMED against a real kget-all log captured by
+    THIS project's own hget command set (no such log was available to test
+    against) - the HANDOFF for this project explicitly flags PTP as 'no PTP
+    signal found' in the confirmed hget commands, so treat this as a
+    best-effort layer over the raw text, not a confirmed rule. Verify
+    against a real log before trusting it on a live site.
+    Returns 'ENABLED' / 'DISABLED' / 'NOT PRESENT'.
+    """
+    m = re.search(r'Transport\s*=\s*1[\s\S]{0,300}?Ptp\s*=\s*1[\s\S]{0,300}?operationalState\s*[:=]?\s*(\w+)', text, re.I)
+    if not m:
+        return 'NOT PRESENT'
+    state = m.group(1).upper()
+    return 'ENABLED' if state in ('ENABLED', 'UP', 'TRUE', '1') else 'DISABLED'
+
+
+def extract_dss_status(text):
+    """NEW - not part of the confirmed Blueprint rule set. Pre-existing DSS,
+    ported from the sibling HTML tool's regex (non-zero essScPairId /
+    essScLocalId per LTE cell). Same caveat as extract_ptp_status() - the
+    HANDOFF explicitly flags DSS as unconfirmed in this project's hget
+    command set; verify against a real log before trusting it.
+    Returns {cell_name: True/False} for every EUtranCellFDD block found
+    with an essScPairId/essScLocalId reference.
+    """
+    result = {}
+    for m in re.finditer(r'EUtranCellFDD=(?P<cell>\S+?)[\s\S]{0,400}?essScPairId\s*[:=]?\s*(?P<pair>\d+)[\s\S]{0,200}?essScLocalId\s*[:=]?\s*(?P<local>\d+)', text):
+        active = m.group('pair') not in ('0', '') and m.group('local') not in ('0', '')
+        result[m.group('cell')] = active
+    return result
+
+
 def extract_sw_version(text):
     """Rule #1: SW Version / SW Package, from the 'cvcu'/'cvls' backup-version
     block's 'Current SwVersion: <package> (<version>)' line.
