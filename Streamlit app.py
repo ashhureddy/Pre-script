@@ -141,20 +141,18 @@ def render_table(rows, columns=None, status_key="status", empty_msg="No data."):
 
 
 def render_table_with_comments(rows, columns, status_key="status", note_key="note", bad_value="MISMATCH"):
-    """Plain bordered table (no per-row background) ending in one
-    'Comments' column whose TEXT turns red+bold when rows[i][status_key]
-    == bad_value. Matches the confirmed HTML layout for Primary/Secondary,
-    Board Type, and XMU Validation — no separate Match/Note columns."""
+    """Row background/text colour driven by rows[i][status_key] (same
+    green/red/etc. palette as every other table), ending in one 'Comments'
+    column holding the note text — no separate Status/Note columns."""
     if not rows:
         return '<div class="qkx-empty">No data.</div>'
     head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + '<th style="min-width:220px;">Comments</th>'
     body = []
     for r in rows:
+        color, bg = STATUS_COLORS.get(str(r.get(status_key, "")), DEFAULT_COLOR)
         cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
-        is_bad = r.get(status_key) == bad_value
-        style = "color:#991b1b;font-weight:700;" if is_bad else "color:#334155;"
-        cells += f'<td style="min-width:220px;{style}">{esc(r.get(note_key, ""))}</td>'
-        body.append(f"<tr>{cells}</tr>")
+        cells += f'<td style="min-width:220px;">{esc(r.get(note_key, ""))}</td>'
+        body.append(f'<tr style="background:{bg};color:{color};">{cells}</tr>')
     return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
@@ -452,19 +450,19 @@ with tab_rfds:
     if rfds_pages is None:
         st.info("No RFDS PDF was loaded for this run — RFDS-dependent comparisons below are skipped.")
 
-    section_title("Primary & Secondary Node (Rule #3/#31)")
+    section_title("Primary & Secondary Node")
     rows = results.get("primary_secondary", [])
     st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq", "CIQ"),
                                                            ("edp", "EDP"), ("rfds", "RFDS")]),
                 unsafe_allow_html=True)
 
-    section_title("Board Type (Rule #5/#15/#13)")
+    section_title("Board Type")
     rows = results.get("board_type", [])
     st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
                                                            ("edp_model", "EDP Model"), ("rfds_agrees", "RFDS Agrees")]),
                 unsafe_allow_html=True)
 
-    section_title("XMU Validation (Rule #27)")
+    section_title("XMU Validation")
     rows = results.get("xmu", [])
     st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
                                                            ("rfds_xmu", "RFDS XMU")]),
