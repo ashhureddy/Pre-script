@@ -68,7 +68,7 @@ st.set_page_config(page_title="QUICK IX", layout="wide", page_icon="📡")
 st.markdown("""
 <style>
 .stApp { background: linear-gradient(180deg, #eef3fa 0%, #f7f9fc 100%); }
-.block-container { padding-top: 1rem; max-width: 1500px; }
+.block-container { padding-top: 1rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%; }
 .qkx-topbar {
   position: sticky; top: 0; z-index: 999;
   display: flex; justify-content: space-between; align-items: center;
