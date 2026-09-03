@@ -148,6 +148,120 @@ def extract_cell_to_radio(text):
     return result
 
 
+def _format_branch_refs(refs, sep=" | ", pair_sep=","):
+    """['AntennaUnitGroup=1,RfBranch=9', 'AntennaUnitGroup=1,RfBranch=10', ...]
+    -> '1,9 | 1,10 | ...' (or '1-9 | 1-10 | ...' when pair_sep='-'). Refs are
+    sorted by (AUG, RfBranch) as integers for a stable, numerically-ordered
+    display — confirmed against QUICKIX's own rendering convention."""
+    pairs = []
+    for ref in refs:
+        m = re.match(r'AntennaUnitGroup=(\d+),RfBranch=(\d+)', ref)
+        if m:
+            pairs.append((int(m.group(1)), int(m.group(2))))
+    pairs.sort()
+    return sep.join(f"{aug}{pair_sep}{rb}" for aug, rb in pairs)
+
+
+def extract_rf_branch_refs(text):
+    """Cell -> {'tx_ref': str, 'rx_ref': str, 'sef_branches': str}, matching
+    QUICKIX HTML's RFBRANCHTXREF / RFBRANCHRXREF / SEF RFBRANCHES columns.
+
+    Confirmed against real Pre kget-all logs (HXL00147 / HXL04147 /
+    HXIN090147F):
+        'hget sector rfbranch' gives, per SectorCarrier (LTE) or
+            NRSectorCarrier (5G): rfBranchRxRef / rfBranchTxRef, each a list
+            of 'AntennaUnitGroup=N,RfBranch=M' refs -> TX/RX ref columns,
+            joined with ',' inside each pair and ' | ' between pairs
+            (e.g. SectorCarrier=10's rfBranchTxRef -> '1,9 | 1,10 | 1,11 | 1,12').
+        The same command's second table gives SectorEquipmentFunction's own
+            rfBranchRef (its own AntennaUnitGroup/RfBranch list, which can be
+            a SUPERSET of any one SectorCarrier's refs when the SEF serves
+            multiple SectorCarriers/carriers on the same sector) -> SEF
+            RFBRANCHES column, joined with '-' inside each pair instead of
+            ',' (matches QUICKIX's own formatting convention for this column).
+        'SectorCarrier=|SectorEquipmentFunction ... reservedBy' gives the
+            Cell -> SectorCarrier -> SectorEquipmentFunction chain needed to
+            attach the right SEF's rfBranchRef list to each cell.
+
+    Returns {} if the required commands aren't present in this log (older
+    log captures / different hget command set)."""
+    if not text:
+        return {}
+
+    # ── Cell -> SectorCarrier, and SectorCarrier -> SectorEquipmentFunction ──
+    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    cell_to_sc = {}
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+.*$', id_block, re.M):
+        sc_mo, rest = m.group(1), m.group(0)
+        for cell in re.findall(r'(?:EUtranCellFDD|NRCellDU)=(\S+)', rest):
+            cell_to_sc[cell] = sc_mo
+    sc_to_sef = {}
+    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+.*$', id_block, re.M):
+        sef_mo, rest = m.group(1), m.group(0)
+        for sc in re.findall(r'(?:SectorCarrier|NRSectorCarrier)=\S+', rest):
+            sc_to_sef[sc] = sef_mo
+
+    # ── 'hget sector rfbranch': two tables in one block — SectorCarrier's
+    # (and NRSectorCarrier's) rfBranchRxRef/rfBranchTxRef, then
+    # SectorEquipmentFunction's rfBranchRef. Parsed as one combined block
+    # since both use the same '[N] = <refs...>' cross-reference syntax and
+    # a shared MO-name regex distinguishes which table a row belongs to. ──
+    branch_block = get_command_block(text, 'sector rfbranch') or ''
+    sc_tx, sc_rx, sef_refs = {}, {}, {}
+    for m in re.finditer(
+        r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+\[\d+\]\s*=\s*([^\[]*?)\s+\[\d+\]\s*=\s*(.*)$',
+        branch_block, re.M
+    ):
+        mo, rx_part, tx_part = m.group(1), m.group(2), m.group(3)
+        sc_rx[mo] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', rx_part)
+        sc_tx[mo] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', tx_part)
+    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$', branch_block, re.M):
+        sef_refs[m.group(1)] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
+
+    result = {}
+    for cell, sc in cell_to_sc.items():
+        tx_ref = _format_branch_refs(sc_tx.get(sc, []), pair_sep=",")
+        rx_ref = _format_branch_refs(sc_rx.get(sc, []), pair_sep=",")
+        sef = sc_to_sef.get(sc)
+        sef_branches = _format_branch_refs(sef_refs.get(sef, []), pair_sep="-") if sef else ""
+        result[cell] = {"tx_ref": tx_ref, "rx_ref": rx_ref, "sef_branches": sef_branches}
+    return result
+
+
+def extract_cell_to_fru(text):
+    """Cell -> raw FieldReplaceableUnit id (e.g. 'RRU-10'), via the same
+    Cell->SectorCarrier->RfBranch->FRU chain as extract_cell_to_radio(), but
+    keeping the FRU id itself instead of resolving it to a product name —
+    matches QUICKIX HTML's 'RRUs' column (distinct from 'Radio type', which
+    shows the resolved model)."""
+    if not text:
+        return {}
+    branch_to_fru = {}
+    for m in re.finditer(r'^(AntennaUnitGroup=\d+,RfBranch=\d+)\s+.*?FieldReplaceableUnit=([^,\s]+)',
+                          get_command_block(text, 'rfbranch auport|rfportref') or '', re.M):
+        branch_to_fru[m.group(1)] = m.group(2)
+
+    carrier_to_fru = {}
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+(.*)$',
+                          get_command_block(text, 'sector rfbranch') or '', re.M):
+        refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
+        frus = {branch_to_fru.get(r) for r in refs if r in branch_to_fru}
+        frus.discard(None)
+        if frus:
+            carrier_to_fru[m.group(1)] = ", ".join(sorted(frus))
+
+    result = {}
+    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+.*$', id_block, re.M):
+        carrier, rest = m.group(1), m.group(0)
+        fru = carrier_to_fru.get(carrier)
+        if not fru:
+            continue
+        for cell in re.findall(r'(?:EUtranCellFDD|NRCellDU)=(\S+)', rest):
+            result[cell] = fru
+    return result
+
+
 def _short_radio_name(product):
     """Normalise a Pre productName to the CIQ's 'RRUS <model>' shape so the
     two columns are visually comparable.
