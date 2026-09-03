@@ -262,6 +262,43 @@ def extract_cell_to_fru(text):
     return result
 
 
+def extract_dss_status(text):
+    """Cell -> True/False Pre-existing DSS, from SectorCarrier's essScPairId/
+    essScLocalId ('get . essScLocalId' / 'get . essScPairId' commands) both
+    being non-zero — same rule as QUICKIX HTML's dssActive flag. Confirmed
+    against a real log (HXL04147): SectorCarrier=7_3/8_3/9_3 all report
+    non-zero essScLocalId + essScPairId and correspond to the site's actual
+    DSS-active cells; SectorCarrier=7_1/7_2/etc. report 0/0 and are not DSS.
+
+    An earlier version of this file claimed no DSS signal exists in Pre
+    kget-all logs — that was wrong; 'get . essScLocalId'/'get . essScPairId'
+    carry it directly, just not through the same 'hget' table commands the
+    other per-cell fields use."""
+    if not text:
+        return {}
+    local_id = {}
+    for m in re.finditer(r'^(SectorCarrier=\S+)\s+essScLocalId\s+(\S+)', text, re.M):
+        local_id[m.group(1)] = m.group(2)
+    pair_id = {}
+    for m in re.finditer(r'^(SectorCarrier=\S+)\s+essScPairId\s+(\S+)', text, re.M):
+        pair_id[m.group(1)] = m.group(2)
+
+    sc_active = {}
+    for sc in set(local_id) | set(pair_id):
+        l, p = str(local_id.get(sc, "0")).strip(), str(pair_id.get(sc, "0")).strip()
+        sc_active[sc] = (l != "0" and l != "" and p != "0" and p != "")
+
+    # Cell -> SectorCarrier, same reservedBy cross-reference used elsewhere.
+    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    result = {}
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+.*$', id_block, re.M):
+        sc_mo, rest = m.group(1), m.group(0)
+        active = sc_active.get(sc_mo, False)
+        for cell in re.findall(r'(?:EUtranCellFDD|NRCellDU)=(\S+)', rest):
+            result[cell] = active
+    return result
+
+
 def extract_nr_used_antennas(text):
     """NRSectorCarrier -> {'tx': str, 'rx': str}, from noOfUsedTxAntennas /
     noOfUsedRxAntennas in the 'SectorCarrier=|SectorEquipmentFunction ...
@@ -438,14 +475,15 @@ def node_id_from_log(text):
 
 
 def extract_ptp_status(text):
-    """NEW - not part of the confirmed Blueprint rule set. PTP presence/state,
-    ported from the sibling HTML tool's regex (Transport=1...Ptp=1...
-    operationalState). UNCONFIRMED against a real kget-all log captured by
-    THIS project's own hget command set (no such log was available to test
-    against) - the HANDOFF for this project explicitly flags PTP as 'no PTP
-    signal found' in the confirmed hget commands, so treat this as a
-    best-effort layer over the raw text, not a confirmed rule. Verify
-    against a real log before trusting it on a live site.
+    """PTP presence/state, from Transport=1...Ptp=1...operationalState.
+    Confirmed against real logs (HXL00147, HXL04147: Ptp=1 present and
+    ENABLED; HXIN090147F: no Ptp=1 MO at all, correctly NOT PRESENT) — an
+    earlier version of this docstring claimed this was unconfirmed/unused
+    in this project's hget command set; that was wrong. amos_view.py's own
+    ptp_status() duplicates this same rule for the Node Summary table (kept
+    separate rather than merged so amos_view.py's Title Case return value
+    doesn't require a caller-side transform); this function's UPPER CASE
+    return stays as-is for any other unconfirmed caller relying on it.
     Returns 'ENABLED' / 'DISABLED' / 'NOT PRESENT'.
     """
     m = re.search(r'Transport\s*=\s*1[\s\S]{0,300}?Ptp\s*=\s*1[\s\S]{0,300}?operationalState\s*[:=]?\s*(\w+)', text, re.I)
@@ -453,22 +491,6 @@ def extract_ptp_status(text):
         return 'NOT PRESENT'
     state = m.group(1).upper()
     return 'ENABLED' if state in ('ENABLED', 'UP', 'TRUE', '1') else 'DISABLED'
-
-
-def extract_dss_status(text):
-    """NEW - not part of the confirmed Blueprint rule set. Pre-existing DSS,
-    ported from the sibling HTML tool's regex (non-zero essScPairId /
-    essScLocalId per LTE cell). Same caveat as extract_ptp_status() - the
-    HANDOFF explicitly flags DSS as unconfirmed in this project's hget
-    command set; verify against a real log before trusting it.
-    Returns {cell_name: True/False} for every EUtranCellFDD block found
-    with an essScPairId/essScLocalId reference.
-    """
-    result = {}
-    for m in re.finditer(r'EUtranCellFDD=(?P<cell>\S+?)[\s\S]{0,400}?essScPairId\s*[:=]?\s*(?P<pair>\d+)[\s\S]{0,200}?essScLocalId\s*[:=]?\s*(?P<local>\d+)', text):
-        active = m.group('pair') not in ('0', '') and m.group('local') not in ('0', '')
-        result[m.group('cell')] = active
-    return result
 
 
 def extract_sw_version(text):
