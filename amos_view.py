@@ -53,10 +53,15 @@ def build_node_summary(node_id, text):
 
 
 def build_lte_cell_rows(node_id, text):
-    """Node, Cell, Band, Sector, RRU, TX, RX, Power, Sharing Radio."""
+    """Node, Cell, Sector Carrier, RRUs, Radio type, Sharing Radio, TX, RX,
+    RFBRANCHTXREF, RFBRANCHRXREF, SEF RFBRANCHES, Pre Existing DSS — matches
+    QUICKIX HTML's LTE Cells table column-for-column."""
     cells = sorted(c for c in pci.extract_pre_cells_for_node(text) if not bl.is_5g_cell(c))
     radio_by_cell = pe.extract_cell_to_radio(text)
+    fru_by_cell = pe.extract_cell_to_fru(text)
     cfg_by_cell = cs._extract_sector_config(text)
+    branch_refs = pe.extract_rf_branch_refs(text)
+    sector_carrier_by_cell = _extract_sector_carrier_numbers(text)
 
     # Sharing radio: same RRU + same band serving DIFFERENT sector letters —
     # same definition as QUICKIX's radioBandMap (cross-sector share only; a
@@ -64,7 +69,7 @@ def build_lte_cell_rows(node_id, text):
     radio_band_map = {}
     for cell in cells:
         band, sector = bl.band_label(cell)
-        rru = radio_by_cell.get(cell)
+        rru = fru_by_cell.get(cell)
         if not (band and sector and rru):
             continue
         key = (rru, band)
@@ -73,37 +78,62 @@ def build_lte_cell_rows(node_id, text):
     rows = []
     for cell in cells:
         band, sector = bl.band_label(cell)
-        rru = radio_by_cell.get(cell, "-")
+        fru = fru_by_cell.get(cell, "-")
+        radio_model = pe._short_radio_name(radio_by_cell.get(cell)) or "-"
         cfg = cfg_by_cell.get(cell)
         sharing = "No"
-        if band and sector and rru != "-":
-            by_sector = radio_band_map.get((rru, band), {})
+        if band and sector and fru != "-":
+            by_sector = radio_band_map.get((fru, band), {})
             shared = {c for sec, cs_ in by_sector.items() if sec != sector for c in cs_}
             if shared:
                 sharing = ", ".join(sorted(shared))
+        refs = branch_refs.get(cell, {})
         rows.append({
-            "node": node_id, "cell": cell, "band": band or "-", "sector": sector or "-",
-            "rru": rru, "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
-            "power": cfg["power"] if cfg else "-", "sharing_radio": sharing,
+            "node": node_id, "cell": cell,
+            "sector_carrier": sector_carrier_by_cell.get(cell, "-"),
+            "rru": fru, "radio_type": radio_model, "sharing_radio": sharing,
+            "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
+            "rfbranch_tx_ref": refs.get("tx_ref") or "-", "rfbranch_rx_ref": refs.get("rx_ref") or "-",
+            "sef_rfbranches": refs.get("sef_branches") or "-",
             "pre_existing_dss": "Not available from Pre kget-all logs",
         })
     return rows
 
 
+def _extract_sector_carrier_numbers(text):
+    """Cell -> the raw SectorCarrier/NRSectorCarrier index shown in QUICKIX's
+    'Sector Carries' column (e.g. 'SectorCarrier=7_1' -> '7_1',
+    'SectorCarrier=10' -> '10'). Reuses the same reservedBy cross-reference
+    block extract_rf_branch_refs() already parses, just keeping the numeric
+    suffix instead of the branch refs."""
+    import re
+    from log_parser import get_command_block
+    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    cell_to_num = {}
+    for m in re.finditer(r'^(?:SectorCarrier|NRSectorCarrier)=(\S+)\s+.*$', id_block, re.M):
+        num, rest = m.group(1), m.group(0)
+        for cell in re.findall(r'(?:EUtranCellFDD|NRCellDU)=(\S+)', rest):
+            cell_to_num[cell] = num
+    return cell_to_num
+
+
 def build_nr_cell_rows(node_id, text):
-    """Node, Cell, Band, Sector, RRU, TX, RX, Power."""
+    """Node, Cell, RRUs, TX, RX, SEF RFBRANCHES — matches QUICKIX HTML's
+    5G NR Cells table."""
     cells = sorted(c for c in pci.extract_pre_cells_for_node(text) if bl.is_5g_cell(c))
-    radio_by_cell = pe.extract_cell_to_radio(text)
+    fru_by_cell = pe.extract_cell_to_fru(text)
     cfg_by_cell = cs._extract_sector_config_5g(text)
+    branch_refs = pe.extract_rf_branch_refs(text)
 
     rows = []
     for cell in cells:
-        band, sector = bl.band_label(cell)
         cfg = cfg_by_cell.get(cell)
+        refs = branch_refs.get(cell, {})
         rows.append({
-            "node": node_id, "cell": cell, "band": band or "-", "sector": sector or "-",
-            "rru": radio_by_cell.get(cell, "-"), "tx": cfg["tx"] if cfg else "-",
-            "rx": cfg["rx"] if cfg else "-", "power": cfg["power"] if cfg else "-",
+            "node": node_id, "cell": cell,
+            "rru": fru_by_cell.get(cell, "-"),
+            "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
+            "sef_rfbranches": refs.get("sef_branches") or "-",
         })
     return rows
 
