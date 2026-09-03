@@ -39,6 +39,7 @@ the prior version of this file:
     consistent across every surface this tool produces.
 """
 import os
+import re
 import html
 import tempfile
 
@@ -51,6 +52,7 @@ import pre_extract as pe
 import run_validation as rv
 import rrnrbl_checklist as rc
 import antenna_resolve as ar
+import warnings_text as wt
 import ciq_view as cv
 import amos_view as av
 
@@ -520,26 +522,83 @@ with tab_rfds:
     if rfds_pages is None:
         st.info("No RFDS PDF was loaded for this run — RFDS-dependent comparisons below are skipped.")
 
+    _rfds_inventory_text = None
+    if rfds_pages is not None:
+        _t = rf.find_pages_by_heading(rfds_pages, "Non RF Inventory Details (Final)")
+        _rfds_inventory_text = re.sub(r"\s+", "", _t) if _t else None
+
+    def _board_rfds_display(r):
+        ciq_du = r.get("ciq_du_type") or ""
+        if r.get("rfds_agrees") is True:
+            return ciq_du or "FOUND"
+        if _rfds_inventory_text:
+            candidates = sorted(set(re.findall(r"\d{4,5}", _rfds_inventory_text)) - {ciq_du})
+            return "/".join(candidates[:3]) if candidates else "NOT FOUND"
+        return "NOT CHECKED"
+
+    def _ciq_xmu_count(node_id, ciq_wb):
+        mm = next((m for m in cer.mixed_mode_rows(ciq_wb)
+                   if str(m.get("Node to be built as") or m.get("eNodeB Name") or "").strip() == node_id), None)
+        if mm is None:
+            return None
+        e_name, g_name = mm.get("eNodeB Name"), mm.get("gNodeB Name")
+        row = None
+        if e_name and "eNB Info" in ciq_wb.sheetnames:
+            row = next((r for r in cer.sheet_rows_as_dicts(ciq_wb["eNB Info"])
+                        if str(r.get("eNodeB Name", "")).strip().upper() == str(e_name).strip().upper()), None)
+        if row is None and g_name and "gNB Info" in ciq_wb.sheetnames:
+            row = next((r for r in cer.sheet_rows_as_dicts(ciq_wb["gNB Info"])
+                        if str(r.get("gNodeB Name", "")).strip().upper() == str(g_name).strip().upper()), None)
+        if row is None:
+            return None
+        return sum(1 for k in ("1st XMU", "2nd XMU", "3rd XMU") if str(row.get(k, "")).strip().upper() == "YES")
+
     with st.container(border=True):
         section_title("Primary & Secondary Node")
         rows = results.get("primary_secondary", [])
-        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq", "CIQ"),
-                                                               ("edp", "EDP"), ("rfds", "RFDS")]),
+        display_rows = [
+            dict(r, comments="Match" if r.get("status") != "MISMATCH" else
+                 f"Mismatch found on {wt.primary_secondary_mismatched_role(r)} id on {r.get('node')}.")
+            for r in rows
+        ]
+        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq", "CIQ"),
+                                                                        ("edp", "EDP"), ("rfds", "RFDS")],
+                                                note_key="comments"),
                     unsafe_allow_html=True)
 
     with st.container(border=True):
         section_title("Board Type")
         rows = results.get("board_type", [])
-        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
-                                                               ("edp_model", "EDP Model"), ("rfds_agrees", "RFDS Agrees")]),
+        display_rows = [
+            dict(r, rfds=_board_rfds_display(r),
+                 comments=("Match" if r.get("status") == "MATCH" else
+                           f"Board swap (expected) on {r.get('node')}." if r.get("status") == "EXPECTED" else
+                           f"Board type mismatch found on the {r.get('node')}."))
+            for r in rows
+        ]
+        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
+                                                                        ("edp_model", "EDP Model"), ("rfds", "RFDS")],
+                                                note_key="comments"),
                     unsafe_allow_html=True)
+        if rfds_pages is not None:
+            st.caption("RFDS model is a best-effort text match against the RFDS's Non RF Inventory section, not a structured per-node field.")
 
     with st.container(border=True):
         section_title("XMU Validation")
         rows = results.get("xmu", [])
-        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
-                                                               ("rfds_xmu", "RFDS XMU")]),
+        display_rows = []
+        for r in rows:
+            n = _ciq_xmu_count(r.get("node"), ciq_wb)
+            ciq_label = f"{n} XMU" if n else ("0 XMU" if n == 0 else "—")
+            rfds_val = r.get("rfds_xmu")
+            rfds_label = "XMU Found" if rfds_val is True else ("XMU Not Found" if rfds_val is False else "NOT CHECKED")
+            comments = "Match" if r.get("status") == "MATCH" else f"XMU mismatch found on the {r.get('node')}."
+            display_rows.append(dict(r, ciq_xmu=ciq_label, rfds_xmu=rfds_label, comments=comments))
+        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
+                                                                        ("rfds_xmu", "RFDS XMU")],
+                                                note_key="comments"),
                     unsafe_allow_html=True)
+        st.caption("RFDS doesn't expose an XMU count (only presence) — RFDS XMU shows Found/Not Found, not a count.")
 
     with st.container(border=True):
         grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages)
@@ -736,7 +795,7 @@ with tab_consolidated:
         st.caption("Nothing to report.")
 
     section_title("Warnings & Comments")
-    warn_keys = ["warn_xmu", "warn_params_4g", "warn_params_5g", "warn_pci", "warn_radio_type",
+    warn_keys = ["warn_primary_secondary", "warn_board_type", "warn_xmu", "warn_params_4g", "warn_params_5g", "warn_pci", "warn_radio_type",
                  "warn_sector_swap", "warn_nr_tac", "warn_air_radio", "warn_antenna"]
     all_warnings = []
     for k in warn_keys:
