@@ -215,7 +215,13 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
     for r in results.get("cell_id_vs_rfds", []):
         cell_map.setdefault(r["cell"], {})["ci"] = r
 
-    port_details = rf.extract_port_level_details(rfds_pages) if rfds_pages is not None else {}
+    # Antenna model: 'RF Inventory Details (Final)' filtered to
+    # EquipmentType=='ANTENNA' — the authoritative per-antenna record
+    # (Model + Linked Cells explicitly), not inferred from Sec-Pos position
+    # in 'Port Level Details'. AIR-series radios have no separate antenna
+    # row here (antenna is integrated into the radio) — those cells simply
+    # get no RFDS antenna entry, which is correct, not a gap.
+    rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages) if rfds_pages is not None else {}
     ant_by_cell = {}
     if "eUtran Parameters" in ciq_wb.sheetnames:
         for r in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]):
@@ -223,10 +229,10 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
             if not cell:
                 continue
             ciq_ant = r.get("antenna model")
-            pd_row = port_details.get(cell)
-            tier, detail = ar.resolve_antenna(ciq_ant, pd_row["vendor_model"] if pd_row else None)
-            ant_by_cell[cell] = {"ciq": ciq_ant or "—", "rfds": (pd_row or {}).get("vendor_model", "NOT FOUND"),
-                                  "tier": tier, "found": pd_row is not None}
+            ant_row = rf_antennas.get(cell)
+            tier, detail = ar.resolve_antenna(ciq_ant, ant_row["model"] if ant_row else None)
+            ant_by_cell[cell] = {"ciq": ciq_ant or "—", "rfds": (ant_row or {}).get("model", "NOT FOUND"),
+                                  "tier": tier, "found": ant_row is not None}
 
     rows = []
     for cell, parts in cell_map.items():
@@ -660,24 +666,41 @@ with tab_audit:
         if rfds_pages is None:
             st.caption("Upload an RFDS PDF to compare antenna models.")
         else:
-            port_details = rf.extract_port_level_details(rfds_pages)
-            if not port_details:
-                st.caption("No 'Port Level Details (Final)' table found in this RFDS PDF.")
+            rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages)
+            if not rf_antennas:
+                st.caption("No 'RF Inventory Details (Final)' antenna rows found in this RFDS PDF.")
             else:
-                ant_rows = []
-                for r in (cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]) if "eUtran Parameters" in ciq_wb.sheetnames else []):
-                    cell = r.get("EutranCellFDDId")
-                    ciq_ant = r.get("antenna model")
-                    pd_row = port_details.get(cell)
-                    tier, detail = ar.resolve_antenna(ciq_ant, pd_row["vendor_model"] if pd_row else None)
-                    ant_rows.append({"cell": cell, "ciq_antenna": ciq_ant,
-                                      "rfds_vendor_model": pd_row["vendor_model"] if pd_row else "NOT FOUND",
-                                      "match_tier": tier, "detail": detail})
-                st.markdown(render_table(ant_rows, columns=[("cell", "Cell"), ("ciq_antenna", "CIQ Antenna"),
-                                                              ("rfds_vendor_model", "RFDS Vendor/Model"),
+                ciq_ant_by_cell = {}
+                if "eUtran Parameters" in ciq_wb.sheetnames:
+                    for r in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]):
+                        c = r.get("EutranCellFDDId")
+                        if c:
+                            ciq_ant_by_cell[c] = r.get("antenna model")
+
+                ant_rows, seen_groups = [], set()
+                for ant in rf_antennas.values():
+                    key = tuple(ant["shared_cells"])
+                    if key in seen_groups:
+                        continue
+                    seen_groups.add(key)
+                    ciq_models = {ciq_ant_by_cell.get(c) for c in ant["shared_cells"] if ciq_ant_by_cell.get(c)}
+                    if len(ciq_models) == 1:
+                        ciq_display = next(iter(ciq_models))
+                        tier, detail = ar.resolve_antenna(ciq_display, ant["model"])
+                    elif ciq_models:
+                        ciq_display = ", ".join(sorted(ciq_models))
+                        tier, detail = "MULTIPLE CIQ VALUES", "Cells in this group don't all report the same CIQ antenna model."
+                    else:
+                        ciq_display, tier, detail = "—", "N/A", ""
+                    ant_rows.append({"cells": ", ".join(ant["shared_cells"]), "ciq_antenna": ciq_display,
+                                      "rfds_model": ant["model"], "match_tier": tier, "detail": detail})
+                st.markdown(render_table(ant_rows, columns=[("cells", "Cells"), ("ciq_antenna", "CIQ Antenna"),
+                                                              ("rfds_model", "RFDS Model"),
                                                               ("match_tier", "Match Tier"), ("detail", "Detail")],
                                           status_key=None),
                             unsafe_allow_html=True)
+                st.caption("Cells on the same row share one physical antenna. AIR-series radios (integrated antenna) "
+                           "have no separate ANTENNA row in the RFDS, so they don't appear here.")
 
         section_title("FA Code follow-up email")
         fa = site_details.get("fa_code") or "UNKNOWN"
