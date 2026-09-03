@@ -11,12 +11,59 @@ from collections import defaultdict
 
 
 def xmu_warnings(rows):
-    """Section 7, column C: 'Warning: XMU Mismatch found on Node 3, Please
-    check Revision history'."""
+    """Section 7, column C: 'XMU mismatch found on the {node}, check the
+    revision history.'"""
     out = []
     for r in rows:
         if r.get('status') == 'MISMATCH':
-            out.append(f"XMU Mismatch found on {r['node']}, Please check Revision history")
+            out.append(f"XMU mismatch found on the {r['node']}, check the revision history.")
+    return out
+
+
+def parse_primary_secondary_roles(label):
+    """'{node}(P)/{node}(S)(mode)' -> {'P': node, 'S': node}. Shared by the
+    warning text below and the Streamlit RFDS Validation page's Comments
+    column, so both name the same mismatched role the same way."""
+    out = {}
+    for m in re.finditer(r'([^/()]+)\((P|S)\)', str(label or "")):
+        out[m.group(2)] = m.group(1).strip()
+    return out
+
+
+def primary_secondary_mismatched_role(row):
+    """Which role (Primary/Secondary/both) actually differs for this row,
+    by comparing the CIQ label's (P)/(S) node ids against EDP's and RFDS's."""
+    ciq_roles = parse_primary_secondary_roles(row.get('ciq'))
+    bad = set()
+    for key in ('edp', 'rfds'):
+        other = parse_primary_secondary_roles(row.get(key))
+        for role in ('P', 'S'):
+            if role in ciq_roles and role in other and ciq_roles[role] != other[role]:
+                bad.add(role)
+    names = {'P': 'Primary', 'S': 'Secondary'}
+    return "/".join(names[r] for r in sorted(bad)) if bad else "Primary/Secondary"
+
+
+def primary_secondary_warnings(rows):
+    """RFDS Validation page, Primary & Secondary Node: 'Mismatch found on
+    Primary/Secondary id on {node}, raise a Pre integration issue mail.'"""
+    out = []
+    for r in rows:
+        if r.get('status') != 'MISMATCH':
+            continue
+        role_txt = primary_secondary_mismatched_role(r)
+        out.append(f"Mismatch found on {role_txt} id on {r['node']}, raise a Pre integration issue mail.")
+    return out
+
+
+def board_type_warnings(rows):
+    """RFDS Validation page, Board Type: 'Board type mismatch found on the
+    {node}, raise a Pre integration issue mail.' A planned/agreed board
+    swap (status EXPECTED) is not a fault and does not warn."""
+    out = []
+    for r in rows:
+        if r.get('status') == 'MISMATCH':
+            out.append(f"Board type mismatch found on the {r['node']}, raise a Pre integration issue mail.")
     return out
 
 
