@@ -8,11 +8,13 @@ rule-based checks already use) rather than re-parsing the log text with new
 regexes — the goal here is a different VIEW of already-confirmed data, not
 new extraction logic.
 
-Two fields the HTML tool shows are NOT available from this project's Pre
-kget-all commands, and are labelled as such rather than guessed:
-    - PTP status       (no PTP signal in these hget commands — see
-                         run_validation.py's own documented limitation)
+One field the HTML tool shows is NOT available from this project's Pre
+kget-all commands, and is labelled as such rather than guessed:
     - Pre-existing DSS (no essScPairId/essScLocalId in these hget commands)
+
+PTP status IS available (confirmed against real HXL00147/HXL04147/
+HXIN090147F logs, see ptp_status() below) — the docstring note claiming
+otherwise in an earlier version of this file was wrong.
 """
 import re
 
@@ -35,6 +37,43 @@ def sa_nsa_status(text, nr_tac_by_cell):
     return "SA" if (_has_amf_signal(text) and has_7digit) else "NSA"
 
 
+def ptp_status(text):
+    """Enabled / Disabled / Not Present, from the 'st' command's row for
+    Transport=1,Ptp=1,... (confirmed against real logs: HXL00147 and
+    HXL04147 both have a 'Transport=1,Ptp=1,BoundaryOrdinaryClock=1,
+    PtpBcOcPort=1' row with an Op. State column; HXIN090147F — a pure AAS/AIR
+    5G node — has no Ptp=1 MO at all, i.e. genuinely Not Present, not a
+    missing-data gap)."""
+    if not text:
+        return "Not Present"
+    m = re.search(
+        r'^\s*\d+\s+\d+\s*\([A-Z]+\)\s+(\d+)\s*\(([A-Z]+)\)\s+Transport=1,Ptp=1\b',
+        text, re.M,
+    )
+    if not m:
+        return "Not Present"
+    return "Enabled" if m.group(2).upper() == "ENABLED" else "Disabled"
+
+
+def node_secondary_name(node_id, text):
+    """The node's OTHER identity when it's a dual-tech (MMBB) node — e.g.
+    HXL04147's own log lists 5G cells prefixed 'HXIN010147_...', distinct
+    from its own LTE node id. Same convention pre_post_config.py's
+    build_pre_post_config_text() already uses for Pre-side MMBB labelling;
+    this is the Node Summary table's own use of the same signal. Returns
+    None when no distinct secondary prefix is found (LTE-only or 5G-only
+    node, or a dual-tech node whose 5G cells share the same prefix)."""
+    if not text:
+        return None
+    cells = pci.extract_pre_cells_for_node(text)
+    prefixes = set()
+    for c in cells:
+        m = re.match(r'^([A-Za-z0-9]+?)_', c)
+        if m and m.group(1).upper() != str(node_id).strip().upper():
+            prefixes.add(m.group(1))
+    return sorted(prefixes)[0] if prefixes else None
+
+
 def build_node_summary(node_id, text):
     sw = pe.extract_sw_version(text) or {}
     lte_cells = pci.extract_pre_cells_for_node(text)
@@ -42,14 +81,33 @@ def build_node_summary(node_id, text):
     has_lte = any(not bl.is_5g_cell(c) for c in lte_cells)
     has_nr = any(bl.is_5g_cell(c) for c in lte_cells)
     node_type = "LTE + 5G" if (has_lte and has_nr) else "LTE Only" if has_lte else "5G Only" if has_nr else "Unknown"
+    boards = pe.extract_hardware(_parsed_cache(text))['boards']
+    board_model = pe.model_token(boards[0]['model']) if boards else "NOT FOUND"
+    secondary = node_secondary_name(node_id, text)
+    node_label = f"{node_id} / {secondary}" if secondary else node_id
     return {
-        "node": node_id,
+        "node": node_label,
         "sw_version": sw.get("sw_version", "NOT FOUND"),
-        "sw_package": sw.get("sw_package", "NOT FOUND"),
+        "sw_package": board_model,
         "type": node_type,
-        "ptp_status": "Not available from Pre kget-all logs",
+        "ptp_status": ptp_status(text),
         "sa_nsa_status": sa_nsa_status(text, nr_tac) if has_nr else "-",
     }
+
+
+_parse_log_cache = {}
+
+
+def _parsed_cache(text):
+    """parse_log() is somewhat expensive and build_node_summary() only needs
+    it for extract_hardware(); avoid re-parsing the same text if this node's
+    summary is ever built twice in one run (defensive — cheap either way,
+    but there is no reason to pay for it twice)."""
+    key = id(text)
+    if key not in _parse_log_cache:
+        from log_parser import parse_log
+        _parse_log_cache[key] = parse_log(text)
+    return _parse_log_cache[key]
 
 
 def build_lte_cell_rows(node_id, text):
@@ -119,20 +177,27 @@ def _extract_sector_carrier_numbers(text):
 
 def build_nr_cell_rows(node_id, text):
     """Node, Cell, RRUs, TX, RX, SEF RFBRANCHES — matches QUICKIX HTML's
-    5G NR Cells table."""
+    5G NR Cells table. TX/RX use noOfUsedTxAntennas/noOfUsedRxAntennas
+    (extract_nr_used_antennas) rather than the configured max — confirmed
+    against a real AAS/massive-MIMO node where the configured-max columns
+    report 0 while the used-antenna columns report the real active count."""
     cells = sorted(c for c in pci.extract_pre_cells_for_node(text) if bl.is_5g_cell(c))
     fru_by_cell = pe.extract_cell_to_fru(text)
     cfg_by_cell = cs._extract_sector_config_5g(text)
+    used_by_cell = pe.extract_nr_used_antennas(text)
     branch_refs = pe.extract_rf_branch_refs(text)
 
     rows = []
     for cell in cells:
         cfg = cfg_by_cell.get(cell)
+        used = used_by_cell.get(cell)
         refs = branch_refs.get(cell, {})
+        tx = used["tx"] if used else (cfg["tx"] if cfg else "-")
+        rx = used["rx"] if used else (cfg["rx"] if cfg else "-")
         rows.append({
             "node": node_id, "cell": cell,
             "rru": fru_by_cell.get(cell, "-"),
-            "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
+            "tx": tx, "rx": rx,
             "sef_rfbranches": refs.get("sef_branches") or "-",
         })
     return rows
