@@ -305,6 +305,93 @@ def extract_port_level_details(pages):
     return result
 
 
+_RF_INV_ETYPES = ('ANTENNA', 'RRH', 'TMA', 'DIPLEXER', 'DUPLEXER', 'COMBINER', 'SWITCH', 'JUMPER')
+_RF_INV_ANCHOR_RE = re.compile(
+    r'([A-Z]-\d+(?:\(D\))?(?:,[A-Z]?-?\d+)?)\s+(' + '|'.join(_RF_INV_ETYPES) + r')\b'
+)
+_RF_INV_STATUS_RE = re.compile(r'\b(EXISTING|NEW|UPDATE|REMOVE|AF MIGRATED)\b')
+_RF_INV_TECH_RE = re.compile(r'^(5G|LTE|4G)(,(5G|LTE|4G))*$')
+
+
+def extract_rf_inventory_antennas(pages):
+    """Antenna Model + linked cells, from 'RF Inventory Details (Final)',
+    filtered to EquipmentType == 'ANTENNA'. This is the authoritative
+    per-antenna record — a fix over the previous approach of reading
+    'Port Level Details (Final)' and inferring per-cell model text from
+    Sec-Pos position, which doesn't carry an explicit equipment-type flag
+    and mis-split multi-line models around embedded port numbers.
+
+    Two real-PDF quirks fixed here:
+      - The Model field sometimes wraps mid-word across two lines with NO
+        hyphen ('MA-2L4M-65F8' / '-A12P-HG') — joined without inserting a
+        space when the continuation starts with '-', since a hyphen-started
+        continuation is always a mid-word wrap, never a new column value.
+      - Some RFDS fonts encode a literal hyphen inside the Model string as
+        an unprintable control character (\\x02) instead of '-' (confirmed:
+        'CMA-BTLBHH\\x026516-20-20' should read 'CMA-BTLBHH-6516-20-20') —
+        replaced before parsing.
+
+    AIR-series radios have no separate ANTENNA row here (the antenna is
+    integrated into the radio) — those cells simply won't appear in the
+    result, which is correct, not a gap; callers already treat AIR-series
+    antenna/loss checks as exempt rather than missing.
+
+    Returns {cell_name: {'model':, 'vendor':, 'sec_pos':, 'shared_cells':}}
+    where shared_cells lists every cell fed by that same physical antenna.
+    """
+    text = find_pages_by_heading(pages, 'RF Inventory Details (Final)')
+    if not text:
+        return {}
+    text = text.replace('\x02', '-').replace('\u0002', '-')
+    text = re.sub(r'^RF Inventory Details \(Final\).*$', '', text, flags=re.M)
+    text = re.sub(r'^Model Cascaded.*$', '', text, flags=re.M)
+    text = re.sub(r'^From/Cpri.*$', '', text, flags=re.M)
+    text = re.sub(r'^Page \d+ of \d+\s*$', '', text, flags=re.M)
+
+    # Smart line-join: a continuation line starting with '-' is always a
+    # mid-word wrap (join with no space); anything else is a normal
+    # column/row wrap (join with a single space).
+    flat_parts = []
+    for raw_line in text.split('\n'):
+        line = raw_line.rstrip('\r').strip()
+        if not line:
+            continue
+        if flat_parts and line.startswith('-'):
+            flat_parts[-1] = flat_parts[-1] + line
+        else:
+            flat_parts.append(line)
+    flat = re.sub(r'\s+', ' ', ' '.join(flat_parts)).strip()
+
+    # Split into one record per row, using the Status keyword as the
+    # (reliable, closed-vocabulary) row terminator.
+    records, pos = [], 0
+    for m in _RF_INV_STATUS_RE.finditer(flat):
+        records.append(flat[pos:m.end()].strip())
+        pos = m.end()
+
+    result = {}
+    for rec in records:
+        m = _RF_INV_ANCHOR_RE.search(rec)
+        if not m or m.group(2) != 'ANTENNA':
+            continue
+        before, after = rec[:m.start()], rec[m.end():]
+        cells = _CELL_TOKEN_RE.findall(before)
+        if not cells:
+            continue
+        model = re.sub(r'\s+', ' ', _CELL_TOKEN_RE.sub('', before)).strip()
+        vendor_tokens = []
+        for tok in after.split():
+            if re.fullmatch(r'-(/-)?', tok) or _RF_INV_STATUS_RE.fullmatch(tok) or _RF_INV_TECH_RE.match(tok):
+                break
+            vendor_tokens.append(tok)
+        vendor = ' '.join(vendor_tokens)
+        shared = sorted(cells)
+        for c in cells:
+            if c not in result:
+                result[c] = {'model': model, 'vendor': vendor, 'sec_pos': m.group(1), 'shared_cells': shared}
+    return result
+
+
 def load_rfds_tables(rfds_bytes):
     """Returns {page_number: [[row, ...], ...]} using pdfplumber's table
     extraction - genuine PDFs only (returns {} for the zip-bundle format,
