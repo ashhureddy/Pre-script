@@ -137,6 +137,8 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
 
     # Warning text per blueprint column C/D specs, rendered beneath each table
     results['warn_xmu'] = wt.xmu_warnings(results['xmu'])
+    results['warn_primary_secondary'] = wt.primary_secondary_warnings(results['primary_secondary'])
+    results['warn_board_type'] = wt.board_type_warnings(results['board_type'])
     results['warn_params_4g'] = wt.param_warnings(results['params_4g'])
     results['warn_params_5g'] = wt.param_warnings(results['params_5g'])
     results['warn_pci'] = wt.pci_warnings(results['pci_4g'] + results['pci_5g'])
