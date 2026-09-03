@@ -182,10 +182,29 @@ def render_table_with_comments(rows, columns, status_key="status", note_key="not
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
+def _sheet_mentions_cell(ciq_wb, sheet_name, cell_id):
+    """True if any cell in the given CIQ sheet contains cell_id as a
+    substring anywhere — mirrors the HTML's own Antenna Info / Losses &
+    Delays presence check (antenna.some(r => Object.values(r).some(v =>
+    String(v).includes(cellId)))), not an RFDS lookup."""
+    if not cell_id or sheet_name not in ciq_wb.sheetnames:
+        return False
+    for row in cer.sheet_rows_as_dicts(ciq_wb[sheet_name]):
+        for v in row.values():
+            if v is not None and cell_id in str(v):
+                return True
+    return False
+
+
 def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
     """One row per cell, merging Cell verification / RRU verification /
     Antenna verification / Cell id / Antenna info / Losses & Delays /
-    Warning — matches the confirmed HTML grouped-header table."""
+    Warning — matches the confirmed HTML grouped-header table, including
+    its exact pass/fail criteria: RRH match, antenna match-or-N/A, cell ID
+    match, Antenna Info found (CIQ 'Antenna Information' sheet mentions
+    the cell), and Losses & Delays found (CIQ 'Losses and Delays' sheet
+    mentions the cell) unless the antenna is AIR-series, where loss data
+    isn't mandatory."""
     cell_map = {}
     for r in results.get("cells_vs_rfds", []):
         cell_map.setdefault(r["cell"], {})["cv"] = r
@@ -215,7 +234,21 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
         rru_status = rt.get("status", "SKIPPED")
         cellid_status = ci.get("status", "SKIPPED")
         ant_tier = an.get("tier")
-        ant_status = "MATCH" if ant_tier == "EXACT" else ("MISMATCH" if ant_tier else "SKIPPED")
+        if not an:
+            ant_status = "SKIPPED"
+        elif not an.get("found"):
+            ant_status = "MANUAL"  # amber — RFDS has no antenna data at all ("N/A", not a real mismatch)
+        elif ant_tier in ("EXACT", "NORMALIZED", "SUFFIX"):
+            ant_status = "MATCH"
+        else:
+            ant_status = "MISMATCH"
+
+        is_air = str(an.get("rfds") or "").upper().startswith("AIR") or str(an.get("ciq") or "").upper().startswith("AIR")
+        ant_info_found = _sheet_mentions_cell(ciq_wb, "Antenna Information", cell)
+        loss_found = _sheet_mentions_cell(ciq_wb, "Losses and Delays", cell)
+        loss_mandatory = not is_air
+        loss_status = "MATCH" if loss_found else ("MANUAL" if not loss_mandatory else "MISMATCH")
+        loss_display = "FOUND" if loss_found else ("N/A" if not loss_mandatory else "NOT FOUND")
 
         warnings = []
         if cell_status == "MISMATCH":
@@ -226,6 +259,13 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
             warnings.append("Antenna mismatch")
         if cellid_status == "MISMATCH":
             warnings.append("Cell ID mismatch")
+        if not ant_info_found:
+            warnings.append("Antenna Info missing")
+        if loss_mandatory and not loss_found:
+            warnings.append("Losses & Delays missing")
+
+        fail = any(s == "MISMATCH" for s in (cell_status, rru_status, ant_status, cellid_status)) \
+            or not ant_info_found or (loss_mandatory and not loss_found)
 
         rows.append({
             "node": cv.get("node") or rt.get("node") or ci.get("node") or "",
@@ -233,10 +273,10 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
             "rru_rfds": rt.get("rfds", "—"), "rru_ciq": rt.get("ciq", "—"), "rru_status": rru_status,
             "ant_rfds": an.get("rfds", "—"), "ant_ciq": an.get("ciq", "—"), "ant_status": ant_status,
             "cellid_rfds": ci.get("rfds_rcn", "—"), "cellid_ciq": ci.get("ciq", "—"), "cellid_status": cellid_status,
-            "ant_info": "FOUND" if an.get("found") else "NOT FOUND",
-            "losses_delays": "NOT AVAILABLE",
+            "ant_info": "FOUND" if ant_info_found else "NOT FOUND", "ant_info_status": "MATCH" if ant_info_found else "MISMATCH",
+            "losses_delays": loss_display, "losses_status": loss_status,
             "warning": "; ".join(warnings) if warnings else "—",
-            "overall": "FAIL" if warnings else "PASS",
+            "overall": "FAIL" if fail else "PASS",
         })
     rows.sort(key=lambda r: r["cell_ciq"] or "")
     return rows
@@ -250,6 +290,11 @@ def render_rfds_grouped_table(rows):
         color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
         cls = ' class="qkx-group-start"' if group_start else ""
         return f'<td{cls} style="background:{bg};color:{color};">{esc(val)}</td>'
+
+    def scell(val, status, group_start=False):
+        color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
+        cls = ' class="qkx-group-start"' if group_start else ""
+        return f'<td{cls} style="background:{bg};color:{color};font-weight:600;">{esc(val)}</td>'
 
     head1 = ('<th colspan="2">Cell verification</th><th colspan="2" class="qkx-group-start">RRU verification</th>'
              '<th colspan="2" class="qkx-group-start">Antenna verification</th>'
@@ -266,7 +311,7 @@ def render_rfds_grouped_table(rows):
             + gcell(r["rru_rfds"], r["rru_status"], True) + gcell(r["rru_ciq"], r["rru_status"])
             + gcell(r["ant_rfds"], r["ant_status"], True) + gcell(r["ant_ciq"], r["ant_status"])
             + gcell(r["cellid_rfds"], r["cellid_status"], True) + gcell(r["cellid_ciq"], r["cellid_status"])
-            + f'<td class="qkx-group-start">{esc(r["ant_info"])}</td>' + f'<td>{esc(r["losses_delays"])}</td>' + warn_cell
+            + scell(r["ant_info"], r["ant_info_status"], True) + scell(r["losses_delays"], r["losses_status"]) + warn_cell
         )
         body.append(f"<tr>{tds}</tr>")
     return (f'<div class="qkx-table-wrap"><table class="qkx-table">'
