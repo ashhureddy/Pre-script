@@ -91,7 +91,7 @@ def build_node_summary(node_id, text):
         "sw_package": board_model,
         "type": node_type,
         "ptp_status": ptp_status(text),
-        "sa_nsa_status": sa_nsa_status(text, nr_tac) if has_nr else "-",
+        "sa_nsa_status": sa_nsa_status(text, nr_tac) if has_nr else "LTE Only",
     }
 
 
