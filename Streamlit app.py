@@ -39,6 +39,7 @@ the prior version of this file:
     consistent across every surface this tool produces.
 """
 import os
+import re
 import html
 import tempfile
 
@@ -51,8 +52,12 @@ import pre_extract as pe
 import run_validation as rv
 import rrnrbl_checklist as rc
 import antenna_resolve as ar
+import warnings_text as wt
 import ciq_view as cv
 import amos_view as av
+from rfds_verification_summary import build_rfds_verification_summary
+from engineer_comments import build_engineer_comments, extract_bands_from_comments, extract_nodes_from_audit
+from cr_description import build_cr_description, build_radio_ret_email
 
 st.set_page_config(page_title="QUICK IX", layout="wide", page_icon="📡")
 
@@ -122,6 +127,10 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   padding:6px 10px; border-radius:5px 5px 0 0; margin-top:12px;
 }
 .qkx-count-pill { font-size:11.5px; color:#334155; margin-right:14px; }
+.qkx-title-badge {
+  background:#101F90; color:#fff; font-weight:700; font-size:11px;
+  padding:3px 10px; border-radius:999px; white-space:nowrap;
+}
 </style>
 <div class="qkx-topbar">
   <div><span class="qkx-logo">MAS<span>TEC</span></span><span class="qkx-title">QUICK IX — Pre-Script Validation</span></div>
@@ -213,7 +222,13 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
     for r in results.get("cell_id_vs_rfds", []):
         cell_map.setdefault(r["cell"], {})["ci"] = r
 
-    port_details = rf.extract_port_level_details(rfds_pages) if rfds_pages is not None else {}
+    # Antenna model: 'RF Inventory Details (Final)' filtered to
+    # EquipmentType=='ANTENNA' — the authoritative per-antenna record
+    # (Model + Linked Cells explicitly), not inferred from Sec-Pos position
+    # in 'Port Level Details'. AIR-series radios have no separate antenna
+    # row here (antenna is integrated into the radio) — those cells simply
+    # get no RFDS antenna entry, which is correct, not a gap.
+    rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages) if rfds_pages is not None else {}
     ant_by_cell = {}
     if "eUtran Parameters" in ciq_wb.sheetnames:
         for r in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]):
@@ -221,10 +236,10 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
             if not cell:
                 continue
             ciq_ant = r.get("antenna model")
-            pd_row = port_details.get(cell)
-            tier, detail = ar.resolve_antenna(ciq_ant, pd_row["vendor_model"] if pd_row else None)
-            ant_by_cell[cell] = {"ciq": ciq_ant or "—", "rfds": (pd_row or {}).get("vendor_model", "NOT FOUND"),
-                                  "tier": tier, "found": pd_row is not None}
+            ant_row = rf_antennas.get(cell)
+            tier, detail = ar.resolve_antenna(ciq_ant, ant_row["model"] if ant_row else None)
+            ant_by_cell[cell] = {"ciq": ciq_ant or "—", "rfds": (ant_row or {}).get("model", "NOT FOUND"),
+                                  "tier": tier, "found": ant_row is not None}
 
     rows = []
     for cell, parts in cell_map.items():
@@ -238,7 +253,7 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
             ant_status = "SKIPPED"
         elif not an.get("found"):
             ant_status = "MANUAL"  # amber — RFDS has no antenna data at all ("N/A", not a real mismatch)
-        elif ant_tier in ("EXACT", "NORMALIZED", "SUFFIX"):
+        elif ant_tier in ("EXACT", "NORMALIZED", "SUFFIX", "TRUNCATED"):
             ant_status = "MATCH"
         else:
             ant_status = "MISMATCH"
@@ -319,8 +334,12 @@ def render_rfds_grouped_table(rows):
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
-def section_title(text):
-    st.markdown(f'<div class="qkx-section-title">{esc(text)}</div>', unsafe_allow_html=True)
+def section_title(text, badge=None):
+    """badge: optional right-aligned pill (e.g. '18 CELLS'), matching
+    QUICKIX HTML's card-header count badge."""
+    badge_html = f'<span class="qkx-title-badge">{esc(badge)}</span>' if badge else ''
+    st.markdown(f'<div class="qkx-section-title" style="display:flex;justify-content:space-between;align-items:center;">'
+                f'<span>{esc(text)}</span>{badge_html}</div>', unsafe_allow_html=True)
 
 
 def count_caption(rows, status_key="status", bad_value="MISMATCH", noun="row"):
@@ -489,6 +508,7 @@ edp_rows = state["edp_rows"]
 checked_nodes = state["checked_nodes"]
 rfds_pages = state["rfds_pages"]
 node_logs_text = state["node_logs_text"]
+sow = state["sow"]
 
 top_l, top_r = st.columns([1, 5])
 with top_l:
@@ -520,26 +540,83 @@ with tab_rfds:
     if rfds_pages is None:
         st.info("No RFDS PDF was loaded for this run — RFDS-dependent comparisons below are skipped.")
 
+    _rfds_inventory_text = None
+    if rfds_pages is not None:
+        _t = rf.find_pages_by_heading(rfds_pages, "Non RF Inventory Details (Final)")
+        _rfds_inventory_text = re.sub(r"\s+", "", _t) if _t else None
+
+    def _board_rfds_display(r):
+        ciq_du = r.get("ciq_du_type") or ""
+        if r.get("rfds_agrees") is True:
+            return ciq_du or "FOUND"
+        if _rfds_inventory_text:
+            candidates = sorted(set(re.findall(r"\d{4,5}", _rfds_inventory_text)) - {ciq_du})
+            return "/".join(candidates[:3]) if candidates else "NOT FOUND"
+        return "NOT CHECKED"
+
+    def _ciq_xmu_count(node_id, ciq_wb):
+        mm = next((m for m in cer.mixed_mode_rows(ciq_wb)
+                   if str(m.get("Node to be built as") or m.get("eNodeB Name") or "").strip() == node_id), None)
+        if mm is None:
+            return None
+        e_name, g_name = mm.get("eNodeB Name"), mm.get("gNodeB Name")
+        row = None
+        if e_name and "eNB Info" in ciq_wb.sheetnames:
+            row = next((r for r in cer.sheet_rows_as_dicts(ciq_wb["eNB Info"])
+                        if str(r.get("eNodeB Name", "")).strip().upper() == str(e_name).strip().upper()), None)
+        if row is None and g_name and "gNB Info" in ciq_wb.sheetnames:
+            row = next((r for r in cer.sheet_rows_as_dicts(ciq_wb["gNB Info"])
+                        if str(r.get("gNodeB Name", "")).strip().upper() == str(g_name).strip().upper()), None)
+        if row is None:
+            return None
+        return sum(1 for k in ("1st XMU", "2nd XMU", "3rd XMU") if str(row.get(k, "")).strip().upper() == "YES")
+
     with st.container(border=True):
         section_title("Primary & Secondary Node")
         rows = results.get("primary_secondary", [])
-        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq", "CIQ"),
-                                                               ("edp", "EDP"), ("rfds", "RFDS")]),
+        display_rows = [
+            dict(r, comments="Match" if r.get("status") != "MISMATCH" else
+                 f"Mismatch found on {wt.primary_secondary_mismatched_role(r)} id on {r.get('node')}.")
+            for r in rows
+        ]
+        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq", "CIQ"),
+                                                                        ("edp", "EDP"), ("rfds", "RFDS")],
+                                                note_key="comments"),
                     unsafe_allow_html=True)
 
     with st.container(border=True):
         section_title("Board Type")
         rows = results.get("board_type", [])
-        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
-                                                               ("edp_model", "EDP Model"), ("rfds_agrees", "RFDS Agrees")]),
+        display_rows = [
+            dict(r, rfds=_board_rfds_display(r),
+                 comments=("Match" if r.get("status") == "MATCH" else
+                           f"Board swap (expected) on {r.get('node')}." if r.get("status") == "EXPECTED" else
+                           f"Board type mismatch found on the {r.get('node')}."))
+            for r in rows
+        ]
+        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
+                                                                        ("edp_model", "EDP Model"), ("rfds", "RFDS")],
+                                                note_key="comments"),
                     unsafe_allow_html=True)
+        if rfds_pages is not None:
+            st.caption("RFDS model is a best-effort text match against the RFDS's Non RF Inventory section, not a structured per-node field.")
 
     with st.container(border=True):
         section_title("XMU Validation")
         rows = results.get("xmu", [])
-        st.markdown(render_table_with_comments(rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
-                                                               ("rfds_xmu", "RFDS XMU")]),
+        display_rows = []
+        for r in rows:
+            n = _ciq_xmu_count(r.get("node"), ciq_wb)
+            ciq_label = f"{n} XMU" if n else ("0 XMU" if n == 0 else "—")
+            rfds_val = r.get("rfds_xmu")
+            rfds_label = "XMU Found" if rfds_val is True else ("XMU Not Found" if rfds_val is False else "NOT CHECKED")
+            comments = "Match" if r.get("status") == "MATCH" else f"XMU mismatch found on the {r.get('node')}."
+            display_rows.append(dict(r, ciq_xmu=ciq_label, rfds_xmu=rfds_label, comments=comments))
+        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
+                                                                        ("rfds_xmu", "RFDS XMU")],
+                                                note_key="comments"),
                     unsafe_allow_html=True)
+        st.caption("RFDS doesn't expose an XMU count (only presence) — RFDS XMU shows Found/Not Found, not a count.")
 
     with st.container(border=True):
         grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages)
@@ -567,12 +644,27 @@ with tab_audit:
             st.info("No Pre kget-all logs were loaded for this run.")
         else:
             summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs_text)
-            section_title("Node Summary")
-            st.markdown(render_table(summary_rows, status_key=None), unsafe_allow_html=True)
-            section_title("LTE Cells")
-            st.markdown(render_table(lte_rows, status_key=None), unsafe_allow_html=True)
-            section_title("NR Cells")
-            st.markdown(render_table(nr_rows, status_key=None), unsafe_allow_html=True)
+
+            section_title("Node Summary", badge=f"{len(summary_rows)} NODE(S)")
+            st.markdown(render_table(summary_rows, status_key=None, columns=[
+                ("node", "Node ID"), ("sw_package", "BB Type"), ("sw_version", "SW Version"),
+                ("type", "Mode"), ("ptp_status", "PTP Status"), ("sa_nsa_status", "SA/NSA Status"),
+            ]), unsafe_allow_html=True)
+
+            section_title(f"LTE Cells — {', '.join(summary_rows and [r['node'] for r in summary_rows] or sorted(node_logs_text))}",
+                          badge=f"{len(lte_rows)} CELLS")
+            st.markdown(render_table(lte_rows, status_key=None, columns=[
+                ("node", "Node"), ("cell", "Cell"), ("sector_carrier", "Sector Carries"), ("rru", "RRUs"),
+                ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
+                ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
+                ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
+            ]), unsafe_allow_html=True)
+
+            section_title("5G NR Cells", badge=f"{len(nr_rows)} CELLS")
+            st.markdown(render_table(nr_rows, status_key=None, columns=[
+                ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("tx", "TX"), ("rx", "RX"),
+                ("sef_rfbranches", "SEF RFBRANCHES"),
+            ]), unsafe_allow_html=True)
 
     with sub_ciq:
         section_title("Node Integration")
@@ -601,24 +693,41 @@ with tab_audit:
         if rfds_pages is None:
             st.caption("Upload an RFDS PDF to compare antenna models.")
         else:
-            port_details = rf.extract_port_level_details(rfds_pages)
-            if not port_details:
-                st.caption("No 'Port Level Details (Final)' table found in this RFDS PDF.")
+            rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages)
+            if not rf_antennas:
+                st.caption("No 'RF Inventory Details (Final)' antenna rows found in this RFDS PDF.")
             else:
-                ant_rows = []
-                for r in (cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]) if "eUtran Parameters" in ciq_wb.sheetnames else []):
-                    cell = r.get("EutranCellFDDId")
-                    ciq_ant = r.get("antenna model")
-                    pd_row = port_details.get(cell)
-                    tier, detail = ar.resolve_antenna(ciq_ant, pd_row["vendor_model"] if pd_row else None)
-                    ant_rows.append({"cell": cell, "ciq_antenna": ciq_ant,
-                                      "rfds_vendor_model": pd_row["vendor_model"] if pd_row else "NOT FOUND",
-                                      "match_tier": tier, "detail": detail})
-                st.markdown(render_table(ant_rows, columns=[("cell", "Cell"), ("ciq_antenna", "CIQ Antenna"),
-                                                              ("rfds_vendor_model", "RFDS Vendor/Model"),
+                ciq_ant_by_cell = {}
+                if "eUtran Parameters" in ciq_wb.sheetnames:
+                    for r in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]):
+                        c = r.get("EutranCellFDDId")
+                        if c:
+                            ciq_ant_by_cell[c] = r.get("antenna model")
+
+                ant_rows, seen_groups = [], set()
+                for ant in rf_antennas.values():
+                    key = tuple(ant["shared_cells"])
+                    if key in seen_groups:
+                        continue
+                    seen_groups.add(key)
+                    ciq_models = {ciq_ant_by_cell.get(c) for c in ant["shared_cells"] if ciq_ant_by_cell.get(c)}
+                    if len(ciq_models) == 1:
+                        ciq_display = next(iter(ciq_models))
+                        tier, detail = ar.resolve_antenna(ciq_display, ant["model"])
+                    elif ciq_models:
+                        ciq_display = ", ".join(sorted(ciq_models))
+                        tier, detail = "MULTIPLE CIQ VALUES", "Cells in this group don't all report the same CIQ antenna model."
+                    else:
+                        ciq_display, tier, detail = "—", "N/A", ""
+                    ant_rows.append({"cells": ", ".join(ant["shared_cells"]), "ciq_antenna": ciq_display,
+                                      "rfds_model": ant["model"], "match_tier": tier, "detail": detail})
+                st.markdown(render_table(ant_rows, columns=[("cells", "Cells"), ("ciq_antenna", "CIQ Antenna"),
+                                                              ("rfds_model", "RFDS Model"),
                                                               ("match_tier", "Match Tier"), ("detail", "Detail")],
                                           status_key=None),
                             unsafe_allow_html=True)
+                st.caption("Cells on the same row share one physical antenna. AIR-series radios (integrated antenna) "
+                           "have no separate ANTENNA row in the RFDS, so they don't appear here.")
 
         section_title("FA Code follow-up email")
         fa = site_details.get("fa_code") or "UNKNOWN"
@@ -630,31 +739,98 @@ with tab_audit:
 
     with sub_audit:
         if not node_logs_text:
-            st.warning("No Pre kget-all logs were loaded for this run — nothing to compare against CIQ.")
+            st.warning("No Pre kget-all logs were loaded for this run — Parameters/Sector-Power comparisons below need "
+                       "Pre data and will be empty, but Engineer Comments (Additions/Deletions/Sector Movements/Board "
+                       "Swaps) still work off the CIQ's own Sector Del_Movement sheet.")
+        section_title("Parameters — 4G (Pre vs CIQ)")
+        st.markdown(render_table(results.get("params_4g", []), status_key="status"), unsafe_allow_html=True)
+        section_title("Parameters — 5G (Pre vs CIQ)")
+        st.markdown(render_table(results.get("params_5g", []), status_key="status"), unsafe_allow_html=True)
+        section_title("Sector / TX-RX / Power (Pre vs CIQ, best-effort)")
+        st.markdown(render_table(results.get("sector_swap", []), status_key="status"), unsafe_allow_html=True)
+        if rfds_pages is not None:
+            section_title("Cell ID vs RFDS (cross-check)")
+            st.markdown(render_table(results.get("cell_id_vs_rfds", []), status_key="status"), unsafe_allow_html=True)
+        rows = results.get("params_4g", []) + results.get("params_5g", []) + results.get("sector_swap", [])
+        n_bad = sum(1 for r in rows if r.get("status") == "MISMATCH")
+        st.caption(f"{len(rows)} field(s) checked — {n_bad} mismatch(es).")
+
+        section_title("Engineer Comments")
+        amos_lte_rows = amos_nr_rows = None
+        if node_logs_text:
+            _, amos_lte_rows, amos_nr_rows = av.build_amos_tables(node_logs_text)
+        ciq_lte_rows = cv.build_param_table(ciq_wb, "eUtran Parameters", ["EutranCellFDDId", "RRU type"])
+        ciq_nr_rows = cv.build_param_table(ciq_wb, "5G Info", ["NRCellDU", "RRU Type"])
+        engineer_comments = build_engineer_comments(
+            sow, results, checked_nodes,
+            amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
+            ciq_lte_rows=ciq_lte_rows, ciq_nr_rows=ciq_nr_rows,
+        )
+        state["engineer_comments"] = engineer_comments  # available to CR Desc sub-tab below
+        if engineer_comments:
+            border_colors = {"add-comment": "#059669", "del-comment": "#dc2626", "move-comment": "#f59e0b",
+                              "swap-comment": "#7c3aed", "board-comment": "#0891b2"}
+            st.markdown("<ul style='list-style:none;padding:0;margin:0;'>" + "".join(
+                f'<li style="margin:5px 0;font-size:13px;padding:6px 10px;'
+                f'border-left:3px solid {border_colors.get(c["cls"], "#2563eb")};'
+                f'background:#f8fafc;border-radius:0 4px 4px 0;">{esc(c["text"])}</li>'
+                for c in engineer_comments
+            ) + "</ul>", unsafe_allow_html=True)
+            comments_text = "\n".join(f"\u2022 {c['text']}" for c in engineer_comments)
+            st.download_button("⬇️ Copy/Download Comments (.txt)", data=comments_text,
+                                file_name="engineer_comments.txt", mime="text/plain", key="dl_eng_comments")
         else:
-            section_title("Parameters — 4G (Pre vs CIQ)")
-            st.markdown(render_table(results.get("params_4g", []), status_key="status"), unsafe_allow_html=True)
-            section_title("Parameters — 5G (Pre vs CIQ)")
-            st.markdown(render_table(results.get("params_5g", []), status_key="status"), unsafe_allow_html=True)
-            section_title("Sector / TX-RX / Power (Pre vs CIQ, best-effort)")
-            st.markdown(render_table(results.get("sector_swap", []), status_key="status"), unsafe_allow_html=True)
-            if rfds_pages is not None:
-                section_title("Cell ID vs RFDS (cross-check)")
-                st.markdown(render_table(results.get("cell_id_vs_rfds", []), status_key="status"), unsafe_allow_html=True)
-            rows = results.get("params_4g", []) + results.get("params_5g", []) + results.get("sector_swap", [])
-            n_bad = sum(1 for r in rows if r.get("status") == "MISMATCH")
-            st.caption(f"{len(rows)} field(s) checked — {n_bad} mismatch(es).")
+            st.caption("No comments generated — nothing added/deleted/moved/swapped relative to scope.")
 
     with sub_crdesc:
         section_title("CR Description")
-        if not node_logs_text:
-            st.caption("No Pre logs loaded — 'moved sector' lines need Pre data to detect the source node; "
-                       "this is integration-only scope for now.")
-        scope_lines = state["scope_lines"]
-        cr_text = "\n".join(f"- {l}" for l in scope_lines) if scope_lines else "(nothing to describe yet)"
-        st.text_area("Generated CR description", value=cr_text, height=200)
-        st.download_button("⬇️ Download CR description (.txt)", data=cr_text,
-                            file_name="cr_description.txt", mime="text/plain")
+        engineer_comments = state.get("engineer_comments", [])
+        all_nodes, deleted_nodes_cr, regular_nodes_cr = extract_nodes_from_audit(sow, checked_nodes)
+        bands_cr = extract_bands_from_comments(engineer_comments)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            mic_mca = st.selectbox("MIC DESC", ["MIC - MCA", "MCA - CRAN"], key="cr_mic_mca")
+        with c2:
+            site_name_in = st.text_input("Site Name", placeholder="e.g. DOWNTOWN_EAST", key="cr_site_name")
+        with c3:
+            fa_number_in = st.text_input("FA Number", placeholder="e.g. 1034567", key="cr_fa_number")
+        c4, c5 = st.columns(2)
+        with c4:
+            sw_version_in = st.text_input("Sw Version", placeholder="e.g. 25.Q4", key="cr_sw_version")
+        with c5:
+            link_in = st.text_input("Link", placeholder="link to CIQ / ticket / script", key="cr_link")
+
+        n1, n2 = st.columns(2)
+        with n1:
+            st.markdown("**Nodes (from Audit)** — auto-detected")
+            st.markdown(", ".join(all_nodes) if all_nodes else "_Run validation to auto-populate…_")
+        with n2:
+            st.markdown("**Bands (from Audit)** — auto-detected")
+            st.markdown(" / ".join(bands_cr) if bands_cr else "_Run validation to auto-populate…_")
+
+        if st.button("Generate CR Description", type="primary", key="btn_gen_cr"):
+            cr_text, breakdown = build_cr_description(mic_mca, site_name_in, fa_number_in, all_nodes, bands_cr)
+            if cr_text is None:
+                st.error("Please enter Site Name and FA Number (and make sure a validation run has produced node data).")
+            else:
+                st.session_state["cr_output"] = cr_text
+                st.session_state["cr_breakdown"] = breakdown
+
+        if st.session_state.get("cr_output"):
+            st.text_area("Generated CR description", value=st.session_state["cr_output"], height=80, key="cr_output_area")
+            st.markdown(render_table(
+                [{"field": k, "value": v} for k, v in (st.session_state.get("cr_breakdown") or [])],
+                columns=[("field", "Field"), ("value", "Value")], status_key=None,
+            ), unsafe_allow_html=True)
+
+        st.divider()
+        email_text = build_radio_ret_email(sw_version_in, fa_number_in, link_in, engineer_comments)
+        st.text_area("Radio/RET Comments Email", value=email_text, height=260, key="cr_email_area")
+        st.download_button("⬇️ Download CR description (.txt)", data=st.session_state.get("cr_output", "") or "(generate a CR description first)",
+                            file_name="cr_description.txt", mime="text/plain", key="dl_cr_text")
+        st.download_button("⬇️ Download Radio/RET email (.txt)", data=email_text,
+                            file_name="radio_ret_email.txt", mime="text/plain", key="dl_cr_email")
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 3 — EDP Validator
@@ -736,7 +912,15 @@ with tab_consolidated:
         st.caption("Nothing to report.")
 
     section_title("Warnings & Comments")
-    warn_keys = ["warn_xmu", "warn_params_4g", "warn_params_5g", "warn_pci", "warn_radio_type",
+
+    rfds_verification_rows = build_rfds_verification_summary(build_rfds_grouped_rows(results, ciq_wb, rfds_pages))
+    if rfds_verification_rows:
+        st.markdown("**RFDS Verification:**")
+        st.markdown(render_table(rfds_verification_rows, columns=[("Finding", "Finding"), ("Corrective Action", "Corrective Action")],
+                                  status_key=None),
+                    unsafe_allow_html=True)
+
+    warn_keys = ["warn_primary_secondary", "warn_board_type", "warn_xmu", "warn_params_4g", "warn_params_5g", "warn_pci", "warn_radio_type",
                  "warn_sector_swap", "warn_nr_tac", "warn_air_radio", "warn_antenna"]
     all_warnings = []
     for k in warn_keys:
@@ -745,7 +929,7 @@ with tab_consolidated:
     if all_warnings:
         for w in all_warnings:
             st.markdown(f'<div class="qkx-warn-line">{esc(w)}</div>', unsafe_allow_html=True)
-    else:
+    elif not rfds_verification_rows:
         st.caption("No warnings.")
 
     with st.expander("RRNRBL Checklist", expanded=False):
