@@ -120,6 +120,7 @@ def build_lte_cell_rows(node_id, text):
     cfg_by_cell = cs._extract_sector_config(text)
     branch_refs = pe.extract_rf_branch_refs(text)
     sector_carrier_by_cell = _extract_sector_carrier_numbers(text)
+    dss_by_cell = pe.extract_dss_status(text)
 
     # Sharing radio: same RRU + same band serving DIFFERENT sector letters —
     # same definition as QUICKIX's radioBandMap (cross-sector share only; a
@@ -153,7 +154,7 @@ def build_lte_cell_rows(node_id, text):
             "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
             "rfbranch_tx_ref": refs.get("tx_ref") or "-", "rfbranch_rx_ref": refs.get("rx_ref") or "-",
             "sef_rfbranches": refs.get("sef_branches") or "-",
-            "pre_existing_dss": "Not available from Pre kget-all logs",
+            "pre_existing_dss": "DSS Active" if dss_by_cell.get(cell) else "No",
         })
     return rows
 
