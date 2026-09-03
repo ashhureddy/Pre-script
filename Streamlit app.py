@@ -636,12 +636,26 @@ with tab_audit:
             st.info("No Pre kget-all logs were loaded for this run.")
         else:
             summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs_text)
-            section_title("Node Summary")
-            st.markdown(render_table(summary_rows, status_key=None), unsafe_allow_html=True)
-            section_title("LTE Cells")
-            st.markdown(render_table(lte_rows, status_key=None), unsafe_allow_html=True)
-            section_title("NR Cells")
-            st.markdown(render_table(nr_rows, status_key=None), unsafe_allow_html=True)
+
+            section_title(f"Node Summary — {len(summary_rows)} Node(s)")
+            st.markdown(render_table(summary_rows, status_key=None, columns=[
+                ("node", "Node ID"), ("sw_package", "BB Type"), ("sw_version", "SW Version"),
+                ("type", "Mode"), ("ptp_status", "PTP Status"), ("sa_nsa_status", "SA/NSA Status"),
+            ]), unsafe_allow_html=True)
+
+            section_title(f"LTE Cells — {', '.join(sorted({r['node'] for r in lte_rows}))} ({len(lte_rows)} cells)")
+            st.markdown(render_table(lte_rows, status_key=None, columns=[
+                ("node", "Node"), ("cell", "Cell"), ("sector_carrier", "Sector Carries"), ("rru", "RRUs"),
+                ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
+                ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
+                ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
+            ]), unsafe_allow_html=True)
+
+            section_title(f"5G NR Cells — {len(nr_rows)} cells")
+            st.markdown(render_table(nr_rows, status_key=None, columns=[
+                ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("tx", "TX"), ("rx", "RX"),
+                ("sef_rfbranches", "SEF RFBRANCHES"),
+            ]), unsafe_allow_html=True)
 
     with sub_ciq:
         section_title("Node Integration")
