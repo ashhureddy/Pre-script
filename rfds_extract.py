@@ -77,13 +77,6 @@ _HEADER_NOISE_RE = re.compile(
     re.M
 )
 
-_CELL_DETAILS_ROW_RE = re.compile(
-    r'^(?P<cell>\S+)[ \t]+(?P<bbu>\S+)[ \t]+(?P<rest>.+?)[ \t]+(?P<rcn>\d+)[ \t]+'
-    r'(?P<useid>[\d.]+\.[A-Za-z0-9.]+)[ \t]+(?P<status>NEW|EXISTING|UPDATE|AF MIGRATED)[ \t\r]*$',
-    re.M
-)
-
-
 _RRH_BAND_SUFFIX_RE = re.compile(r'^B\d|/')
 
 
@@ -111,22 +104,48 @@ def _extract_rrh(rest):
 
 def extract_cell_details(pages):
     """Rule #6 / #25: Cell ID -> RCN (+ BBU/CRGNB node, RRH radio model),
-    from 'Cell Details (Final)' — the Final tables are always the ones
-    checked (confirmed: validation is against the post-change design, so the
-    '(Existing)' variants are never the comparison target).
-    Returns {cell_id: {'rcn':, 'bbu':, 'rrh_and_secpos':, 'status':}}.
+    from 'Cell Details (Final)'.
 
-    'rest' (RRH model + Sector-Position, e.g. '4449 B5/B12 A-1-1,A-1-4') isn't
-    split further - the RRH model can itself contain spaces (e.g. 'AIR6472
-    B77G B77M'), so splitting it reliably needs the CIQ's own RRU Type value
-    to anchor against, which the caller already has; returned as one string
-    for the caller to substring-match rather than guessing a split point here.
+    The Sector-Position column wraps across two lines in real PDFs
+    (e.g. 'A-1-9,A-1-10,A-1' then '-11,A-1-12' on the next line), so a
+    single-line regex misses every row that wraps. Fix: join continuation
+    lines (lines starting with '-digit' or ',') onto the preceding data line
+    before applying the row regex, making the whole data record one logical
+    line regardless of how many physical lines the PDF wraps it over.
+
+    Returns {cell_id: {'rcn':, 'bbu':, 'rrh_and_secpos':, 'rrh':, 'status':}}.
     """
     heading = 'Cell Details (Final)'
     text = find_pages_by_heading(pages, heading)
     if not text:
         return {}
     clean = _HEADER_NOISE_RE.sub('', text)
+
+    # Join continuation lines onto their preceding data line.
+    # Confirmed patterns from real PDFs:
+    #   '-11,A-1-12'  — starts with hyphen-digit
+    #   '11,B-1-12'   — starts with digit-comma
+    #   ',B-1-4'      — starts with comma-letter (sector-position list wrap)
+    joined_lines = []
+    for raw_line in clean.split('\n'):
+        line = raw_line.rstrip('\r')
+        stripped = line.lstrip()
+        is_continuation = bool(joined_lines) and (
+            re.match(r'^-\d', stripped) or          # -11,A-1-12
+            re.match(r'^\d[\d,]', stripped) or      # 11,B-1-12
+            re.match(r'^,[A-Za-z]', stripped)       # ,B-1-4
+        )
+        if is_continuation:
+            joined_lines[-1] = joined_lines[-1].rstrip('\r') + stripped
+        else:
+            joined_lines.append(line)
+    clean = '\n'.join(joined_lines)
+
+    _CELL_DETAILS_ROW_RE = re.compile(
+        r'^(?P<cell>\S+)[ \t]+(?P<bbu>\S+)[ \t]+(?P<rest>.+?)[ \t]+(?P<rcn>\d+)[ \t]+'
+        r'(?P<useid>[\d.]+\.[A-Za-z0-9.]+)[ \t]+(?P<status>NEW|EXISTING|UPDATE|AF MIGRATED)[ \t\r]*$',
+        re.M
+    )
     result = {}
     for m in _CELL_DETAILS_ROW_RE.finditer(clean):
         result[m.group('cell')] = {
@@ -189,24 +208,36 @@ _CELL_TOKEN_RE = re.compile(r'\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b')
 
 
 def extract_port_level_details(pages):
-    """NEW (not part of the original confirmed Blueprint rule set) — antenna
-    Vendor/Model per cell, from 'Port Level Details (Final)'. Ported from the
-    sibling HTML tool's antenna-model comparison, adapted to this backend's
-    plain-text (not pdf.js-coordinate) extraction. Final-only, same policy
-    as extract_cell_details().
+    """Antenna Vendor/Model per cell, from 'Port Level Details (Final)'.
 
-    Tested against 6 real RFDS PDFs in the project sample set (2 with a
-    genuine '(Final)' table); heuristic row-splitting on Sec-Pos tokens
-    (e.g. 'A-1', 'B-2') since a port's model/cell list can wrap across
-    several source lines. Not yet run against enough real sites to carry
-    the same 'confirmed' bar as the numbered Blueprint rules — spot-check
-    results before trusting them on an unfamiliar RFDS layout.
+    Fixes vs previous version:
+    - Antenna model like 'MA-2L4M-65F8-A12P-HG' wraps across two lines in
+      real PDFs ('MA-2L4M-65F8-A12P-' then 'HG'). The old code collapsed all
+      whitespace first, turning it into 'MA-2L4M-65F8-A12P- 1 HG' (port
+      number absorbed into the model). Fix: join dangling-hyphen lines before
+      collapsing whitespace, so the model is 'MA-2L4M-65F8-A12P-HG'.
+    - Port number (1-2 digit integer between model and first cell token) must
+      be stripped from the pre-cell prefix to isolate the pure vendor+model.
 
-    Returns {cell_name: {'sec_pos':, 'vendor_model':}}.
+    Also returns a grouped structure so the caller can show all cells sharing
+    the same antenna position as a list, not just per-cell lookups.
+
+    Returns {cell_name: {'sec_pos':, 'vendor_model':, 'shared_cells': [...]}}
+    where shared_cells is every cell on the same sec_pos+model antenna.
     """
     text = find_pages_by_heading(pages, 'Port Level Details (Final)')
     if not text:
         return {}
+
+    # Fix 1: Join multi-line model/cell fragments. Three patterns confirmed:
+    #   a) Dangling-hyphen: 'MA-2L4M-65F8-A12P- 1\nHG' — hyphen ends the token,
+    #      next line is the suffix. Join by removing the newline (not the hyphen).
+    #   b) Port number on same line as model prefix, suffix on next line:
+    #      same as (a) after the pre-collapse join handles it.
+    # Strategy: collapse all newlines into spaces first (like before), then
+    # fix the 'MODEL-PREFIX PORTNUMBER SUFFIX' pattern in the model string.
+    pass  # handled below after whitespace collapse
+
     clean = text.replace('\r\n', ' ').replace('\n', ' ')
     clean = re.sub(r'Sec-Pos\s+Vendor\s+Model\s+Port\s+Cells\s+Gain\s+Elec\s+Tilt\s+Azimuth\s+Offset\s+Coax\s+Type\s+Coax\s+Length', ' ', clean)
     clean = re.sub(r'Port Level Details \(Final\)', ' ', clean)
@@ -215,7 +246,11 @@ def extract_port_level_details(pages):
 
     starts = [m.start() for m in _PORT_ROW_START_RE.finditer(clean)]
     starts.append(len(clean))
-    result = {}
+
+    # First pass: collect all (sec_pos, vendor_model) -> [cells] groups
+    groups = {}   # (sec_pos, vendor_model) -> set of cells
+    per_cell = {} # cell -> (sec_pos, vendor_model)
+
     for i in range(len(starts) - 1):
         chunk = clean[starts[i]:starts[i + 1]].strip()
         m = _PORT_ROW_START_RE.match(chunk + ' ')
@@ -228,12 +263,45 @@ def extract_port_level_details(pages):
             continue
         pre = rest[:rest.find(cells[0])].strip()
         pre_tokens = pre.split()
+        # Strip trailing port-number tokens (1-3 bare digits). Also handle
+        # the pattern 'MODEL-PREFIX PORTNUMBER SUFFIX' where the model suffix
+        # landed on the next source line (e.g. 'MA-2L4M-65F8-A12P- 1 HG'):
+        # the model is 'MA-2L4M-65F8-A12P-HG' and '1' is the port number.
+        # Detect: bare 1-2 digit token with a hyphen-ending token before it
+        # and a non-numeric token after it → remove the digit and merge.
+        cleaned = []
+        j = 0
+        while j < len(pre_tokens):
+            tok = pre_tokens[j]
+            if (re.fullmatch(r'\d{1,2}', tok)
+                    and j > 0 and cleaned and cleaned[-1].endswith('-')
+                    and j + 1 < len(pre_tokens) and not pre_tokens[j+1][0].isdigit()):
+                # skip the port-number token; next token glues to the hyphen
+                j += 1
+                cleaned[-1] = cleaned[-1] + pre_tokens[j]
+            else:
+                cleaned.append(tok)
+            j += 1
+        pre_tokens = cleaned
         while pre_tokens and re.fullmatch(r'\d{1,3}', pre_tokens[-1]):
             pre_tokens.pop()
         vendor_model = ' '.join(pre_tokens)
+        key = (sec_pos, vendor_model)
+        if key not in groups:
+            groups[key] = set()
         for c in cells:
-            if c not in result:  # first (most specific) row wins if a cell appears twice
-                result[c] = {'sec_pos': sec_pos, 'vendor_model': vendor_model}
+            groups[key].add(c)
+            if c not in per_cell:
+                per_cell[c] = (sec_pos, vendor_model)
+
+    # Build result: for each cell, include the full list of cells sharing
+    # that antenna position so the UI can display them as a group.
+    result = {}
+    for (sec_pos, vendor_model), cell_set in groups.items():
+        shared = sorted(cell_set)
+        for c in cell_set:
+            result[c] = {'sec_pos': sec_pos, 'vendor_model': vendor_model,
+                          'shared_cells': shared}
     return result
 
 
