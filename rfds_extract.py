@@ -358,6 +358,20 @@ def extract_rf_inventory_antennas(pages):
             continue
         if flat_parts and line.startswith('-'):
             flat_parts[-1] = flat_parts[-1] + line
+        elif (flat_parts and re.search(r'[A-Z]$', flat_parts[-1])
+              and re.fullmatch(r'[A-Z]+', line.split(' ', 1)[0])
+              and not _CELL_TOKEN_RE.match(line)
+              and not _RF_INV_STATUS_RE.match(line)
+              and not _PORT_ROW_START_RE.match(line + ' ')):
+            # Mid-word OCR wrap with no hyphen, e.g. 'ROSENBERG'/'ER' or
+            # 'ANDREW/CO'/'MMSCOPE' (real samples: 'ROSENBERGER' and
+            # 'ANDREW/COMMSCOPE' each split across two lines with no
+            # trailing space or hyphen on the first line). Guard: only
+            # fires when the prev line ends in a letter and this line's
+            # first token is a bare all-caps word that isn't a cell token,
+            # status keyword, or a new Sec-Pos row start - so normal row
+            # boundaries still split as before.
+            flat_parts[-1] = flat_parts[-1] + line
         else:
             flat_parts.append(line)
     flat = re.sub(r'\s+', ' ', ' '.join(flat_parts)).strip()
