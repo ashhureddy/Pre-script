@@ -262,6 +262,47 @@ def extract_cell_to_fru(text):
     return result
 
 
+def extract_nr_used_antennas(text):
+    """NRSectorCarrier -> {'tx': str, 'rx': str}, from noOfUsedTxAntennas /
+    noOfUsedRxAntennas in the 'SectorCarrier=|SectorEquipmentFunction ...
+    reserved' hget block.
+
+    Deliberately separate from checks_sector._extract_sector_config_5g()
+    (which reads noOfTxAntennas/noOfRxAntennas — the CONFIGURED max, used
+    for Pre-vs-CIQ comparison elsewhere) rather than changing that function:
+    confirmed on a real AAS/massive-MIMO node (HXIN090147F) that
+    noOfTxAntennas/noOfRxAntennas report 0 while noOfUsedTxAntennas/
+    noOfUsedRxAntennas report the real active count (64) — QUICKIX HTML's
+    own 5G NR Cells TX/RX display uses the USED count, not the configured
+    max, so this is a different (display-only) reading of the same block,
+    not a correction to the comparison logic."""
+    if not text:
+        return {}
+    block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    result = {}
+    # Locate the header to find noOfUsedRxAntennas/noOfUsedTxAntennas column
+    # order, since the table also carries several other numeric columns
+    # this project doesn't otherwise parse (massiveMimoSleepState, etc.) and
+    # a purely positional regex would be fragile against column reordering.
+    header_m = re.search(r'^MO\s+.*\bnoOfUsedRxAntennas\b.*\bnoOfUsedTxAntennas\b.*$', block, re.M)
+    if not header_m:
+        return result
+    header_cols = header_m.group(0).split()
+    try:
+        rx_idx = header_cols.index('noOfUsedRxAntennas')
+        tx_idx = header_cols.index('noOfUsedTxAntennas')
+    except ValueError:
+        return result
+    for m in re.finditer(r'^(NRSectorCarrier=\S+)\s+(.*)$', block, re.M):
+        mo, rest = m.group(1), m.group(2)
+        tokens = rest.split()
+        # header_cols[0] is 'MO' itself, so column i's value is tokens[i-1]
+        if len(tokens) >= max(rx_idx, tx_idx):
+            cell = mo.split('=', 1)[1]
+            result[cell] = {'rx': tokens[rx_idx - 1], 'tx': tokens[tx_idx - 1]}
+    return result
+
+
 def _short_radio_name(product):
     """Normalise a Pre productName to the CIQ's 'RRUS <model>' shape so the
     two columns are visually comparable.
