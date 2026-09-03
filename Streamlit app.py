@@ -127,6 +127,10 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   padding:6px 10px; border-radius:5px 5px 0 0; margin-top:12px;
 }
 .qkx-count-pill { font-size:11.5px; color:#334155; margin-right:14px; }
+.qkx-title-badge {
+  background:#101F90; color:#fff; font-weight:700; font-size:11px;
+  padding:3px 10px; border-radius:999px; white-space:nowrap;
+}
 </style>
 <div class="qkx-topbar">
   <div><span class="qkx-logo">MAS<span>TEC</span></span><span class="qkx-title">QUICK IX — Pre-Script Validation</span></div>
@@ -330,8 +334,12 @@ def render_rfds_grouped_table(rows):
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
-def section_title(text):
-    st.markdown(f'<div class="qkx-section-title">{esc(text)}</div>', unsafe_allow_html=True)
+def section_title(text, badge=None):
+    """badge: optional right-aligned pill (e.g. '18 CELLS'), matching
+    QUICKIX HTML's card-header count badge."""
+    badge_html = f'<span class="qkx-title-badge">{esc(badge)}</span>' if badge else ''
+    st.markdown(f'<div class="qkx-section-title" style="display:flex;justify-content:space-between;align-items:center;">'
+                f'<span>{esc(text)}</span>{badge_html}</div>', unsafe_allow_html=True)
 
 
 def count_caption(rows, status_key="status", bad_value="MISMATCH", noun="row"):
@@ -637,13 +645,14 @@ with tab_audit:
         else:
             summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs_text)
 
-            section_title(f"Node Summary — {len(summary_rows)} Node(s)")
+            section_title("Node Summary", badge=f"{len(summary_rows)} NODE(S)")
             st.markdown(render_table(summary_rows, status_key=None, columns=[
                 ("node", "Node ID"), ("sw_package", "BB Type"), ("sw_version", "SW Version"),
                 ("type", "Mode"), ("ptp_status", "PTP Status"), ("sa_nsa_status", "SA/NSA Status"),
             ]), unsafe_allow_html=True)
 
-            section_title(f"LTE Cells — {', '.join(sorted({r['node'] for r in lte_rows}))} ({len(lte_rows)} cells)")
+            section_title(f"LTE Cells — {', '.join(summary_rows and [r['node'] for r in summary_rows] or sorted(node_logs_text))}",
+                          badge=f"{len(lte_rows)} CELLS")
             st.markdown(render_table(lte_rows, status_key=None, columns=[
                 ("node", "Node"), ("cell", "Cell"), ("sector_carrier", "Sector Carries"), ("rru", "RRUs"),
                 ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
@@ -651,7 +660,7 @@ with tab_audit:
                 ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
             ]), unsafe_allow_html=True)
 
-            section_title(f"5G NR Cells — {len(nr_rows)} cells")
+            section_title("5G NR Cells", badge=f"{len(nr_rows)} CELLS")
             st.markdown(render_table(nr_rows, status_key=None, columns=[
                 ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("tx", "TX"), ("rx", "RX"),
                 ("sef_rfbranches", "SEF RFBRANCHES"),
