@@ -55,6 +55,9 @@ import antenna_resolve as ar
 import warnings_text as wt
 import ciq_view as cv
 import amos_view as av
+from rfds_verification_summary import build_rfds_verification_summary
+from engineer_comments import build_engineer_comments, extract_bands_from_comments, extract_nodes_from_audit
+from cr_description import build_cr_description, build_radio_ret_email
 
 st.set_page_config(page_title="QUICK IX", layout="wide", page_icon="📡")
 
@@ -246,7 +249,7 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
             ant_status = "SKIPPED"
         elif not an.get("found"):
             ant_status = "MANUAL"  # amber — RFDS has no antenna data at all ("N/A", not a real mismatch)
-        elif ant_tier in ("EXACT", "NORMALIZED", "SUFFIX"):
+        elif ant_tier in ("EXACT", "NORMALIZED", "SUFFIX", "TRUNCATED"):
             ant_status = "MATCH"
         else:
             ant_status = "MISMATCH"
@@ -497,6 +500,7 @@ edp_rows = state["edp_rows"]
 checked_nodes = state["checked_nodes"]
 rfds_pages = state["rfds_pages"]
 node_logs_text = state["node_logs_text"]
+sow = state["sow"]
 
 top_l, top_r = st.columns([1, 5])
 with top_l:
@@ -712,31 +716,98 @@ with tab_audit:
 
     with sub_audit:
         if not node_logs_text:
-            st.warning("No Pre kget-all logs were loaded for this run — nothing to compare against CIQ.")
+            st.warning("No Pre kget-all logs were loaded for this run — Parameters/Sector-Power comparisons below need "
+                       "Pre data and will be empty, but Engineer Comments (Additions/Deletions/Sector Movements/Board "
+                       "Swaps) still work off the CIQ's own Sector Del_Movement sheet.")
+        section_title("Parameters — 4G (Pre vs CIQ)")
+        st.markdown(render_table(results.get("params_4g", []), status_key="status"), unsafe_allow_html=True)
+        section_title("Parameters — 5G (Pre vs CIQ)")
+        st.markdown(render_table(results.get("params_5g", []), status_key="status"), unsafe_allow_html=True)
+        section_title("Sector / TX-RX / Power (Pre vs CIQ, best-effort)")
+        st.markdown(render_table(results.get("sector_swap", []), status_key="status"), unsafe_allow_html=True)
+        if rfds_pages is not None:
+            section_title("Cell ID vs RFDS (cross-check)")
+            st.markdown(render_table(results.get("cell_id_vs_rfds", []), status_key="status"), unsafe_allow_html=True)
+        rows = results.get("params_4g", []) + results.get("params_5g", []) + results.get("sector_swap", [])
+        n_bad = sum(1 for r in rows if r.get("status") == "MISMATCH")
+        st.caption(f"{len(rows)} field(s) checked — {n_bad} mismatch(es).")
+
+        section_title("Engineer Comments")
+        amos_lte_rows = amos_nr_rows = None
+        if node_logs_text:
+            _, amos_lte_rows, amos_nr_rows = av.build_amos_tables(node_logs_text)
+        ciq_lte_rows = cv.build_param_table(ciq_wb, "eUtran Parameters", ["EutranCellFDDId", "RRU type"])
+        ciq_nr_rows = cv.build_param_table(ciq_wb, "5G Info", ["NRCellDU", "RRU Type"])
+        engineer_comments = build_engineer_comments(
+            sow, results, checked_nodes,
+            amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
+            ciq_lte_rows=ciq_lte_rows, ciq_nr_rows=ciq_nr_rows,
+        )
+        state["engineer_comments"] = engineer_comments  # available to CR Desc sub-tab below
+        if engineer_comments:
+            border_colors = {"add-comment": "#059669", "del-comment": "#dc2626", "move-comment": "#f59e0b",
+                              "swap-comment": "#7c3aed", "board-comment": "#0891b2"}
+            st.markdown("<ul style='list-style:none;padding:0;margin:0;'>" + "".join(
+                f'<li style="margin:5px 0;font-size:13px;padding:6px 10px;'
+                f'border-left:3px solid {border_colors.get(c["cls"], "#2563eb")};'
+                f'background:#f8fafc;border-radius:0 4px 4px 0;">{esc(c["text"])}</li>'
+                for c in engineer_comments
+            ) + "</ul>", unsafe_allow_html=True)
+            comments_text = "\n".join(f"\u2022 {c['text']}" for c in engineer_comments)
+            st.download_button("⬇️ Copy/Download Comments (.txt)", data=comments_text,
+                                file_name="engineer_comments.txt", mime="text/plain", key="dl_eng_comments")
         else:
-            section_title("Parameters — 4G (Pre vs CIQ)")
-            st.markdown(render_table(results.get("params_4g", []), status_key="status"), unsafe_allow_html=True)
-            section_title("Parameters — 5G (Pre vs CIQ)")
-            st.markdown(render_table(results.get("params_5g", []), status_key="status"), unsafe_allow_html=True)
-            section_title("Sector / TX-RX / Power (Pre vs CIQ, best-effort)")
-            st.markdown(render_table(results.get("sector_swap", []), status_key="status"), unsafe_allow_html=True)
-            if rfds_pages is not None:
-                section_title("Cell ID vs RFDS (cross-check)")
-                st.markdown(render_table(results.get("cell_id_vs_rfds", []), status_key="status"), unsafe_allow_html=True)
-            rows = results.get("params_4g", []) + results.get("params_5g", []) + results.get("sector_swap", [])
-            n_bad = sum(1 for r in rows if r.get("status") == "MISMATCH")
-            st.caption(f"{len(rows)} field(s) checked — {n_bad} mismatch(es).")
+            st.caption("No comments generated — nothing added/deleted/moved/swapped relative to scope.")
 
     with sub_crdesc:
         section_title("CR Description")
-        if not node_logs_text:
-            st.caption("No Pre logs loaded — 'moved sector' lines need Pre data to detect the source node; "
-                       "this is integration-only scope for now.")
-        scope_lines = state["scope_lines"]
-        cr_text = "\n".join(f"- {l}" for l in scope_lines) if scope_lines else "(nothing to describe yet)"
-        st.text_area("Generated CR description", value=cr_text, height=200)
-        st.download_button("⬇️ Download CR description (.txt)", data=cr_text,
-                            file_name="cr_description.txt", mime="text/plain")
+        engineer_comments = state.get("engineer_comments", [])
+        all_nodes, deleted_nodes_cr, regular_nodes_cr = extract_nodes_from_audit(sow, checked_nodes)
+        bands_cr = extract_bands_from_comments(engineer_comments)
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            mic_mca = st.selectbox("MIC DESC", ["MIC - MCA", "MCA - CRAN"], key="cr_mic_mca")
+        with c2:
+            site_name_in = st.text_input("Site Name", placeholder="e.g. DOWNTOWN_EAST", key="cr_site_name")
+        with c3:
+            fa_number_in = st.text_input("FA Number", placeholder="e.g. 1034567", key="cr_fa_number")
+        c4, c5 = st.columns(2)
+        with c4:
+            sw_version_in = st.text_input("Sw Version", placeholder="e.g. 25.Q4", key="cr_sw_version")
+        with c5:
+            link_in = st.text_input("Link", placeholder="link to CIQ / ticket / script", key="cr_link")
+
+        n1, n2 = st.columns(2)
+        with n1:
+            st.markdown("**Nodes (from Audit)** — auto-detected")
+            st.markdown(", ".join(all_nodes) if all_nodes else "_Run validation to auto-populate…_")
+        with n2:
+            st.markdown("**Bands (from Audit)** — auto-detected")
+            st.markdown(" / ".join(bands_cr) if bands_cr else "_Run validation to auto-populate…_")
+
+        if st.button("Generate CR Description", type="primary", key="btn_gen_cr"):
+            cr_text, breakdown = build_cr_description(mic_mca, site_name_in, fa_number_in, all_nodes, bands_cr)
+            if cr_text is None:
+                st.error("Please enter Site Name and FA Number (and make sure a validation run has produced node data).")
+            else:
+                st.session_state["cr_output"] = cr_text
+                st.session_state["cr_breakdown"] = breakdown
+
+        if st.session_state.get("cr_output"):
+            st.text_area("Generated CR description", value=st.session_state["cr_output"], height=80, key="cr_output_area")
+            st.markdown(render_table(
+                [{"field": k, "value": v} for k, v in (st.session_state.get("cr_breakdown") or [])],
+                columns=[("field", "Field"), ("value", "Value")], status_key=None,
+            ), unsafe_allow_html=True)
+
+        st.divider()
+        email_text = build_radio_ret_email(sw_version_in, fa_number_in, link_in, engineer_comments)
+        st.text_area("Radio/RET Comments Email", value=email_text, height=260, key="cr_email_area")
+        st.download_button("⬇️ Download CR description (.txt)", data=st.session_state.get("cr_output", "") or "(generate a CR description first)",
+                            file_name="cr_description.txt", mime="text/plain", key="dl_cr_text")
+        st.download_button("⬇️ Download Radio/RET email (.txt)", data=email_text,
+                            file_name="radio_ret_email.txt", mime="text/plain", key="dl_cr_email")
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 3 — EDP Validator
@@ -818,6 +889,14 @@ with tab_consolidated:
         st.caption("Nothing to report.")
 
     section_title("Warnings & Comments")
+
+    rfds_verification_rows = build_rfds_verification_summary(build_rfds_grouped_rows(results, ciq_wb, rfds_pages))
+    if rfds_verification_rows:
+        st.markdown("**RFDS Verification:**")
+        st.markdown(render_table(rfds_verification_rows, columns=[("Finding", "Finding"), ("Corrective Action", "Corrective Action")],
+                                  status_key=None),
+                    unsafe_allow_html=True)
+
     warn_keys = ["warn_primary_secondary", "warn_board_type", "warn_xmu", "warn_params_4g", "warn_params_5g", "warn_pci", "warn_radio_type",
                  "warn_sector_swap", "warn_nr_tac", "warn_air_radio", "warn_antenna"]
     all_warnings = []
@@ -827,7 +906,7 @@ with tab_consolidated:
     if all_warnings:
         for w in all_warnings:
             st.markdown(f'<div class="qkx-warn-line">{esc(w)}</div>', unsafe_allow_html=True)
-    else:
+    elif not rfds_verification_rows:
         st.caption("No warnings.")
 
     with st.expander("RRNRBL Checklist", expanded=False):
