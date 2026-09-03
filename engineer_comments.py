@@ -142,15 +142,20 @@ def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amo
                 ciq_by_suffix.setdefault(_suffix(cell), []).append(r)
         swap_bands = {}
         for a in amos_rows:
-            sfx = _suffix(a.get("cell"))
+            cell_name = a.get("cell")
+            sfx = _suffix(cell_name)
             matches = ciq_by_suffix.get(sfx)
             if not matches:
                 continue
             c = matches[0]
-            a_rru = str(a.get("rru") or "").strip().upper()
+            # amos rows use "radio_type" (resolved model, e.g. "RRUS 32") for
+            # LTE — comparable to CIQ's "RRU type"/"RRU Type" model column;
+            # NR rows only carry "rru" (the raw FRU id, e.g. "RRU-7"), since
+            # build_nr_cell_rows() doesn't resolve a short model name.
+            a_rru = str((a.get("radio_type") if not nr else a.get("rru")) or "").strip().upper()
             c_rru = str(c.get(ciq_rru_key) or "").strip().upper()
             if a_rru and c_rru and a_rru != c_rru:
-                band = a.get("band") or _band_only(a.get("cell")) or sfx
+                band = _band_only(cell_name) or sfx
                 key = (a_rru, c_rru)
                 swap_bands.setdefault(key, set()).add(band)
         for (pre_rru, post_rru), bands in swap_bands.items():
@@ -162,7 +167,10 @@ def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amo
             })
 
     _radio_swap_pass(amos_lte_rows, ciq_lte_rows, "EutranCellFDDId", "RRU type", nr=False)
-    _radio_swap_pass(amos_nr_rows, ciq_nr_rows, "NRCellDU", "RRU Type", nr=True)
+    # NR radio-swap comparison is skipped: build_nr_cell_rows() only exposes
+    # the raw FRU id (e.g. "RRU-7"), not a resolved model name, so comparing
+    # it against CIQ's "RRU Type" (a model name like "RRUS 4890") would
+    # mismatch on every row and produce false "radio swap" comments.
 
     return comments
 
