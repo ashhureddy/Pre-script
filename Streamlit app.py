@@ -105,18 +105,20 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 .stTabs [data-baseweb="tab-list"] { gap: 4px; }
 .stTabs [data-baseweb="tab"] { font-weight: 600; }
 .qkx-stat { text-align:center; border:1px solid #94a3b8; border-radius:4px; padding:8px; background:#fff; }
-.qkx-table-wrap { overflow-x:auto; border:1px solid #64748b; border-radius:3px; margin-bottom:16px; }
+.qkx-table-wrap { overflow-x:auto; border:1px solid #64748b; border-radius:0 0 8px 8px; margin: 0 0 22px 0; border-top:none; }
 .qkx-table { width:100%; border-collapse:collapse; font-size:12.8px; line-height:1.3; }
 .qkx-table th {
-  background:#dde3f7; color:#101F90; font-weight:700; text-align:left;
-  padding:6px 10px; border:1px solid #8b97b8; white-space:nowrap;
+  background:#101F90; color:#ffffff; font-weight:700; text-align:left;
+  padding:7px 10px; border:1px solid #101F90; white-space:nowrap;
 }
-.qkx-table td { padding:6px 10px; border:1px solid #a8b0c2; vertical-align:top; }
+.qkx-table td { padding:6px 10px; border:1px solid #dde5ef; vertical-align:top; }
+.qkx-table tr:nth-child(even) td { background:#f8fafc; }
 .qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #334155; }
 .qkx-empty { padding:12px 4px; color:#64748b; font-style:italic; font-size:13px; }
 .qkx-section-title {
-  font-weight:700; font-size:15px; color:#0f1720; margin: 14px 0 8px 0;
-  padding-bottom:6px; border-bottom: 2px solid #101F90;
+  font-weight:700; font-size:14.5px; color:#101F90; margin: 22px 0 0 0;
+  padding:10px 14px; border:1px solid #64748b; border-bottom:none;
+  border-radius:8px 8px 0 0; background:#eef1fb;
 }
 .qkx-warn-line {
   padding:6px 10px; margin-bottom:5px; border-radius:5px;
@@ -636,7 +638,6 @@ with tab_rfds:
 # TAB 2 — Audit: Pre checks (AMOS) / CIQ Checks / Audit (Pre vs CIQ) / CR Desc
 # ══════════════════════════════════════════════════════════════════════
 with tab_audit:
-    st.subheader("Audit")
     sub_pre, sub_ciq, sub_audit, sub_crdesc = st.tabs(["Pre checks (AMOS)", "CIQ Checks", "Audit (Pre vs CIQ)", "CR Desc"])
 
     with sub_pre:
