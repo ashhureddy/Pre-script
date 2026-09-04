@@ -441,10 +441,17 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (73, "CIQ tabs checks", "Antenna Information", "AntennaUnit/AntennaSubunit unique band-wise", "Radio", lambda: _agg(results.get("antenna", []))),
         (74, "CIQ tabs checks", "Sector Movement / Deletion sheet", "Source/target cells match ENM/eUtran", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
 
-        (76, "Pre checks", "ENM Pre-checks", "Radio Ports", "Radio", lambda: _agg(results.get("radio_type", []))),
-        (77, "Pre checks", "ENM Pre-checks", "RfBranch", "Radio", None),
-        (78, "Pre checks", "ENM Pre-checks", "Sharing Radio", "Radio", lambda: _agg(results.get("radio_sharing", []))),
-        (79, "Pre checks", "ENM Pre-checks", "SSNALIST", "Radio", None),
+        # Rows 75-76 are new in the updated template (they pushed the old
+        # "Pre checks" block from 75-79 down to 77-81). Both are EDP/ENM IP
+        # comparisons this project has no automated check for, so they're
+        # manual rather than silently reusing an unrelated check's result.
+        (75, "IP Validation Pre Vs EDP", None, "NodeB bearer IP / VLAN ID / router default IP vs EDP (board swap node)", "Radio", None),
+        (76, "Rehoming sites ( IP Verification )", None, "Existing IP/VLAN of all nodes: EDP vs ENM (Daffi node rehoming)", "Radio", None),
+
+        (78, "Pre checks", "ENM Pre-checks", "Radio Ports", "Radio", lambda: _agg(results.get("radio_type", []))),
+        (79, "Pre checks", "ENM Pre-checks", "RfBranch", "Radio", None),
+        (80, "Pre checks", "ENM Pre-checks", "Sharing Radio", "Radio", lambda: _agg(results.get("radio_sharing", []))),
+        (81, "Pre checks", "ENM Pre-checks", "SSNALIST", "Radio", None),
     ]
 
     out = []
