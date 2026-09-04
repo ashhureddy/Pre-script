@@ -787,11 +787,6 @@ with tab_audit:
         ]), unsafe_allow_html=True)
 
     with sub_audit:
-        if not node_logs_text:
-            st.warning("No Pre kget-all logs were loaded for this run — Parameters/Sector-Power comparisons below need "
-                       "Pre data and will be empty, but Engineer Comments (Additions/Deletions/Sector Movements/Board "
-                       "Swaps) still work off the CIQ's own Sector Del_Movement sheet.")
-
         import pre_post_audit as ppa
 
         section_title("Pre vs Post")
@@ -827,45 +822,19 @@ with tab_audit:
         else:
             st.caption("Upload Pre kget-all logs to see the LTE/5G cell-level Pre vs Post tables.")
 
-        section_title("Parameters — 4G (Pre vs CIQ)")
-        st.markdown(render_table(results.get("params_4g", []), status_key="status"), unsafe_allow_html=True)
-        section_title("Parameters — 5G (Pre vs CIQ)")
-        st.markdown(render_table(results.get("params_5g", []), status_key="status"), unsafe_allow_html=True)
-        section_title("Sector / TX-RX / Power (Pre vs CIQ, best-effort)")
-        st.markdown(render_table(results.get("sector_swap", []), status_key="status"), unsafe_allow_html=True)
-        if rfds_pages is not None:
-            section_title("Cell ID vs RFDS (cross-check)")
-            st.markdown(render_table(results.get("cell_id_vs_rfds", []), status_key="status"), unsafe_allow_html=True)
-        rows = results.get("params_4g", []) + results.get("params_5g", []) + results.get("sector_swap", [])
-        n_bad = sum(1 for r in rows if r.get("status") == "MISMATCH")
-        st.caption(f"{len(rows)} field(s) checked — {n_bad} mismatch(es).")
-
-        section_title("Engineer Comments")
+        # Engineer Comments is computed silently here (not displayed in this
+        # tab) purely so CR Desc's auto-detected Nodes/Bands still populate —
+        # CR Desc reads state["engineer_comments"] via extract_bands_from_comments().
         amos_lte_rows = amos_nr_rows = None
         if node_logs_text:
             _, amos_lte_rows, amos_nr_rows = av.build_amos_tables(node_logs_text)
         ciq_lte_rows = cv.build_param_table(ciq_wb, "eUtran Parameters", ["EutranCellFDDId", "RRU type"])
         ciq_nr_rows = cv.build_param_table(ciq_wb, "5G Info", ["NRCellDU", "RRU Type"])
-        engineer_comments = build_engineer_comments(
+        state["engineer_comments"] = build_engineer_comments(
             sow, results, checked_nodes,
             amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
             ciq_lte_rows=ciq_lte_rows, ciq_nr_rows=ciq_nr_rows,
         )
-        state["engineer_comments"] = engineer_comments  # available to CR Desc sub-tab below
-        if engineer_comments:
-            border_colors = {"add-comment": "#059669", "del-comment": "#dc2626", "move-comment": "#f59e0b",
-                              "swap-comment": "#7c3aed", "board-comment": "#0891b2"}
-            st.markdown("<ul style='list-style:none;padding:0;margin:0;'>" + "".join(
-                f'<li style="margin:5px 0;font-size:13px;padding:6px 10px;'
-                f'border-left:3px solid {border_colors.get(c["cls"], "#2563eb")};'
-                f'background:#f8fafc;border-radius:0 4px 4px 0;">{esc(c["text"])}</li>'
-                for c in engineer_comments
-            ) + "</ul>", unsafe_allow_html=True)
-            comments_text = "\n".join(f"\u2022 {c['text']}" for c in engineer_comments)
-            st.download_button("⬇️ Copy/Download Comments (.txt)", data=comments_text,
-                                file_name="engineer_comments.txt", mime="text/plain", key="dl_eng_comments")
-        else:
-            st.caption("No comments generated — nothing added/deleted/moved/swapped relative to scope.")
 
     with sub_crdesc:
         section_title("CR Description")
