@@ -670,12 +670,28 @@ with tab_audit:
     with sub_ciq:
         import ciq_checks as cc
 
-        section_title("Node Integration")
-        st.markdown(render_table(cv.build_node_integration(ciq_wb), status_key=None, columns=[
-            ("node", "Node"), ("eNBId", "ENBID"), ("eNodeB", "ENODEB"), ("gNBId", "GNBID"), ("gNodeB", "GNODEB"),
-            ("mode", "Mode"), ("bb_type", "BB Type"), ("mme_region", "MME Region"), ("enm", "ENM"),
-            ("xmu", "XMU"), ("ports", "Ports"),
-        ]), unsafe_allow_html=True)
+        controller_rows = cv.build_controller_info(ciq_wb)
+        if controller_rows:
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                section_title("Node Integration")
+                st.markdown(render_table(cv.build_node_integration(ciq_wb), status_key=None, columns=[
+                    ("node", "Node"), ("eNBId", "ENBID"), ("eNodeB", "ENODEB"), ("gNBId", "GNBID"), ("gNodeB", "GNODEB"),
+                    ("mode", "Mode"), ("bb_type", "BB Type"), ("mme_region", "MME Region"), ("enm", "ENM"),
+                    ("xmu", "XMU"), ("ports", "Ports"),
+                ]), unsafe_allow_html=True)
+            with col2:
+                section_title("Controller Info")
+                st.markdown(render_table(controller_rows, status_key=None, columns=[
+                    ("usid", "USID"), ("controller", "Controller"), ("id", "ID"),
+                ]), unsafe_allow_html=True)
+        else:
+            section_title("Node Integration")
+            st.markdown(render_table(cv.build_node_integration(ciq_wb), status_key=None, columns=[
+                ("node", "Node"), ("eNBId", "ENBID"), ("eNodeB", "ENODEB"), ("gNBId", "GNBID"), ("gNodeB", "GNODEB"),
+                ("mode", "Mode"), ("bb_type", "BB Type"), ("mme_region", "MME Region"), ("enm", "ENM"),
+                ("xmu", "XMU"), ("ports", "Ports"),
+            ]), unsafe_allow_html=True)
 
         ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb)
         ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
@@ -684,21 +700,23 @@ with tab_audit:
         section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
         st.markdown(render_table(ciq_lte_rows, status_key=None, columns=[
             ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("electrical_tilt", "Electrical Tilt"),
-            ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"), ("link", "Link (Single/Doublelink)"),
-            ("comments_html", "Comments/Warning"),
+            ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
+            ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
 
         section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
         st.markdown(render_table(ciq_nr_rows, status_key=None, columns=[
             ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
             ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-            ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
+            ("sharing_radio", "Sharing Radio"), ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
 
-        with st.expander("Raw eUtran Parameters / 5G Info"):
-            st.markdown("**5G Info**")
-            st.markdown(render_table(cv.build_param_table(ciq_wb, "5G Info", cv.NR_PARAM_COLS), status_key=None),
-                        unsafe_allow_html=True)
+        antenna_rows = cs.check_antenna_uniqueness(node_id="", ciq_wb=ciq_wb)
+        section_title("Antenna Uniqueness", badge=f"{len(antenna_rows)}")
+        st.markdown(render_table(antenna_rows, status_key="status", columns=[
+            ("cell", "Cells"), ("aug_au_asu_1", "AUG/AU/ASU (1)"), ("aug_au_asu_2", "AUG/AU/ASU (2)"),
+            ("verdict", "Status"),
+        ]), unsafe_allow_html=True)
 
     with sub_audit:
         if not node_logs_text:
