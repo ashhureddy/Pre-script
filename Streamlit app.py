@@ -965,30 +965,30 @@ with tab_consolidated:
     else:
         st.caption("Nothing to report.")
 
-    section_title("Warnings & Comments")
-
-    rfds_verification_rows = build_rfds_verification_summary(build_rfds_grouped_rows(results, ciq_wb, rfds_pages))
-    if rfds_verification_rows:
-        st.markdown("**RFDS Verification:**")
-        st.markdown(render_table(rfds_verification_rows, columns=[("Finding", "Finding"), ("Corrective Action", "Corrective Action")],
-                                  status_key=None),
-                    unsafe_allow_html=True)
-
-    warn_keys = ["warn_primary_secondary", "warn_board_type", "warn_xmu", "warn_params_4g", "warn_params_5g", "warn_pci", "warn_radio_type",
-                 "warn_sector_swap", "warn_nr_tac", "warn_air_radio", "warn_antenna"]
-    all_warnings = []
-    for k in warn_keys:
-        all_warnings += results.get(k, [])
-    all_warnings += results.get("unavailable_notes", [])
-    if all_warnings:
-        for w in all_warnings:
-            st.markdown(f'<div class="qkx-warn-line">{esc(w)}</div>', unsafe_allow_html=True)
-    elif not rfds_verification_rows:
-        st.caption("No warnings.")
-
     with st.expander("RRNRBL Checklist", expanded=False):
         checklist = state["checklist"]
         render_rrnrbl_checklist(checklist)
+
+    with st.expander("Warnings & Comments", expanded=False):
+        rfds_verification_rows = build_rfds_verification_summary(build_rfds_grouped_rows(results, ciq_wb, rfds_pages))
+        if rfds_verification_rows:
+            st.markdown("**RFDS Verification:**")
+            st.markdown(render_table(rfds_verification_rows,
+                                      columns=[("Finding", "Finding"), ("Corrective Action", "Corrective Action")],
+                                      status_key=None),
+                        unsafe_allow_html=True)
+
+        warn_keys = ["warn_primary_secondary", "warn_board_type", "warn_xmu", "warn_params_4g", "warn_params_5g",
+                     "warn_pci", "warn_radio_type", "warn_sector_swap", "warn_nr_tac", "warn_air_radio", "warn_antenna"]
+        all_warnings = []
+        for k in warn_keys:
+            all_warnings += results.get(k, [])
+        all_warnings += results.get("unavailable_notes", [])
+        if all_warnings:
+            for w in all_warnings:
+                st.markdown(f'<div class="qkx-warn-line">{esc(w)}</div>', unsafe_allow_html=True)
+        elif not rfds_verification_rows:
+            st.caption("No warnings.")
 
     with st.expander("RFDS vs CIQ & Pre vs CIQ", expanded=False):
         for label, key in [("Cells vs RFDS", "cells_vs_rfds"), ("Cell ID vs RFDS", "cell_id_vs_rfds"),
