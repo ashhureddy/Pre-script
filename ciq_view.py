@@ -52,6 +52,28 @@ def build_node_integration(ciq_wb):
     return rows
 
 
+def build_controller_info(ciq_wb):
+    """USID, Controller, ID — one row per Controller Info entry. Returns []
+    when the sheet is absent or every row is entirely blank (mirrors
+    QUICKIX HTML's ciqBuildControllerTable() hasData check: hide the card
+    rather than show an empty/all-blank one. Note this treats literal
+    "N/A" text as present data, same as the HTML — a genuinely blank cell
+    is what hides the card, not a placeholder value)."""
+    if "Controller Info" not in ciq_wb.sheetnames:
+        return []
+    rows = cer.sheet_rows_as_dicts(ciq_wb["Controller Info"])
+    has_data = any(str(v or "").strip() for r in rows for v in r.values())
+    if not has_data:
+        return []
+    out = []
+    for r in rows:
+        usid = r.get("USID") or r.get("US ID") or r.get("Usid") or "-"
+        controller = r.get("Controller") or r.get("Controller Name") or "-"
+        cid = r.get("Controller ID") or r.get("Controller Id") or r.get("ControllerID") or "-"
+        out.append({"usid": usid, "controller": controller, "id": cid})
+    return out
+
+
 LTE_PARAM_COLS = [
     "EutranCellFDDId", "eNBId", "eUTRA operating band", "earfcnDl", "earfcnUl", "dlChannelBandwidth",
     "configuredOutputPower", "PCI", "sectorId", "cellId", "RRU type", "antenna model",
