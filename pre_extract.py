@@ -233,7 +233,16 @@ def extract_cell_to_fru(text):
     Cell->SectorCarrier->RfBranch->FRU chain as extract_cell_to_radio(), but
     keeping the FRU id itself instead of resolving it to a product name —
     matches QUICKIX HTML's 'RRUs' column (distinct from 'Radio type', which
-    shows the resolved model)."""
+    shows the resolved model).
+
+    Falls back to the carrier's SectorEquipmentFunction's OWN rfBranchRef
+    list when the carrier's own rfBranchTxRef/RxRef are empty — confirmed
+    real case: NR carriers co-sited with LTE carriers under one shared SEF
+    (e.g. FSL00877's NRSectorCarrier=FSNN090877_N005A_1, whose own TX/RX
+    refs are '[0]=' but which shares SectorEquipmentFunction=1 with two LTE
+    SectorCarriers; SEF=1's own rfBranchRef correctly resolves to RRU-1).
+    Without this fallback such carriers report no RRU at all despite one
+    being unambiguously identifiable from the shared SEF."""
     if not text:
         return {}
     branch_to_fru = {}
@@ -241,20 +250,36 @@ def extract_cell_to_fru(text):
                           get_command_block(text, 'rfbranch auport|rfportref') or '', re.M):
         branch_to_fru[m.group(1)] = m.group(2)
 
+    branch_block = get_command_block(text, 'sector rfbranch') or ''
     carrier_to_fru = {}
-    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+(.*)$',
-                          get_command_block(text, 'sector rfbranch') or '', re.M):
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+(.*)$', branch_block, re.M):
         refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
         frus = {branch_to_fru.get(r) for r in refs if r in branch_to_fru}
         frus.discard(None)
         if frus:
             carrier_to_fru[m.group(1)] = ", ".join(sorted(frus))
+    sef_to_fru = {}
+    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$', branch_block, re.M):
+        refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
+        frus = {branch_to_fru.get(r) for r in refs if r in branch_to_fru}
+        frus.discard(None)
+        if frus:
+            sef_to_fru[m.group(1)] = ", ".join(sorted(frus))
+
+    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    sc_to_sef = {}
+    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+.*$', id_block, re.M):
+        sef_mo, rest = m.group(1), m.group(0)
+        for sc in re.findall(r'(?:SectorCarrier|NRSectorCarrier)=\S+', rest):
+            sc_to_sef[sc] = sef_mo
 
     result = {}
-    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
     for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+.*$', id_block, re.M):
         carrier, rest = m.group(1), m.group(0)
         fru = carrier_to_fru.get(carrier)
+        if not fru:
+            sef = sc_to_sef.get(carrier)
+            fru = sef_to_fru.get(sef) if sef else None
         if not fru:
             continue
         for cell in re.findall(r'(?:EUtranCellFDD|NRCellDU)=(\S+)', rest):
@@ -312,31 +337,29 @@ def extract_nr_used_antennas(text):
     noOfUsedRxAntennas report the real active count (64) — QUICKIX HTML's
     own 5G NR Cells TX/RX display uses the USED count, not the configured
     max, so this is a different (display-only) reading of the same block,
-    not a correction to the comparison logic."""
+    not a correction to the comparison logic.
+
+    NOT position/token-index based — this table has the same moshell
+    column-width-shifts-per-row behaviour documented on _EUTRAN_CELL_RE
+    above, and confirmed broken on a real log: on a DEACTIVATED carrier
+    (FSL02877's FSNN092877_N005B_1), massiveMimoSleepState/noOfRxAntennas/
+    noOfTxAntennas are ALL blank (no token at all, not even '0'), so a
+    token-index lookup silently reads 'operationalState's own value
+    ('0 (DISABLED)') as if it were noOfUsedTxAntennas. Anchored instead:
+    the two bare numeric fields immediately preceding operationalState's
+    'N (STATE)' marker are noOfUsedRxAntennas/noOfUsedTxAntennas — when
+    that anchor can't be found (both preceding fields also blank, as on
+    the DEACTIVATED row), correctly return no reading for that cell rather
+    than a wrong one."""
     if not text:
         return {}
     block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
     result = {}
-    # Locate the header to find noOfUsedRxAntennas/noOfUsedTxAntennas column
-    # order, since the table also carries several other numeric columns
-    # this project doesn't otherwise parse (massiveMimoSleepState, etc.) and
-    # a purely positional regex would be fragile against column reordering.
-    header_m = re.search(r'^MO\s+.*\bnoOfUsedRxAntennas\b.*\bnoOfUsedTxAntennas\b.*$', block, re.M)
-    if not header_m:
-        return result
-    header_cols = header_m.group(0).split()
-    try:
-        rx_idx = header_cols.index('noOfUsedRxAntennas')
-        tx_idx = header_cols.index('noOfUsedTxAntennas')
-    except ValueError:
-        return result
-    for m in re.finditer(r'^(NRSectorCarrier=\S+)\s+(.*)$', block, re.M):
-        mo, rest = m.group(1), m.group(2)
-        tokens = rest.split()
-        # header_cols[0] is 'MO' itself, so column i's value is tokens[i-1]
-        if len(tokens) >= max(rx_idx, tx_idx):
-            cell = mo.split('=', 1)[1]
-            result[cell] = {'rx': tokens[rx_idx - 1], 'tx': tokens[tx_idx - 1]}
+    for m in re.finditer(
+        r'^(NRSectorCarrier=\S+)\s+.*?(\d+)\s+(\d+)\s+\d+\s*\([A-Z_]+\)\s+(?:\[\d+\]|reservedBy)',
+        block, re.M,
+    ):
+        result[m.group(1).split('=', 1)[1]] = {'rx': m.group(2), 'tx': m.group(3)}
     return result
 
 
