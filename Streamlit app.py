@@ -133,6 +133,19 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   background:#101F90; color:#fff; font-weight:700; font-size:11px;
   padding:3px 10px; border-radius:999px; white-space:nowrap;
 }
+.qkx-manual-label {
+  font-size:13px; font-weight:600; color:#0f1720; margin-bottom:6px;
+  display:flex; align-items:center; gap:8px;
+}
+.qkx-manual-tag {
+  background:#e2e8f0; color:#475569; font-size:9.5px; font-weight:700;
+  padding:2px 7px; border-radius:999px; letter-spacing:.04em;
+}
+.qkx-sub-header {
+  font-size:12.5px; font-weight:700; color:#334155; text-transform:uppercase;
+  letter-spacing:.04em; margin:12px 0 4px 0;
+  border-left:3px solid #94a3b8; padding:2px 0 2px 8px;
+}
 </style>
 <div class="qkx-topbar">
   <div><span class="qkx-logo">MAS<span>TEC</span></span><span class="qkx-title">QUICK IX — Pre-Script Validation</span></div>
@@ -462,18 +475,27 @@ def render_rrnrbl_checklist(rows):
             if r.get("sub") != last_sub:
                 flush()
                 if r.get("sub"):
-                    st.markdown(f'*{esc(r["sub"])}*')
+                    st.markdown(f'<div class="qkx-sub-header">{esc(r["sub"])}</div>', unsafe_allow_html=True)
                 last_sub = r.get("sub")
             if r["status"] == "manual":
                 flush()
                 key = f'rrnrbl_{r["row"]}'
-                cc = st.columns([0.05, 0.95])
-                with cc[0]:
-                    st.checkbox("Done", key=f"{key}_done", label_visibility="collapsed")
-                with cc[1]:
-                    st.markdown(f'✎ **{esc(r["item"])}**')
-                    st.text_input("Comment", key=f"{key}_comment", label_visibility="collapsed",
-                                  placeholder="Comment / evidence…")
+                # Manual rows are bare Streamlit widgets (no table markup), so
+                # without an explicit container they sit directly on the page
+                # background and visually disappear next to the bordered auto-
+                # check tables. st.container(border=True) is used rather than a
+                # raw <div> wrapper because Streamlit renders each element into
+                # its own container — an opening <div> in one st.markdown call
+                # does NOT wrap widgets emitted by later calls.
+                with st.container(border=True):
+                    st.markdown(f'<div class="qkx-manual-label">\u270e {esc(r["item"])}'
+                                f'<span class="qkx-manual-tag">MANUAL</span></div>', unsafe_allow_html=True)
+                    cc = st.columns([0.06, 0.94])
+                    with cc[0]:
+                        st.checkbox("Done", key=f"{key}_done", label_visibility="collapsed")
+                    with cc[1]:
+                        st.text_input("Comment", key=f"{key}_comment", label_visibility="collapsed",
+                                      placeholder="Comment / evidence…")
             else:
                 buf.append({"item": r["item"], "detail": r.get("detail", ""), "status": r["status"]})
         flush()
