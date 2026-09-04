@@ -431,8 +431,12 @@ def apply_link_and_sharing(lte_rows, nr_rows):
         ports = rru_ports.get((node, rru), set())
         r["link"] = "Double Link" if len(ports) > 1 else "Single Link"
 
-    # ── Sharing Radio: same RRU + same band, DIFFERENT sector letters ──
+    # ── Sharing Radio: same RRU + same band, DIFFERENT sector letters.
+    # Exposed as its OWN column (r["sharing_radio"]) as well as folded into
+    # comments, matching Pre checks' Sharing Radio column convention. ──
     def _sharing_pass(rows, cell_key):
+        for r in rows:
+            r["sharing_radio"] = "No"
         radio_band_map = {}
         for r in rows:
             cell = r.get(cell_key)
@@ -453,7 +457,9 @@ def apply_link_and_sharing(lte_rows, nr_rows):
             by_sector = radio_band_map.get((node, rru, band), {})
             shared = {c for sec, cs_ in by_sector.items() if sec != sector for c in cs_}
             if shared:
-                r["comments"].append(f'Sharing Radio (RRU shared cross-sector with: {", ".join(sorted(shared))})')
+                shared_list = ", ".join(sorted(shared))
+                r["sharing_radio"] = shared_list
+                r["comments"].append(f'Sharing Radio (RRU shared cross-sector with: {shared_list})')
                 r["comments_html"] = _format_warnings(r["comments"])
 
     _sharing_pass(lte_rows, "cell")
