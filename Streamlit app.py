@@ -193,6 +193,74 @@ def render_table_with_comments(rows, columns, status_key="status", note_key="not
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
+# ── Pre vs Post row-type palette — mirrors QUICKIX HTML's .new/.delete/
+# .change/.nochange row classes exactly (background colours match the
+# screenshots: pale green=new, pale red=delete, pale amber=change/moved,
+# plain white=nochange). ──
+PRE_POST_ROW_COLORS = {
+    "new": "#d1fae5", "delete": "#fee2e2", "change": "#fef3c7", "nochange": "#ffffff",
+}
+
+
+def render_node_pre_post_table(rows):
+    """Node / Status / PTP / SA-NSA, whole-row background from row['type']."""
+    if not rows:
+        return '<div class="qkx-empty">Run validation with Pre logs and a CIQ to populate this.</div>'
+    head = "".join(f"<th>{h}</th>" for h in ("Node", "Status", "PTP", "SA/NSA"))
+    body = []
+    for r in rows:
+        bg = PRE_POST_ROW_COLORS.get(r["type"], "#ffffff")
+        status_color = "#b45309" if r["type"] == "change" else "#0f1720"
+        body.append(
+            f'<tr style="background:{bg};"><td>{esc(r["node"])}</td>'
+            f'<td style="color:{status_color};font-weight:600;">{esc(r["status"])}</td>'
+            f'<td>{esc(r["ptp"])}</td><td>{esc(r["sa_nsa"])}</td></tr>'
+        )
+    return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
+def _pre_post_summary_pills(summary):
+    """New/Deleted/Moved/No Change count pills, same labels+order as the
+    HTML's own badge row above each LTE/5G Pre vs Post table."""
+    items = [("new", "New", "#059669"), ("deleted", "Deleted", "#dc2626"),
+             ("moved", "Moved", "#b45309"), ("nochange", "No Change", "#334155")]
+    return "".join(
+        f'<span class="qkx-count-pill"><b style="color:{color}">{summary.get(key, 0)}</b> {label}</span>'
+        for key, label, color in items
+    )
+
+
+def render_cell_pre_post_table(rows, field_columns):
+    """field_columns: list of (value_key, ok_key, label) for the PRE|POST
+    comparison columns (e.g. ('sc','_sc_ok','SC')) — each cell coloured
+    green/red from its own ok flag (None -> plain, used for Deleted rows
+    where there's nothing to compare). Row background still follows
+    row_type like the node table, but lighter, since the HTML also tints
+    New/Deleted/Moved rows while still colouring individual mismatched
+    fields red within them."""
+    if not rows:
+        return '<div class="qkx-empty">No data.</div>'
+    head = "".join(f"<th>{h}</th>" for h in ("Node", "Cell")) \
+        + "".join(f"<th>{esc(label)}</th>" for _, _, label in field_columns) \
+        + "".join(f"<th>{h}</th>" for h in ("Link", "Comments"))
+    body = []
+    for r in rows:
+        row_bg = PRE_POST_ROW_COLORS.get(r["row_type"], "#ffffff")
+        cells = f"<td>{esc(r['node'])}</td><td><b>{esc(r['cell'])}</b></td>"
+        for val_key, ok_key, _ in field_columns:
+            ok = r.get(ok_key)
+            if ok is None:
+                cells += f"<td>{esc(r.get(val_key, '-'))}</td>"
+            else:
+                color = "#059669" if ok else "#dc2626"
+                cells += f'<td style="color:{color};font-weight:700;">{esc(r.get(val_key, "-"))}</td>'
+        cells += f"<td>{esc(r.get('link', '-'))}</td><td>{esc(r.get('comment', ''))}</td>"
+        body.append(f'<tr style="background:{row_bg};">{cells}</tr>')
+    return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
 def _sheet_mentions_cell(ciq_wb, sheet_name, cell_id):
     """True if any cell in the given CIQ sheet contains cell_id as a
     substring anywhere — mirrors the HTML's own Antenna Info / Losses &
@@ -723,6 +791,42 @@ with tab_audit:
             st.warning("No Pre kget-all logs were loaded for this run — Parameters/Sector-Power comparisons below need "
                        "Pre data and will be empty, but Engineer Comments (Additions/Deletions/Sector Movements/Board "
                        "Swaps) still work off the CIQ's own Sector Del_Movement sheet.")
+
+        import pre_post_audit as ppa
+
+        section_title("Pre vs Post")
+        pre_summary_rows, _, _ = av.build_amos_tables(node_logs_text) if node_logs_text else ([], [], [])
+        ciq_node_rows = cv.build_node_integration(ciq_wb)
+        sa_nsa_map = {r["node"]: r["sa_nsa_status"] for r in pre_summary_rows}
+        node_pre_post_rows = ppa.build_node_pre_post(pre_summary_rows, ciq_node_rows, sa_nsa_map)
+        st.markdown(render_node_pre_post_table(node_pre_post_rows), unsafe_allow_html=True)
+
+        if node_logs_text:
+            lte_pp_rows = ppa.compare_lte_cell_level(node_logs_text, ciq_wb)
+            lte_pp_summary = ppa.summarize_rows(lte_pp_rows)
+            section_title("LTE: Pre vs Post")
+            st.markdown(_pre_post_summary_pills(lte_pp_summary), unsafe_allow_html=True)
+            st.caption("Green = Match  Red = Mismatch  Format: PRE | POST")
+            st.markdown(render_cell_pre_post_table(lte_pp_rows, [
+                ("sc", "_sc_ok", "Sec Carrier"), ("cellid", "_cellid_ok", "Cell ID"), ("tac", "_tac_ok", "TAC"),
+                ("bw", "_bw_ok", "BW"), ("dl", "_dl_ok", "EARFCN DL"), ("ul", "_ul_ok", "EARFCN UL"),
+                ("power", "_power_ok", "Power"), ("tx", "_tx_ok", "TX"), ("rx", "_rx_ok", "RX"),
+                ("rru", "_rru_ok", "RRU Model"),
+            ]), unsafe_allow_html=True)
+
+            nr_pp_rows = ppa.compare_nr_cell_level(node_logs_text, ciq_wb)
+            nr_pp_summary = ppa.summarize_rows(nr_pp_rows)
+            section_title("5G: Pre vs Post")
+            st.markdown(_pre_post_summary_pills(nr_pp_summary), unsafe_allow_html=True)
+            st.caption("Green = Match  Red = Mismatch  Format: PRE | POST")
+            st.markdown(render_cell_pre_post_table(nr_pp_rows, [
+                ("cellid", "_cellid_ok", "Cell ID"), ("dl", "_dl_ok", "ARFCN DL"), ("ul", "_ul_ok", "ARFCN UL"),
+                ("bw_dl", "_bw_dl_ok", "BW DL"), ("bw_ul", "_bw_ul_ok", "BW UL"), ("power", "_power_ok", "TX Power"),
+                ("ssb", "_ssb_ok", "SSB Frequency"), ("rru", "_rru_ok", "RRU Model"),
+            ]), unsafe_allow_html=True)
+        else:
+            st.caption("Upload Pre kget-all logs to see the LTE/5G cell-level Pre vs Post tables.")
+
         section_title("Parameters — 4G (Pre vs CIQ)")
         st.markdown(render_table(results.get("params_4g", []), status_key="status"), unsafe_allow_html=True)
         section_title("Parameters — 5G (Pre vs CIQ)")
