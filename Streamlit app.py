@@ -695,72 +695,10 @@ with tab_audit:
             ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
 
-        section_title("Sanity checks (CIQ-only — no Pre/EDP/RFDS needed)")
-        check_rows = (results.get("pci_4g", []) + results.get("pci_5g", []) + results.get("antenna", [])
-                      + results.get("port_uniqueness", []) + results.get("sef_fru", []) + results.get("radio_sharing", []))
-        for nid in checked_nodes:
-            check_rows += cs.check_radio_port_conflict(nid, ciq_wb)
-        st.markdown(render_table(check_rows, columns=[("rule", "Rule"), ("node", "Node"), ("cell", "Cell"),
-                                                        ("status", "Status"), ("note", "Note")]),
-                    unsafe_allow_html=True)
-        n_bad = sum(1 for r in check_rows if r.get("status") == "MISMATCH")
-        st.caption(f"{len(check_rows)} check(s) — {n_bad} mismatch(es).")
-
         with st.expander("Raw eUtran Parameters / 5G Info"):
-            st.markdown("**eUtran Parameters (LTE)**")
-            st.markdown(render_table(cv.build_param_table(ciq_wb, "eUtran Parameters", cv.LTE_PARAM_COLS), status_key=None),
-                        unsafe_allow_html=True)
             st.markdown("**5G Info**")
             st.markdown(render_table(cv.build_param_table(ciq_wb, "5G Info", cv.NR_PARAM_COLS), status_key=None),
                         unsafe_allow_html=True)
-
-        section_title("Antenna model vs RFDS")
-        if rfds_pages is None:
-            st.caption("Upload an RFDS PDF to compare antenna models.")
-        else:
-            rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages)
-            if not rf_antennas:
-                st.caption("No 'RF Inventory Details (Final)' antenna rows found in this RFDS PDF.")
-            else:
-                ciq_ant_by_cell = {}
-                if "eUtran Parameters" in ciq_wb.sheetnames:
-                    for r in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]):
-                        c = r.get("EutranCellFDDId")
-                        if c:
-                            ciq_ant_by_cell[c] = r.get("antenna model")
-
-                ant_rows, seen_groups = [], set()
-                for ant in rf_antennas.values():
-                    key = tuple(ant["shared_cells"])
-                    if key in seen_groups:
-                        continue
-                    seen_groups.add(key)
-                    ciq_models = {ciq_ant_by_cell.get(c) for c in ant["shared_cells"] if ciq_ant_by_cell.get(c)}
-                    if len(ciq_models) == 1:
-                        ciq_display = next(iter(ciq_models))
-                        tier, detail = ar.resolve_antenna(ciq_display, ant["model"])
-                    elif ciq_models:
-                        ciq_display = ", ".join(sorted(ciq_models))
-                        tier, detail = "MULTIPLE CIQ VALUES", "Cells in this group don't all report the same CIQ antenna model."
-                    else:
-                        ciq_display, tier, detail = "—", "N/A", ""
-                    ant_rows.append({"cells": ", ".join(ant["shared_cells"]), "ciq_antenna": ciq_display,
-                                      "rfds_model": ant["model"], "match_tier": tier, "detail": detail})
-                st.markdown(render_table(ant_rows, columns=[("cells", "Cells"), ("ciq_antenna", "CIQ Antenna"),
-                                                              ("rfds_model", "RFDS Model"),
-                                                              ("match_tier", "Match Tier"), ("detail", "Detail")],
-                                          status_key=None),
-                            unsafe_allow_html=True)
-                st.caption("Cells on the same row share one physical antenna. AIR-series radios (integrated antenna) "
-                           "have no separate ANTENNA row in the RFDS, so they don't appear here.")
-
-        section_title("FA Code follow-up email")
-        fa = site_details.get("fa_code") or "UNKNOWN"
-        n_mismatch = sum(1 for r in check_rows if r.get("status") == "MISMATCH")
-        subject = f"FA {fa} — CIQ checks: {n_mismatch} mismatch(es) found"
-        body = (f"FA Code: {fa}%0D%0ANodes: {', '.join(checked_nodes)}%0D%0A"
-                f"CIQ sanity checks found {n_mismatch} mismatch(es) out of {len(check_rows)} — see attached export.")
-        st.link_button("✉️ Compose FA-code email", f"mailto:?subject={subject}&body={body}")
 
     with sub_audit:
         if not node_logs_text:
