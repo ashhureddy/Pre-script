@@ -178,27 +178,31 @@ def _extract_sector_carrier_numbers(text):
 
 def build_nr_cell_rows(node_id, text):
     """Node, Cell, RRUs, TX, RX, SEF RFBRANCHES — matches QUICKIX HTML's
-    5G NR Cells table. TX/RX use noOfUsedTxAntennas/noOfUsedRxAntennas
-    (extract_nr_used_antennas) rather than the configured max — confirmed
-    against a real AAS/massive-MIMO node where the configured-max columns
-    report 0 while the used-antenna columns report the real active count."""
+    5G NR Cells table. TX/RX use noOfTxAntennas/noOfRxAntennas (the
+    configured-max fields, via _extract_sector_config_5g) per explicit
+    instruction — NOT noOfUsedTxAntennas/noOfUsedRxAntennas.
+
+    Note: on AAS/massive-MIMO radios these configured-max fields report 0
+    for every carrier on the node regardless of whether that carrier is
+    actually healthy or faulted (confirmed: FSL00877/FSL02877/FSL04877 all
+    show 0/0 here even though FSL02877's carrier is the only one of the
+    three with a real resource-activation fault — the used-antenna fields
+    are what actually distinguish healthy from faulted there). This
+    function intentionally does not surface that distinction; it shows
+    exactly what was asked for."""
     cells = sorted(c for c in pci.extract_pre_cells_for_node(text) if bl.is_5g_cell(c))
     fru_by_cell = pe.extract_cell_to_fru(text)
     cfg_by_cell = cs._extract_sector_config_5g(text)
-    used_by_cell = pe.extract_nr_used_antennas(text)
     branch_refs = pe.extract_rf_branch_refs(text)
 
     rows = []
     for cell in cells:
         cfg = cfg_by_cell.get(cell)
-        used = used_by_cell.get(cell)
         refs = branch_refs.get(cell, {})
-        tx = used["tx"] if used else (cfg["tx"] if cfg else "-")
-        rx = used["rx"] if used else (cfg["rx"] if cfg else "-")
         rows.append({
             "node": node_id, "cell": cell,
             "rru": fru_by_cell.get(cell, "-"),
-            "tx": tx, "rx": rx,
+            "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
             "sef_rfbranches": refs.get("sef_branches") or "-",
         })
     return rows
