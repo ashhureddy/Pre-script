@@ -668,8 +668,32 @@ with tab_audit:
             ]), unsafe_allow_html=True)
 
     with sub_ciq:
+        import ciq_checks as cc
+
         section_title("Node Integration")
-        st.markdown(render_table(cv.build_node_integration(ciq_wb), status_key=None), unsafe_allow_html=True)
+        st.markdown(render_table(cv.build_node_integration(ciq_wb), status_key=None, columns=[
+            ("node", "Node"), ("eNBId", "ENBID"), ("eNodeB", "ENODEB"), ("gNBId", "GNBID"), ("gNodeB", "GNODEB"),
+            ("mode", "Mode"), ("bb_type", "BB Type"), ("mme_region", "MME Region"), ("enm", "ENM"),
+            ("xmu", "XMU"), ("ports", "Ports"),
+        ]), unsafe_allow_html=True)
+
+        ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb)
+        ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
+        cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows)
+
+        section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
+        st.markdown(render_table(ciq_lte_rows, status_key=None, columns=[
+            ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("electrical_tilt", "Electrical Tilt"),
+            ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"), ("link", "Link (Single/Doublelink)"),
+            ("comments_html", "Comments/Warning"),
+        ]), unsafe_allow_html=True)
+
+        section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
+        st.markdown(render_table(ciq_nr_rows, status_key=None, columns=[
+            ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
+            ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
+            ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
+        ]), unsafe_allow_html=True)
 
         section_title("Sanity checks (CIQ-only — no Pre/EDP/RFDS needed)")
         check_rows = (results.get("pci_4g", []) + results.get("pci_5g", []) + results.get("antenna", [])
