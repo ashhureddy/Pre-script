@@ -12,7 +12,7 @@ import re
 
 import ciq_edp_reader as cer
 
-from log_parser import find_command, all_rows, get_command_block, split_commands
+from log_parser import find_command, all_rows, get_command_block
 
 _SW_VERSION_RE = re.compile(
     r'Current SwVersion:\s*(?P<package>\S+)\s*\(\s*(?P<version>[^)]+?)\s*\)'
@@ -800,23 +800,30 @@ def extract_bearer_oam_ipv6(text):
       - Dual-tech (HXL04147): the 5G carrier's bearer router is STILL
         named 'LTE' (legacy reuse), OAM router 'OAM'.
 
-    Chain used (three separate hget/get commands, cross-referenced):
-      1. 'get Transport=1,VlanPort=' - each VlanPort's own vlanId AND its
-         reservedBy attribute, which names the Router+InterfaceIPv6 that
-         actually uses that VLAN (this is the only confirmed link between
-         a VlanPort and a specific router interface - there is no
-         attribute on the InterfaceIPv6 side pointing back to its VLAN).
-      2. 'get ip address' (or equivalently-worded get/hget for IPv6
-         addressing) - each AddressIPv6 record's own address/primaryAddress;
-         only the primaryAddress=true record is used, since an interface
-         can carry more than one AddressIPv6 child.
-      3. 'get NextHop=' (matched EXACTLY, not by substring - confirmed real
-         bug: a substring match against 'nexthop=' hits an EARLIER, empty
-         'get Router=PTP,RouteTableIPv6Static=1,Dst=1,NextHop=1' command
-         first, since get_command_block() returns the FIRST substring match
-         and that PTP-router command happens to appear first in the log
-         despite returning 0 MOs) - each NextHop's own address attribute,
-         which is the interface's default-router IPv6 address.
+    Chain used — VlanPort lookup stays scoped to its own command's block
+    (confirmed necessary: scanning the whole file let an unrelated VlanPort
+    with a matching reservedBy target win by appearing later — see the
+    setdefault comment below), while the IP-address and NextHop lookups
+    scan the whole raw log text rather than relying on matching one
+    specific command's block (get_command_block() only returns the FIRST
+    command whose text contains a given substring, which is fragile
+    against a differently-worded command or a different capture tool) —
+    same underlying MO chain, just searched for more broadly where that's
+    safe to do:
+      1. VlanPort records ('Transport=1,VlanPort=<id>' MO blocks, within
+         the 'Transport=1,VlanPort=' command's own output) - each one's
+         own vlanId AND its reservedBy attribute, which names the
+         Router+InterfaceIPv6 that actually uses that VLAN (this is the
+         only confirmed link between a VlanPort and a specific router
+         interface - there is no attribute on the InterfaceIPv6 side
+         pointing back to its VLAN).
+      2. AddressIPv6 records ('Router=X,InterfaceIPv6=Y,AddressIPv6=Z'
+         attribute rows), searched across the whole log - only the
+         primaryAddress=true record is used, since an interface can carry
+         more than one AddressIPv6 child.
+      3. NextHop records ('Router=X,RouteTableIPv6Static=1,Dst=1,
+         NextHop=1' attribute rows), searched across the whole log - the
+         interface's default-router IPv6 address.
 
     Returns a dict; any field this log's captured commands don't cover is
     None rather than guessed. VLAN IDs found this way should be expected
@@ -827,45 +834,48 @@ def extract_bearer_oam_ipv6(text):
     if not text:
         return {}
 
-    def _exact_command_block(exact_cmd):
-        target = exact_cmd.lower().strip()
-        for node, cmd, block in split_commands(text):
-            if cmd.lower().strip() == target:
-                return block
-        return None
-
-    vlan_block = get_command_block(text, 'Transport=1,VlanPort=') or ''
     router_iface_to_vlan = {}
+    vlan_block = get_command_block(text, 'Transport=1,VlanPort=') or ''
     for rec in re.split(r'\n(?=\d+ +Transport=1,VlanPort=)', vlan_block):
+        header_m = re.match(r'^\d+ +Transport=1,VlanPort=\S+', rec)
+        if not header_m:
+            continue
         vlan_m = re.search(r'^vlanId\s+(\S+)', rec, re.M)
         rb_m = re.search(r'>>> reservedBy = (?:[A-Za-z]+=\S+?,)*?(Router=\S+?,InterfaceIPv6=\S+)', rec)
         if vlan_m and rb_m:
-            router_iface_to_vlan[rb_m.group(1)] = vlan_m.group(1)
+            # setdefault, not assignment: confirmed real case (HXL00147) where
+            # a SECOND, unrelated VlanPort (ULCoMP - a CoMP-signaling VLAN,
+            # vlanId=1) ALSO lists 'reservedBy = Router=vr_OAM,InterfaceIPv6=1',
+            # the same interface as the genuine OAM bearer VLAN (211). A plain
+            # assignment let ULCoMP's later-appearing record overwrite the
+            # correct one, since dict[key]=value always keeps the LAST match
+            # in file order; setdefault keeps the FIRST, which is the real
+            # OAM VLAN in every log checked (HXL00147/HXIN090147F/HXL04147/
+            # TNL04504/OKL00082/OKTN000082) — the real bearer/OAM VlanPorts
+            # are numbered low (2xx) and listed before feature VLANs like
+            # ULCoMP/ERAN in this command's own output order.
+            router_iface_to_vlan.setdefault(rb_m.group(1), vlan_m.group(1))
 
     bearer_key = next((k for k in router_iface_to_vlan if re.match(r'Router=(?:LTE|NR),InterfaceIPv6=', k)), None)
     oam_key = next((k for k in router_iface_to_vlan if re.match(r'Router=(?:vr_OAM|OAM),InterfaceIPv6=', k)), None)
     bearer_vlan = router_iface_to_vlan.get(bearer_key)
     oam_vlan = router_iface_to_vlan.get(oam_key)
 
-    ip_block = get_command_block(text, 'ip address') or ''
-
     def _primary_address(router_iface_key):
         if not router_iface_key:
             return None
         pat = re.escape(router_iface_key) + r',AddressIPv6=\d+\s+primaryAddress\s+true'
-        if not re.search(pat, ip_block):
+        if not re.search(pat, text):
             return None
-        addr_m = re.search(re.escape(router_iface_key) + r',AddressIPv6=\d+\s+address\s+(\S+)', ip_block)
+        addr_m = re.search(re.escape(router_iface_key) + r',AddressIPv6=\d+\s+address\s+(\S+)', text)
         return addr_m.group(1) if addr_m else None
 
     bearer_ip = _primary_address(bearer_key)
     oam_ip = _primary_address(oam_key)
 
-    nh_block = _exact_command_block('get NextHop=') or ''
-
     def _nexthop_address(router_name):
         pat = rf'Router={re.escape(router_name)},RouteTableIPv6Static=1,Dst=1,NextHop=1\s*\n=+\naddress\s+(\S+)'
-        m = re.search(pat, nh_block)
+        m = re.search(pat, text)
         return m.group(1) if m else None
 
     bearer_router_ip = _nexthop_address('LTE') or _nexthop_address('NR')
