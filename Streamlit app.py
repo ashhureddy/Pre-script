@@ -1191,6 +1191,19 @@ with tab_edp:
         ("IPV6_ENODEB_OAM_IP", "IPV6_ENODEB_OAM_IP"),
     ]), unsafe_allow_html=True)
 
+    section_title("Pre vs EDP — Bearer & OAM IPv6/VLAN")
+    if not node_logs_text:
+        st.caption("Upload Pre kget-all logs to compare these fields against EDP.")
+    else:
+        pre_edp_rows = rc.build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows)
+        if not pre_edp_rows:
+            st.caption("No Pre log matched any Primary/Secondary node for this run.")
+        else:
+            st.markdown(render_table(pre_edp_rows, status_key="status", columns=[
+                ("node", "Node"), ("role", "Role"), ("field", "Field"),
+                ("pre_value", "Pre Value"), ("edp_value", "EDP Value"),
+            ]), unsafe_allow_html=True)
+
     section_title("Board Type (CIQ vs EDP vs RFDS)")
     st.markdown(render_table(results.get("board_type", []), columns=[
         ("node", "Node"), ("ciq_du_type", "CIQ DU Type"), ("edp_model", "EDP Model"),
