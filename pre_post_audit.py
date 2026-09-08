@@ -65,43 +65,56 @@ def _norm_bb(v):
     return m.group(0) if m else s
 
 
-def build_node_pre_post(pre_summary_rows, ciq_node_rows, amos_sa_nsa_by_node):
+def build_node_pre_post(pre_summary_rows, ciq_node_rows, node_logs_text, edp_rows):
     """pre_summary_rows: amos_view.build_amos_tables()'s summary_rows (one
     dict per Pre node, with 'node' and 'sw_package').
     ciq_node_rows: ciq_view.build_node_integration()'s output (one dict per
     CIQ node, with 'node' and 'bb_type').
-    amos_sa_nsa_by_node: {node: sa_nsa_status string} from the same Pre
-    summary rows, passed separately so a node showing 'LTE Only' (this
-    project's own value; the HTML's own SA/NSA is always SA/NSA/'-') still
-    displays sensibly.
+    node_logs_text: {node_id: raw Pre log text}, passed straight to
+    checks_node.check_ptp_matrix() for the real A-G PTP verdict — this
+    replaces a hardcoded '-' placeholder that predated that check.
+    edp_rows: EDP sheet rows, also passed to check_ptp_matrix().
 
-    Returns a list of {node, status, type, ptp, sa_nsa} rows: type is one of
-    'change'/'nochange'/'delete'/'new', matching the HTML's row classes for
-    color coding (see PRE_POST_ROW_COLORS in the caller)."""
+    Returns a list of {node, status, type, ptp, _ptp_flag} rows: type is one
+    of 'change'/'nochange'/'delete'/'new', matching the HTML's row classes
+    for color coding (see PRE_POST_ROW_COLORS in the caller). _ptp_flag is
+    True when the PTP verdict itself represents an action item ('PTP should
+    be created' / 'PTP to be created'), used to highlight it red."""
+    import checks_node as cn
+
     pre_by_node = {_norm(r["node"].split(" / ")[0]): r for r in pre_summary_rows}
     ciq_by_node = {_norm(r["node"]): r for r in ciq_node_rows}
+
+    def _ptp_for(node_id, is_new_node):
+        log_text = (node_logs_text or {}).get(node_id)
+        rows = cn.check_ptp_matrix(node_id, log_text, edp_rows, is_new_node=is_new_node)
+        verdict = rows[0]["ptp"] if rows else "-"
+        flag = verdict in ("PTP should be created", "PTP to be created")
+        return verdict, flag
 
     result = []
     for key, p in pre_by_node.items():
         pre_bb = p.get("sw_package")
+        node_id = p["node"].split(" / ")[0]
         if key in ciq_by_node:
             fin_bb = ciq_by_node[key].get("bb_type")
             changed = _norm_bb(pre_bb) != _norm_bb(fin_bb)
             status = f"Board Changed: {pre_bb} \u2192 {fin_bb}" if changed else "No Board Change"
             row_type = "change" if changed else "nochange"
+            ptp, ptp_flag = _ptp_for(node_id, is_new_node=False)
         else:
             status, row_type = "Node Deleted", "delete"
-        sa_nsa = amos_sa_nsa_by_node.get(p["node"], "-")
+            ptp, ptp_flag = "\u2014", False
         result.append({
             "node": p["node"], "status": status, "type": row_type,
-            "ptp": "-",  # HTML itself shows '-' here too (title="Not yet derived from logs")
-            "sa_nsa": "\u2014" if row_type == "delete" else sa_nsa,
+            "ptp": ptp, "_ptp_flag": ptp_flag,
         })
 
     for key, c in ciq_by_node.items():
         if key not in pre_by_node:
+            ptp, ptp_flag = _ptp_for(c["node"], is_new_node=True)
             result.append({"node": c["node"], "status": "Newly Adding Node", "type": "new",
-                            "ptp": "-", "sa_nsa": "-"})
+                            "ptp": ptp, "_ptp_flag": ptp_flag})
     return result
 
 
