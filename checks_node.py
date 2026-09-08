@@ -318,3 +318,50 @@ def run_node_checks(node_id, log_text, ciq_wb, edp_rows, rfds_pages=None, rfds_b
     results.append(check_xmu_rfds_vs_ciq(node_id, enb_row, gnb_row, rfds_pages, rfds_bytes))
     results.append(check_tac(node_id, log_text, enb_row, has_pre_log))
     return results
+
+
+def check_ptp_matrix(node_id, log_text, edp_rows, is_new_node=False):
+    """Blueprint #30 — the A-G PTP decision matrix:
+
+        A) Pre PTP Enabled   + EDP no PTP  -> PTP should be created
+        B) Pre PTP Enabled   + EDP has PTP -> PTP to be created
+        C) Pre PTP Disabled  + EDP no PTP  -> PTP should not be created
+        D) Pre PTP Disabled  + EDP has PTP -> PTP should be created
+        E) Pre No PTP        + EDP no PTP  -> No PTP Needed
+        F) New Node          + EDP no PTP  -> No PTP Needed
+        G) New Node          + EDP has PTP -> PTP to be created
+
+    Pre state comes from amos_view.ptp_status() (Enabled/Disabled/Not
+    Present), EDP state from SIAD_PTP_VLAN_ID. run_validation.py previously
+    listed this in unavailable_notes as 'no PTP signal found in Pre kget-all
+    logs' — that was wrong; the Transport=1,Ptp=1 MO carries it and was
+    confirmed against real logs (HXL00147/HXL04147 Enabled, HXIN090147F
+    genuinely absent)."""
+    import amos_view as av
+
+    edp_rec = None
+    for r in (edp_rows or []):
+        if str(r.get('SITE_NAME') or '').strip().upper() == str(node_id).strip().upper():
+            edp_rec = r
+            break
+    edp_has_ptp = bool(edp_rec and str(edp_rec.get('SIAD_PTP_VLAN_ID') or '').strip())
+
+    if is_new_node or not log_text:
+        pre_state = 'New Node'
+    else:
+        pre_state = av.ptp_status(log_text)  # Enabled / Disabled / Not Present
+
+    if pre_state == 'New Node':
+        case, verdict = ('G', 'PTP to be created') if edp_has_ptp else ('F', 'No PTP Needed')
+    elif pre_state == 'Enabled':
+        case, verdict = ('B', 'PTP to be created') if edp_has_ptp else ('A', 'PTP should be created')
+    elif pre_state == 'Disabled':
+        case, verdict = ('D', 'PTP should be created') if edp_has_ptp else ('C', 'PTP should not be created')
+    else:  # Not Present
+        case, verdict = ('G', 'PTP to be created') if edp_has_ptp else ('E', 'No PTP Needed')
+
+    status = 'INFO' if verdict in ('No PTP Needed', 'PTP should not be created') else 'MISMATCH'
+    return [{'rule': '#30', 'node': node_id, 'cell': '-', 'status': status,
+             'ptp': verdict,
+             'note': f'Case {case}: Pre PTP = {pre_state}; EDP PTP = '
+                     f'{"present" if edp_has_ptp else "absent"} -> {verdict}'}]
