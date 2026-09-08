@@ -250,12 +250,19 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None):
             "comments": cell_comments,
             "comments_html": _format_warnings(cell_comments),
             "_enb_id": r.get("eNBId"), "_rru_type": r.get("RRU type"), "_radio_port": r.get("Radio Port"),
-            "_fru": r.get("RRU type"),  # LTE eUtran Parameters has no separate FRU column; RRU type is the
-                                          # only radio identifier available here, and it IS unique per physical
-                                          # unit on this sheet (confirmed: unlike 5G Info's RRU Type, which is
-                                          # a shared model name, eUtran Parameters doesn't carry a second model-
-                                          # only column, so this project's own RRU type values here already
-                                          # play the FRU role Pre checks gets from extract_cell_to_fru()).
+            # RIport (DUS/XMU + Port + Port Expansion) is the real per-
+            # physical-radio identifier on this sheet, NOT "RRU type" (a
+            # shared model name). Confirmed on a real CIQ: HXL00147_7A_1/
+            # 7B_1/7C_1 all report RRU type "RRUS 4449" but are three
+            # DIFFERENT physical radios on ports A/B/C respectively — using
+            # RRU type as the sharing/link key falsely flagged every
+            # same-model cross-sector trio as "sharing radio", which is
+            # normal, not a fault. HXL04147_2A_1/2A_3/9A_1 correctly share
+            # port "D,G" and ARE the same physical radio on the same sector
+            # carrying multiple carriers — a genuine, non-faulty case RIport
+            # still gets right where RRU type also happened to get it right
+            # by coincidence (same model, but here it's also the same radio).
+            "_fru": riport if riport != "-" else None,
         })
     return out
 
