@@ -223,9 +223,17 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None):
         if not t.is_integer():
             add(i, f'Electrical tilt is not integer for {r.get("EutranCellFDDId")} (value={tilt})')
 
-    # ── Antenna uniqueness — reuse this project's own confirmed check ──
+    # ── Antenna uniqueness — reuse this project's own confirmed check.
+    # MISMATCH only: MATCH means the pairing is correctly configured
+    # (shared where it should share, or unique where the 4890/8843
+    # exception requires it), which is not a warning and should not appear
+    # in the Comments/Warning column — confirmed real cases where the
+    # unconditional version below was flagging correctly-configured pairs
+    # ('shared', 'Unique - 4890 Radio') as if they were problems. ──
     antenna_notes = {}
     for res in cs.check_antenna_uniqueness(node_id="__all__", ciq_wb=ciq_wb):
+        if res.get("status") != "MISMATCH":
+            continue
         for cell in str(res.get("cell", "")).split(" / "):
             cell = cell.strip()
             if cell:
