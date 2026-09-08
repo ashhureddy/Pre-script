@@ -12,10 +12,16 @@ Categories (same as the HTML, same order):
   1. General note              (PCI/delay/attenuation/... should match PRE)
   2. Additions                 (new node / new band-sectors in existing node)
   3. Deletions                 (deleted node)
-  4. Board Swaps                (board_type EXPECTED rows)
-  5. Sector Movements           (sow['moved'], grouped by from/to node + band)
+  4. Board Swaps                (board_type EXPECTED rows; From:/To: read
+                                 real Pre board vs CIQ target, not EDP vs CIQ)
+  5. Sector Movements           (sow['moved'], grouped by from/to node +
+                                 SECTOR, combining every band sharing that
+                                 sector+node pair into one line)
   6. Radio Swaps / Dual-Link    (AMOS RRU vs CIQ RRU differs; AMOS Dual-Link
                                  but CIQ Single-Link)
+
+Retune comments are deliberately NOT generated (removed per instruction) —
+sow['retuned'] is left unused here even though the data is available.
 
 Each comment is {"text": str, "cls": str} exactly like the HTML's {text,cls}
 pairs, so the same rendering/grouping/CR-Desc logic can reuse the "cls" tag.
@@ -29,7 +35,7 @@ def _band_only(cell_name):
 
 
 def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amos_nr_rows=None,
-                             ciq_lte_rows=None, ciq_nr_rows=None):
+                             ciq_lte_rows=None, ciq_nr_rows=None, node_logs_text=None):
     """sow: sow_analysis.classify_carriers() output.
     results: run_validation's results dict (uses results['board_type']).
     checked_nodes: list of node ids in scope for this run.
@@ -37,6 +43,12 @@ def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amo
         output (Pre side) — used only for the Radio Swap / Dual-Link comparison.
     ciq_lte_rows/ciq_nr_rows: ciq_view.build_param_table() output for
         "eUtran Parameters"/"5G Info" (Post side) — same purpose.
+    node_logs_text: {node_id: raw Pre log text} — used for the Board Swap
+        comment's "From:" value (the real Pre-side board), replacing the
+        EDP-sourced value check_board_type() itself uses for its own
+        MATCH/MISMATCH verdict (that verdict is unaffected; only this
+        comment's displayed From:/To: values now read Pre vs CIQ instead
+        of EDP vs CIQ, per instruction).
     Returns a list of {"text": str, "cls": str} dicts, in the same category
     order the HTML tool uses.
     """
@@ -85,44 +97,55 @@ def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amo
             })
 
     # ── Board Swaps (planned/EXPECTED only — a real MISMATCH is a fault,
-    # reported elsewhere, not a scope-of-work comment) ──
+    # reported elsewhere, not a scope-of-work comment). From:/To: read the
+    # real Pre-side board (via node_logs_text) and the CIQ target
+    # (r['ciq_du_type']) directly — NOT the EDP value check_board_type()
+    # uses for its own status, per instruction that this comment should
+    # reflect Pre vs CIQ. ──
+    import pre_extract as pe
+    import log_parser as lp
+
+    def _pre_board_model(node_id):
+        text = (node_logs_text or {}).get(node_id)
+        if not text:
+            return None
+        boards = pe.extract_hardware(lp.parse_log(text)).get("boards") or []
+        return pe.model_token(boards[0]["model"]) if boards else None
+
     for r in results.get("board_type", []):
         if r.get("status") == "EXPECTED":
+            node = r.get("node")
+            pre_model = _pre_board_model(node) or r.get("edp_model", "NOT FOUND")
+            ciq_model = r.get("ciq_du_type", "NOT FOUND")
             comments.append({
-                "text": f"Board Swap on {r.get('node')} — {r.get('note', '').split('RFDS')[0].strip()}",
+                "text": f"Board Swap on {node} — From: {pre_model} To: {ciq_model}.",
                 "cls": "board-comment",
             })
     for r in results.get("board_type", []):
         if r.get("status") == "MATCH":
             comments.append({"text": f"No Board Swap on {r.get('node')}", "cls": "board-comment"})
 
-    # ── Sector Movements — group by (from_node, to_node, band), same as the
-    # HTML's lteMoveMap/nrMoveMap grouping (sector letter isn't tracked by
-    # classify_carriers()'s "moved" entries, so bands are grouped without a
-    # named sector — still says "delete <from> node" as a hint like the HTML). ──
+    # ── Sector Movements — group by (from_node, to_node, SECTOR), combining
+    # every band that moved with the same sector letter between the same
+    # two nodes into ONE line, e.g. '850_1/PCS_1/LTE_700/AWS_1/5G_850/WCS
+    # Alpha sectors moving from X to Y node' instead of one line per band.
+    # Previously grouped by band only (no sector shown at all) — sector
+    # letter comes from band_label()'s own second return value, which the
+    # cell name already carries; it just wasn't being read out before. ──
     move_groups = {}
     for m in sow.get("moved", []):
-        band = _band_only(m.get("cell"))
-        if not band:
+        cell = m.get("cell")
+        band, sector = band_label(cell) if cell else (None, None)
+        if not band or not sector:
             continue
-        key = (m.get("from_node"), m.get("to_node"), band)
-        move_groups.setdefault(key, 0)
-        move_groups[key] += 1
-    for (from_node, to_node, band), _count in move_groups.items():
+        key = (m.get("from_node"), m.get("to_node"), sector)
+        move_groups.setdefault(key, set()).add(band)
+    for (from_node, to_node, sector), bands in move_groups.items():
+        band_str = "/".join(sorted(bands))
         comments.append({
-            "text": f"{band} sectors moving from {from_node} to {to_node} node "
+            "text": f"{band_str} {sector} sectors moving from {from_node} to {to_node} node "
                     f"(Sector Movement — delete {from_node} node).",
             "cls": "move-comment",
-        })
-
-    # ── Retunes (this project's own extra signal — not in the HTML tool,
-    # but genuinely useful scope-of-work info the CIQ's Sector Del_Movement
-    # sheet already gives us for free) ──
-    for r in sow.get("retuned", []):
-        label = r.get("label") or "Unknown band"
-        comments.append({
-            "text": f"{label} sector retuned: {r.get('from')} -> {r.get('to')}.",
-            "cls": "",
         })
 
     # ── Radio Swap / Dual-Link mismatch: compare Pre (AMOS) RRU model per
