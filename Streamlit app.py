@@ -292,18 +292,19 @@ PRE_POST_ROW_COLORS = {
 
 
 def render_node_pre_post_table(rows):
-    """Node / Status / PTP / SA-NSA, whole-row background from row['type']."""
+    """Node / Status / PTP, whole-row background from row['type']."""
     if not rows:
         return '<div class="qkx-empty">Run validation with Pre logs and a CIQ to populate this.</div>'
-    head = "".join(f"<th>{h}</th>" for h in ("Node", "Status", "PTP", "SA/NSA"))
+    head = "".join(f"<th>{h}</th>" for h in ("Node", "Status", "PTP"))
     body = []
     for r in rows:
         bg = PRE_POST_ROW_COLORS.get(r["type"], "#ffffff")
         status_color = "#b45309" if r["type"] == "change" else "#0f1720"
+        ptp_color = "#991b1b" if r.get("_ptp_flag") else "#0f1720"
         body.append(
             f'<tr style="background:{bg};"><td>{esc(r["node"])}</td>'
             f'<td style="color:{status_color};font-weight:600;">{esc(r["status"])}</td>'
-            f'<td>{esc(r["ptp"])}</td><td>{esc(r["sa_nsa"])}</td></tr>'
+            f'<td style="color:{ptp_color};font-weight:600;">{esc(r["ptp"])}</td></tr>'
         )
     return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
@@ -994,8 +995,7 @@ with tab_audit:
         section_title("Pre vs Post")
         pre_summary_rows, _, _ = av.build_amos_tables(node_logs_text) if node_logs_text else ([], [], [])
         ciq_node_rows = cv.build_node_integration(ciq_wb)
-        sa_nsa_map = {r["node"]: r["sa_nsa_status"] for r in pre_summary_rows}
-        node_pre_post_rows = ppa.build_node_pre_post(pre_summary_rows, ciq_node_rows, sa_nsa_map)
+        node_pre_post_rows = ppa.build_node_pre_post(pre_summary_rows, ciq_node_rows, node_logs_text, edp_rows)
         st.markdown(render_node_pre_post_table(node_pre_post_rows), unsafe_allow_html=True)
 
         if node_logs_text:
