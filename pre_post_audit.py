@@ -203,15 +203,24 @@ def _extract_sector_carrier_index(text):
 
 
 def compare_lte_cell_level(node_logs_text, ciq_wb):
-    """Returns a list of row dicts, one per LTE cell in CIQ plus any
-    Pre-only cell CIQ no longer has (Cell Deleted). Cross-verified against
-    compareCellLevel(): for every CIQ cell, find its Pre match by SUFFIX; if
-    none, 'Newly Adding Cell'; if the PREFIX also changed, 'Sector moved:
-    X -> Y'; otherwise 'No Sector Movement'. Every field is a (text,
-    is_match) pair from _cmp()/_cmp_sector_id(), ready for color rendering."""
+    """Returns a list of row dicts, one per LTE cell in CIQ. Cross-verified
+    against compareCellLevel(): for every CIQ cell, find its Pre match by
+    SUFFIX; if none, 'Newly Adding Cell'; if the PREFIX also changed,
+    'Sector moved: X -> Y'; otherwise 'No Sector Movement'. Every field is a
+    (text, is_match) pair from _cmp()/_cmp_sector_id(), ready for color
+    rendering.
+
+    Only CIQ cells are shown (per instruction) - a Pre cell with no CIQ
+    counterpart is no longer appended as a synthetic 'Cell Deleted' row.
+
+    TAC comes from the eNB Info sheet (one row per node, keyed by eNBId) -
+    NOT eUtran Parameters, which has no TAC column at all (confirmed on a
+    real CIQ: 'eUtran Parameters' genuinely lacks a 'tac' field, so reading
+    c.get('tac') there always returned '-', regardless of what the Pre side
+    reported)."""
     amos = _amos_lte_index(node_logs_text)
     ciq_rows = cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]) if "eUtran Parameters" in ciq_wb.sheetnames else []
-    ciq_suffix_set = {_get_suffix(r.get("EutranCellFDDId") or r.get("Cell") or "") for r in ciq_rows}
+    enb_tac_by_id = {str(r.get("eNBId") or "").strip(): r.get("tac") for r in cer.enb_info_rows(ciq_wb)}
 
     result = []
     for c in ciq_rows:
@@ -225,10 +234,10 @@ def compare_lte_cell_level(node_logs_text, ciq_wb):
             comment, row_type = ("No Sector Movement", "nochange") if pre_pfx == final_pfx \
                 else (f"Sector moved: {pre_pfx} -> {final_pfx}", "change")
 
-        ciq_port = c.get("DUS / XMU Port")
+        ciq_tac = enb_tac_by_id.get(str(c.get("eNBId") or "").strip())
         sc_text, sc_ok = _cmp_sector_id(_nz(match["SC"]) if match else "", c.get("sectorId"))
         cellid_text, cellid_ok = _cmp(_nz(match["CellID"]) if match else "", c.get("cellId"))
-        tac_text, tac_ok = _cmp(_nz(match["TAC"]) if match else "", c.get("tac"))
+        tac_text, tac_ok = _cmp(_nz(match["TAC"]) if match else "", ciq_tac)
         bw_text, bw_ok = _cmp(_nz(match["BW"]) if match else "", c.get("dlChannelBandwidth"))
         dl_text, dl_ok = _cmp(_nz(match["EARFCN_DL"]) if match else "", c.get("earfcnDl"))
         ul_text, ul_ok = _cmp(_nz(match["EARFCN_UL"]) if match else "", c.get("earfcnUl"))
@@ -246,18 +255,6 @@ def compare_lte_cell_level(node_logs_text, ciq_wb):
             "rx": rx_text, "_rx_ok": rx_ok, "rru": rru_text, "_rru_ok": rru_ok,
             "link": "-", "comment": comment, "row_type": row_type,
         })
-
-    for a in amos:
-        if _get_suffix(a["Cell"]) not in ciq_suffix_set:
-            result.append({
-                "node": a.get("Node", "-"), "cell": a["Cell"],
-                "sc": "-", "_sc_ok": None, "cellid": "-", "_cellid_ok": None,
-                "tac": "-", "_tac_ok": None, "bw": "-", "_bw_ok": None,
-                "dl": "-", "_dl_ok": None, "ul": "-", "_ul_ok": None,
-                "power": "-", "_power_ok": None, "tx": "-", "_tx_ok": None,
-                "rx": "-", "_rx_ok": None, "rru": "-", "_rru_ok": None,
-                "link": "-", "comment": "Cell Deleted", "row_type": "delete",
-            })
     return result
 
 
@@ -267,10 +264,12 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
     normNR()/getNRSuffix(); this project's NR cell names use the same
     '<prefix>_<sector-suffix>' shape as LTE ones (confirmed against real
     logs earlier in this project), so _get_suffix()/_get_prefix() apply
-    unchanged rather than needing a separate NR-specific normalizer."""
+    unchanged rather than needing a separate NR-specific normalizer.
+
+    Only CIQ cells are shown (per instruction) - a Pre cell with no CIQ
+    counterpart is no longer appended as a synthetic 'NR Cell Deleted' row."""
     amos = _amos_nr_index(node_logs_text)
     ciq_rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"]) if "5G Info" in ciq_wb.sheetnames else []
-    ciq_suffix_set = {_get_suffix(r.get("NRCellDU") or "") for r in ciq_rows}
 
     result = []
     for c in ciq_rows:
@@ -301,17 +300,6 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
             "ssb": ssb_text, "_ssb_ok": ssb_ok, "rru": rru_text, "_rru_ok": rru_ok,
             "link": "-", "comment": comment, "row_type": row_type,
         })
-
-    for a in amos:
-        if _get_suffix(a["Cell"]) not in ciq_suffix_set:
-            result.append({
-                "node": a.get("Node", "-"), "cell": a["Cell"],
-                "cellid": "-", "_cellid_ok": None, "dl": "-", "_dl_ok": None,
-                "ul": "-", "_ul_ok": None, "bw_dl": "-", "_bw_dl_ok": None,
-                "bw_ul": "-", "_bw_ul_ok": None, "power": "-", "_power_ok": None,
-                "ssb": "-", "_ssb_ok": None, "rru": "-", "_rru_ok": None,
-                "link": "-", "comment": "NR Cell Deleted", "row_type": "delete",
-            })
     return result
 
 
