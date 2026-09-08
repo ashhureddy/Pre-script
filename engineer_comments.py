@@ -140,24 +140,38 @@ def _build_engineer_comments_inner(sow, results, checked_nodes, amos_lte_rows=No
         boards = pe.extract_hardware(lp.parse_log(text)).get("boards") or []
         return pe.model_token(boards[0]["model"]) if boards else None
 
+    # ── Board Swaps: triggered by comparing Pre (actual current hardware)
+    # against CIQ (planned target) DIRECTLY — NOT by check_board_type()'s
+    # own status, which compares EDP vs CIQ and can say MATCH even when a
+    # real swap is needed. Confirmed real case: FCL04120's EDP had already
+    # been updated to CIQ's target (both show 6672) while the Pre log still
+    # showed the physical board as 5216 — check_board_type() correctly
+    # reported MATCH (EDP's paperwork agrees with CIQ) and this function
+    # used to trust that status, so it said "No Board Swap on FCL04120"
+    # even though the Audit tab's own Pre-vs-Post table (a genuine Pre-vs-
+    # CIQ comparison) correctly showed "Board Changed: 5216 -> 6672" for
+    # the same node. EDP-vs-CIQ and Pre-vs-CIQ are answering different
+    # questions ("has the paperwork caught up?" vs "does the hardware
+    # match the target?"); a scope-of-work comment about an upcoming swap
+    # needs the second one. ──
     for r in results.get("board_type", []):
-        if r.get("status") == "EXPECTED":
-            node = r.get("node")
-            try:
-                pre_model = _pre_board_model(node) or r.get("edp_model", "NOT FOUND")
-            except Exception:
-                # A malformed/unexpected Pre log for this one node should not
-                # take down the whole Engineer Comments block (this function
-                # runs on every validation run, even outside the Audit tab).
-                pre_model = r.get("edp_model", "NOT FOUND")
-            ciq_model = r.get("ciq_du_type", "NOT FOUND")
+        node = r.get("node")
+        ciq_model = r.get("ciq_du_type")
+        if not node or not ciq_model or ciq_model == "NOT FOUND":
+            continue
+        try:
+            pre_model = _pre_board_model(node)
+        except Exception:
+            pre_model = None
+        if pre_model is None:
+            continue  # no Pre log for this node - nothing to compare, stay silent rather than guess
+        if pre_model != ciq_model:
             comments.append({
                 "text": f"Board Swap on {node} — From: {pre_model} To: {ciq_model}.",
                 "cls": "board-comment",
             })
-    for r in results.get("board_type", []):
-        if r.get("status") == "MATCH":
-            comments.append({"text": f"No Board Swap on {r.get('node')}", "cls": "board-comment"})
+        else:
+            comments.append({"text": f"No Board Swap on {node}", "cls": "board-comment"})
 
     # ── Sector Movements — group by (from_node, to_node, SECTOR), combining
     # every band that moved with the same sector letter between the same
