@@ -923,7 +923,8 @@ with tab_audit:
         section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
         st.markdown(render_table(ciq_lte_rows, status_key=None, columns=[
             ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("electrical_tilt", "Electrical Tilt"),
-            ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
+            ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
+            ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
             ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
 
