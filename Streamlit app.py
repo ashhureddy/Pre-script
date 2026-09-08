@@ -1177,6 +1177,20 @@ with tab_edp:
                               columns=[("check", "Check"), ("status", "Status"), ("detail", "Detail")]),
                 unsafe_allow_html=True)
 
+    section_title("EDP Field Values — Primary & Secondary Nodes")
+    node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
+    edp_field_rows = rc.build_edp_field_table(edp_rows, node_role_list)
+    st.markdown(render_table(edp_field_rows, status_key=None, columns=[
+        ("node", "Node"), ("role", "Role"), ("SITE_NAME", "SITE_NAME"), ("CABINET", "CABINET"),
+        ("BBU_TYPE", "BBU_TYPE"), ("NODE_MODEL", "NODE_MODEL"), ("SIAD_PORT_SIZE_BBU", "SIAD_PORT_SIZE_BBU"),
+        ("SIAD_PORT_FACING_BBU", "SIAD_PORT_FACING_BBU"), ("BEARER_ENODEB_SB_VLAN_ID", "BEARER_ENODEB_SB_VLAN_ID"),
+        ("IPV6_SIAD_BEARER_IP_DEF_ROUTER", "IPV6_SIAD_BEARER_IP_DEF_ROUTER"),
+        ("IPV6_ENODEB_BEARER_IP", "IPV6_ENODEB_BEARER_IP"),
+        ("OAM_ENODEB_SIAD_OAM_VLAN", "OAM_ENODEB_SIAD_OAM_VLAN"),
+        ("IPV6_SIAD_OAM_IP_DEF_ROUTER", "IPV6_SIAD_OAM_IP_DEF_ROUTER"),
+        ("IPV6_ENODEB_OAM_IP", "IPV6_ENODEB_OAM_IP"),
+    ]), unsafe_allow_html=True)
+
     section_title("Board Type (CIQ vs EDP vs RFDS)")
     st.markdown(render_table(results.get("board_type", []), columns=[
         ("node", "Node"), ("ciq_du_type", "CIQ DU Type"), ("edp_model", "EDP Model"),
