@@ -102,33 +102,98 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   border-radius: 12px !important; box-shadow: 0 2px 10px rgba(1,42,78,0.06);
   padding: 4px 2px;
 }
-.stTabs [data-baseweb="tab-list"] { gap: 4px; }
-.stTabs [data-baseweb="tab"] { font-weight: 600; }
-.qkx-stat { text-align:center; border:1px solid #94a3b8; border-radius:4px; padding:8px; background:#fff; }
-.qkx-table-wrap { overflow-x:auto; border:1px solid #64748b; border-radius:0 0 8px 8px; margin: 0 0 22px 0; border-top:none; }
-.qkx-table { width:100%; border-collapse:collapse; font-size:12.8px; line-height:1.3; }
+.stTabs [data-baseweb="tab-list"] {
+  gap: 4px; border-bottom: 2px solid #dde5ef; padding-bottom: 0;
+}
+.stTabs [data-baseweb="tab"] {
+  font-weight: 700; font-size: 13.5px; color:#475569;
+  padding: 8px 16px; border-radius: 8px 8px 0 0;
+}
+.stTabs [aria-selected="true"] {
+  color:#101F90 !important; background:#eef1fb;
+  box-shadow: inset 0 -3px 0 #101F90;
+}
+div[data-testid="stExpander"] details {
+  border:1px solid #dde5ef !important; border-radius:10px !important;
+  background:#fff; box-shadow:0 2px 8px rgba(1,42,78,.05); margin-bottom:10px;
+}
+div[data-testid="stExpander"] summary {
+  font-weight:700 !important; font-size:13.5px !important; color:#101F90 !important;
+  padding:11px 14px !important;
+}
+div[data-testid="stExpander"] summary:hover { background:#f4f7fc; border-radius:10px; }
+.qkx-stat {
+  text-align:center; border:1px solid #dde5ef; border-radius:10px; padding:10px 8px;
+  background:#fff; box-shadow:0 2px 8px rgba(1,42,78,.05); font-size:12.5px;
+}
+.qkx-stat b { color:#64748b; font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; }
+.qkx-table-wrap {
+  overflow-x:auto; border:1px solid #dde5ef; border-radius:0 0 10px 10px;
+  margin: 0 0 22px 0; border-top:none; box-shadow:0 2px 8px rgba(1,42,78,.05);
+}
+.qkx-table { width:100%; border-collapse:collapse; font-size:12.8px; line-height:1.35; }
 .qkx-table th {
   background:#101F90; color:#ffffff; font-weight:700; text-align:left;
-  padding:7px 10px; border:1px solid #101F90; white-space:nowrap;
+  padding:8px 11px; border:none; border-right:1px solid rgba(255,255,255,.14);
+  white-space:nowrap; font-size:11.5px; letter-spacing:.03em; text-transform:uppercase;
+  position:sticky; top:0;
 }
-.qkx-table td { padding:6px 10px; border:1px solid #dde5ef; vertical-align:top; }
-.qkx-table tr:nth-child(even) td { background:#f8fafc; }
-.qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #334155; }
-.qkx-empty { padding:12px 4px; color:#64748b; font-style:italic; font-size:13px; }
+.qkx-table td { padding:7px 11px; border-bottom:1px solid #eef1f6; vertical-align:top; }
+.qkx-table tbody tr:hover td { background:rgba(16,31,144,.04); }
+.qkx-table.qkx-zebra tbody tr:nth-child(even) td { background:#f8fafc; }
+.qkx-table.qkx-zebra tbody tr:hover td { background:rgba(16,31,144,.06); }
+.qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #94a3b8; }
+.qkx-empty {
+  padding:16px; color:#64748b; font-style:italic; font-size:13px;
+  background:#fff; border:1px dashed #cbd5e1; border-radius:10px; text-align:center;
+}
 .qkx-section-title {
-  font-weight:700; font-size:14.5px; color:#101F90; margin: 22px 0 0 0;
-  padding:10px 14px; border:1px solid #64748b; border-bottom:none;
-  border-radius:8px 8px 0 0; background:#eef1fb;
+  font-weight:700; font-size:13.5px; color:#fff; margin: 22px 0 0 0;
+  padding:10px 14px; border:none;
+  border-radius:10px 10px 0 0;
+  background: linear-gradient(90deg, #101F90 0%, #1e3a8a 100%);
+  box-shadow:0 2px 6px rgba(16,31,144,.16);
 }
 .qkx-warn-line {
-  padding:6px 10px; margin-bottom:5px; border-radius:5px;
-  background:#fee2e2; color:#7f1d1d; font-size:12.5px; border:1px solid #fca5a5;
+  padding:8px 12px; margin-bottom:6px; border-radius:8px;
+  background:#fff5f5; color:#991b1b; font-size:12.5px;
+  border:1px solid #fecaca; border-left:3px solid #dc2626;
 }
 .qkx-cat-banner {
-  background:#101F90; color:#fff; font-weight:700; font-size:12.5px;
-  padding:6px 10px; border-radius:5px 5px 0 0; margin-top:12px;
+  background: linear-gradient(90deg, #101F90 0%, #1e3a8a 100%); color:#fff;
+  font-weight:700; font-size:13px; letter-spacing:.02em;
+  padding:9px 14px; border-radius:8px 8px 0 0; margin-top:22px;
+  display:flex; justify-content:space-between; align-items:center;
+  box-shadow:0 2px 6px rgba(16,31,144,.18);
 }
-.qkx-count-pill { font-size:11.5px; color:#334155; margin-right:14px; }
+.qkx-cat-counts { display:flex; gap:6px; align-items:center; }
+.qkx-cat-count {
+  font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:999px;
+  background:rgba(255,255,255,.16); color:#fff; white-space:nowrap;
+}
+.qkx-cat-count.ok   { background:#059669; }
+.qkx-cat-count.bad  { background:#dc2626; }
+.qkx-cat-count.man  { background:#d97706; }
+.qkx-cat-count.na   { background:rgba(255,255,255,.22); }
+
+/* Status chip — every check row carries one, so a status is readable at a
+   glance instead of relying on a pale row background alone. */
+.qkx-chip {
+  display:inline-block; font-size:10px; font-weight:800; letter-spacing:.05em;
+  padding:3px 9px; border-radius:999px; text-transform:uppercase;
+  white-space:nowrap; border:1px solid transparent;
+}
+.qkx-chip.match    { background:#d1fae5; color:#065f46; border-color:#6ee7b7; }
+.qkx-chip.mismatch { background:#fee2e2; color:#991b1b; border-color:#fca5a5; }
+.qkx-chip.manual   { background:#fef3c7; color:#92400e; border-color:#fcd34d; }
+.qkx-chip.info     { background:#dbeafe; color:#1d4ed8; border-color:#93c5fd; }
+.qkx-chip.unknown  { background:#f1f5f9; color:#64748b; border-color:#cbd5e1; }
+
+.qkx-count-pill {
+  font-size:11.5px; color:#334155; margin-right:6px;
+  background:#fff; border:1px solid #dde5ef; border-radius:999px;
+  padding:4px 11px; display:inline-block; margin-bottom:4px;
+}
 .qkx-title-badge {
   background:#101F90; color:#fff; font-weight:700; font-size:11px;
   padding:3px 10px; border-radius:999px; white-space:nowrap;
@@ -138,13 +203,20 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   display:flex; align-items:center; gap:8px;
 }
 .qkx-manual-tag {
-  background:#e2e8f0; color:#475569; font-size:9.5px; font-weight:700;
-  padding:2px 7px; border-radius:999px; letter-spacing:.04em;
+  background:#fef3c7; color:#92400e; font-size:9.5px; font-weight:800;
+  padding:2px 8px; border-radius:999px; letter-spacing:.05em;
+  border:1px solid #fcd34d;
 }
+.qkx-manual-item {
+  font-size:12.8px; font-weight:600; color:#0f1720;
+  padding:2px 0 6px 0;
+}
+.qkx-manual-detail { font-size:11.5px; color:#64748b; font-weight:400; }
 .qkx-sub-header {
-  font-size:12.5px; font-weight:700; color:#334155; text-transform:uppercase;
-  letter-spacing:.04em; margin:12px 0 4px 0;
-  border-left:3px solid #94a3b8; padding:2px 0 2px 8px;
+  font-size:12px; font-weight:800; color:#1e3a8a; text-transform:uppercase;
+  letter-spacing:.06em; margin:14px 0 6px 0;
+  border-left:3px solid #101F90; padding:3px 0 3px 9px;
+  background:linear-gradient(90deg,#eef1fb 0%,rgba(238,241,251,0) 100%);
 }
 </style>
 <div class="qkx-topbar">
@@ -185,7 +257,11 @@ def render_table(rows, columns=None, status_key="status", empty_msg="No data."):
         color, bg = STATUS_COLORS.get(str(r.get(status_key, "")), DEFAULT_COLOR) if status_key else DEFAULT_COLOR
         cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
         body.append(f'<tr style="background:{bg};color:{color};">{cells}</tr>')
-    return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
+    # Zebra striping only on uncoloured tables: a `td` background paints over
+    # the row's inline `tr` background, so applying it globally would wash out
+    # every status colour.
+    zebra = " qkx-zebra" if not status_key else ""
+    return (f'<div class="qkx-table-wrap"><table class="qkx-table{zebra}"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
@@ -437,6 +513,38 @@ def count_caption(rows, status_key="status", bad_value="MISMATCH", noun="row"):
 # run, manual rows get a real checkbox + comment box so the value survives
 # reruns and feeds the downloadable xlsx.
 # ══════════════════════════════════════════════════════════════════════
+def _chip(status):
+    """Status chip markup — every checklist row carries one so a status is
+    readable on its own, not only via a pale row background."""
+    cls = {"match": "match", "MATCH": "match", "PASS": "match",
+           "mismatch": "mismatch", "MISMATCH": "mismatch", "FAIL": "mismatch",
+           "manual": "manual", "MANUAL": "manual", "EXPECTED": "manual",
+           "info": "info", "INFO": "info",
+           }.get(status, "unknown")
+    return f'<span class="qkx-chip {cls}">{esc(STATUS_LABEL.get(status, status))}</span>'
+
+
+def render_checklist_rows(rows):
+    """Auto-check rows as one table: Status chip | Item | Detail. Separate
+    from render_table() because the status needs to be a visible chip column
+    rather than only a row background."""
+    if not rows:
+        return ""
+    head = '<th style="width:96px;">Status</th><th style="width:32%;">Item</th><th>Detail</th>'
+    body = []
+    for r in rows:
+        color, bg = STATUS_COLORS.get(r["status"], DEFAULT_COLOR)
+        body.append(
+            f'<tr style="background:{bg};">'
+            f'<td style="width:96px;">{_chip(r["status"])}</td>'
+            f'<td style="color:{color};font-weight:600;">{esc(r["item"])}</td>'
+            f'<td style="color:{color};">{esc(r.get("detail", ""))}</td></tr>'
+        )
+    return (f'<div class="qkx-table-wrap" style="border-radius:0 0 8px 8px;">'
+            f'<table class="qkx-table"><thead><tr>{head}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
 def render_rrnrbl_checklist(rows):
     if not rows:
         st.markdown('<div class="qkx-empty">Run validation to populate the checklist.</div>', unsafe_allow_html=True)
@@ -445,12 +553,13 @@ def render_rrnrbl_checklist(rows):
     counts = {}
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    order = ["mismatch", "manual", "match", "info", "unknown", "na"]
     pills = "".join(
-        f'<span class="qkx-count-pill"><b style="color:{STATUS_COLORS.get(k, DEFAULT_COLOR)[0]}">{v}</b> '
+        f'<span class="qkx-count-pill"><b style="color:{STATUS_COLORS.get(k, DEFAULT_COLOR)[0]}">{counts[k]}</b> '
         f'{esc(STATUS_LABEL.get(k, k))}</span>'
-        for k, v in counts.items()
+        for k in sorted(counts, key=lambda x: (order.index(x) if x in order else 99, x))
     )
-    st.markdown(f'<div style="margin-bottom:8px;">{pills}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="margin:2px 0 10px 0;">{pills}</div>', unsafe_allow_html=True)
 
     cats = []
     for r in rows:
@@ -459,46 +568,70 @@ def render_rrnrbl_checklist(rows):
         cats[-1]["rows"].append(r)
 
     for c in cats:
-        st.markdown(f'<div class="qkx-cat-banner">{esc(c["cat"])}</div>', unsafe_allow_html=True)
-        buf = []
-        last_sub = object()
-
-        def flush(buf=buf):
-            if buf:
-                st.markdown(
-                    render_table(buf, columns=[("item", "Item"), ("detail", "Detail")], status_key="status"),
-                    unsafe_allow_html=True,
-                )
-            buf.clear()
-
+        cc = {}
         for r in c["rows"]:
-            if r.get("sub") != last_sub:
-                flush()
-                if r.get("sub"):
-                    st.markdown(f'<div class="qkx-sub-header">{esc(r["sub"])}</div>', unsafe_allow_html=True)
-                last_sub = r.get("sub")
-            if r["status"] == "manual":
-                flush()
-                key = f'rrnrbl_{r["row"]}'
-                # Manual rows are bare Streamlit widgets (no table markup), so
-                # without an explicit container they sit directly on the page
-                # background and visually disappear next to the bordered auto-
-                # check tables. st.container(border=True) is used rather than a
-                # raw <div> wrapper because Streamlit renders each element into
-                # its own container — an opening <div> in one st.markdown call
-                # does NOT wrap widgets emitted by later calls.
+            cc[r["status"]] = cc.get(r["status"], 0) + 1
+        badge_map = [("mismatch", "bad"), ("manual", "man"), ("match", "ok")]
+        badges = "".join(
+            f'<span class="qkx-cat-count {klass}">{cc[key]} {esc(STATUS_LABEL.get(key, key))}</span>'
+            for key, klass in badge_map if cc.get(key)
+        )
+        other = sum(v for k, v in cc.items() if k not in ("mismatch", "manual", "match"))
+        if other:
+            badges += f'<span class="qkx-cat-count na">{other} other</span>'
+        st.markdown(
+            f'<div class="qkx-cat-banner"><span>{esc(c["cat"])}</span>'
+            f'<span class="qkx-cat-counts">{badges}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        # Within each sub-section, ALL auto rows render as one table and ALL
+        # manual rows as one card — rather than emitting them in raw blueprint
+        # order, which alternated table/card/table/card per row and shredded
+        # each category into ~28 fragments (measured). Partitioning this way
+        # drops it to ~20 while keeping the blueprint's own category and
+        # sub-section grouping intact, which is what the row order actually
+        # encodes; the manual/auto interleave within a sub-section does not
+        # carry meaning.
+        subs = []
+        for r in c["rows"]:
+            if not subs or subs[-1]["sub"] != r.get("sub"):
+                subs.append({"sub": r.get("sub"), "rows": []})
+            subs[-1]["rows"].append(r)
+
+        for s in subs:
+            if s["sub"]:
+                st.markdown(f'<div class="qkx-sub-header">{esc(s["sub"])}</div>', unsafe_allow_html=True)
+
+            auto_rows = [r for r in s["rows"] if r["status"] != "manual"]
+            man_rows = [r for r in s["rows"] if r["status"] == "manual"]
+
+            if auto_rows:
+                st.markdown(render_checklist_rows(
+                    [{"item": r["item"], "detail": r.get("detail", ""), "status": r["status"]} for r in auto_rows]
+                ), unsafe_allow_html=True)
+
+            if man_rows:
                 with st.container(border=True):
-                    st.markdown(f'<div class="qkx-manual-label">\u270e {esc(r["item"])}'
-                                f'<span class="qkx-manual-tag">MANUAL</span></div>', unsafe_allow_html=True)
-                    cc = st.columns([0.06, 0.94])
-                    with cc[0]:
-                        st.checkbox("Done", key=f"{key}_done", label_visibility="collapsed")
-                    with cc[1]:
-                        st.text_input("Comment", key=f"{key}_comment", label_visibility="collapsed",
-                                      placeholder="Comment / evidence…")
-            else:
-                buf.append({"item": r["item"], "detail": r.get("detail", ""), "status": r["status"]})
-        flush()
+                    st.markdown(f'<div class="qkx-manual-label">\u270e Manual verification'
+                                f'<span class="qkx-manual-tag">{len(man_rows)} ITEM'
+                                f'{"S" if len(man_rows) > 1 else ""}</span></div>', unsafe_allow_html=True)
+                    for i, mr in enumerate(man_rows):
+                        key = f'rrnrbl_{mr["row"]}'
+                        detail = mr.get("detail") or ""
+                        st.markdown(
+                            f'<div class="qkx-manual-item">{esc(mr["item"])}'
+                            + (f'<div class="qkx-manual-detail">{esc(detail)}</div>' if detail else "")
+                            + "</div>", unsafe_allow_html=True)
+                        col = st.columns([0.06, 0.94])
+                        with col[0]:
+                            st.checkbox("Done", key=f"{key}_done", label_visibility="collapsed")
+                        with col[1]:
+                            st.text_input("Comment", key=f"{key}_comment", label_visibility="collapsed",
+                                          placeholder="Comment / evidence…")
+                        if i < len(man_rows) - 1:
+                            st.markdown('<div style="height:1px;background:#eef1f6;margin:2px 0 6px 0;"></div>',
+                                        unsafe_allow_html=True)
 
 
 def collect_manual_overrides(checklist):
