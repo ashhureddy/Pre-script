@@ -101,16 +101,32 @@ def extract_cell_to_sef(text):
 def extract_cell_to_radio(text):
     """Cell -> Pre-side radio model, resolved through the full MO chain:
 
-        EUtranCellFDD -> SectorCarrier   ('hget SectorCarrier=|SectorEquipmentFunction ...')
-        SectorCarrier -> RfBranch refs   ('hget sector rfbranch')
-        RfBranch      -> FieldReplaceableUnit=RRU-N  ('hget rfbranch auport|rfportref')
-        RRU-N         -> product name    ('hget FieldReplaceableUnit product')
+        EUtranCellFDD/NRCellDU -> SectorCarrier/NRSectorCarrier
+                                            ('hget SectorCarrier=|SectorEquipmentFunction ...')
+        SectorCarrier   -> RfBranch refs   ('hget sector rfbranch')
+        RfBranch        -> FieldReplaceableUnit=RRU-N  ('hget rfbranch auport|rfportref')
+        RRU-N           -> product name    ('hget FieldReplaceableUnit product')
 
     An earlier version stopped at the SectorEquipmentFunction number because
     no SEF->RRU link was confirmed; the link does exist, just via RfBranch
     rather than SEF, so the Radio Type table showed '(SEF ...=2)' where the
-    engineer needed the actual radio. Returns {cell: 'RRUS 4449'} style
-    short model names, or {} when any command in the chain is absent."""
+    engineer needed the actual radio.
+
+    Falls back to the carrier's SectorEquipmentFunction's OWN rfBranchRef
+    when the carrier's own refs are empty — same confirmed real case as
+    extract_cell_to_fru(): an NR carrier co-sited with LTE carriers under
+    one shared SEF (e.g. FSL00877's NRSectorCarrier=FSNN090877_N005A_1,
+    whose own TX/RX refs are '[0]=' but which shares
+    SectorEquipmentFunction=1 with two LTE SectorCarriers; SEF=1's own
+    rfBranchRef correctly resolves to a real RRU). An earlier version of
+    this function had NO such fallback and NO NRSectorCarrier handling at
+    all in its two carrier-matching regexes (both were hardcoded to
+    'SectorCarrier=' only) — meaning it could never resolve ANY NR cell's
+    radio model, confirmed: HXIN010147_N002A_1/N005A_1 and
+    FSNN090877_N005A_1 all returned nothing before this fix.
+
+    Returns {cell: 'RRUS 4449'} style short model names, or {} when any
+    command in the chain is absent."""
     if not text:
         return {}
 
@@ -124,21 +140,45 @@ def extract_cell_to_radio(text):
                           get_command_block(text, 'rfbranch auport|rfportref') or '', re.M):
         branch_to_fru[m.group(1)] = m.group(2)
 
+    branch_block = get_command_block(text, 'sector rfbranch') or ''
     carrier_to_radio = {}
-    for m in re.finditer(r'^(SectorCarrier=\S+)\s+(.*)$',
-                          get_command_block(text, 'sector rfbranch') or '', re.M):
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+(.*)$', branch_block, re.M):
         refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
         models = {fru_product.get(branch_to_fru[r]) for r in refs if r in branch_to_fru}
         models.discard(None)
         if models:
             carrier_to_radio[m.group(1)] = sorted(models)[0]
 
-    # Cell -> SectorCarrier, from the reservedBy cross-reference block
+    sef_to_radio = {}
+    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$', branch_block, re.M):
+        rest = m.group(2)
+        refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', rest)
+        models = {fru_product.get(branch_to_fru[r]) for r in refs if r in branch_to_fru}
+        models.discard(None)
+        if not models:
+            # Direct FieldReplaceableUnit reference (AAS/integrated-antenna
+            # radios) - resolve straight to its product name, same fallback
+            # extract_cell_to_fru() uses for the FRU id itself.
+            for fru in re.findall(r'FieldReplaceableUnit=([^,\s]+)', rest):
+                if fru in fru_product:
+                    models.add(fru_product[fru])
+        if models:
+            sef_to_radio[m.group(1)] = sorted(models)[0]
+
+    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    sc_to_sef = {}
+    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+.*$', id_block, re.M):
+        sef_mo, rest = m.group(1), m.group(0)
+        for sc in re.findall(r'(?:SectorCarrier|NRSectorCarrier)=\S+', rest):
+            sc_to_sef[sc] = sef_mo
+
     result = {}
-    block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction')
-    for m in re.finditer(r'^(SectorCarrier=\S+)\s+(.*)$', block or '', re.M):
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+(.*)$', id_block, re.M):
         carrier, rest = m.group(1), m.group(2)
         radio = carrier_to_radio.get(carrier)
+        if not radio:
+            sef = sc_to_sef.get(carrier)
+            radio = sef_to_radio.get(sef) if sef else None
         if not radio:
             continue
         for cell in re.findall(r'EUtranCellFDD=(\S+)', rest):
