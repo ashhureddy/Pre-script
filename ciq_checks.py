@@ -254,6 +254,7 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None):
         out.append({
             "node": node_name, "cell": r.get("EutranCellFDDId"), "pci": r.get("PCI"),
             "electrical_tilt": r.get("electricalAntennaTilt"), "rbb_type": r.get("RBB type"),
+            "tx": r.get("noOfTxAntennas"), "rx": r.get("noOfRxAntennas"),
             "riport": riport, "link": "-",  # filled in by build_link_map()
             "comments": cell_comments,
             "comments_html": _format_warnings(cell_comments),
