@@ -1071,12 +1071,28 @@ with tab_audit:
         with c2:
             site_name_in = st.text_input("Site Name", placeholder="e.g. DOWNTOWN_EAST", key="cr_site_name")
         with c3:
-            fa_number_in = st.text_input("FA Number", placeholder="e.g. 1034567", key="cr_fa_number")
+            # Auto-fetched from the CIQ's own 5G Info 'FA Code' column
+            # (site_details['fa_code'] is always CIQ-sourced - see
+            # checks_node.build_site_details()) - still editable, since the
+            # user may need to override it.
+            fa_number_in = st.text_input("FA Number", value=site_details.get("fa_code") or "",
+                                          placeholder="e.g. 1034567", key="cr_fa_number")
         c4, c5 = st.columns(2)
         with c4:
             sw_version_in = st.text_input("Sw Version", placeholder="e.g. 25.Q4", key="cr_sw_version")
         with c5:
             link_in = st.text_input("Link", placeholder="link to CIQ / ticket / script", key="cr_link")
+
+        rfds_fa = site_details.get("rfds_fa_code")
+        if rfds_fa:
+            ciq_fa = site_details.get("fa_code")
+            if ciq_fa and rfds_fa != ciq_fa:
+                st.warning(f"FA Code mismatch — CIQ: `{ciq_fa}` vs RFDS: `{rfds_fa}`. "
+                           f"The field above uses the CIQ value; verify which is correct before sending.")
+            else:
+                st.caption(f"FA Code confirmed — CIQ and RFDS both report `{ciq_fa}`.")
+        elif rfds_pages is not None:
+            st.caption("RFDS was provided but no FA Code was found on it — CIQ value used, not cross-checked.")
 
         n1, n2 = st.columns(2)
         with n1:
@@ -1104,10 +1120,6 @@ with tab_audit:
         st.divider()
         email_text = build_radio_ret_email(sw_version_in, fa_number_in, link_in, engineer_comments)
         st.text_area("Radio/RET Comments Email", value=email_text, height=260, key="cr_email_area")
-        st.download_button("⬇️ Download CR description (.txt)", data=st.session_state.get("cr_output", "") or "(generate a CR description first)",
-                            file_name="cr_description.txt", mime="text/plain", key="dl_cr_text")
-        st.download_button("⬇️ Download Radio/RET email (.txt)", data=email_text,
-                            file_name="radio_ret_email.txt", mime="text/plain", key="dl_cr_email")
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 3 — EDP Validator
