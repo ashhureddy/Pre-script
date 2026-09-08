@@ -260,9 +260,23 @@ def extract_cell_to_fru(text):
             carrier_to_fru[m.group(1)] = ", ".join(sorted(frus))
     sef_to_fru = {}
     for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$', branch_block, re.M):
-        refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
+        rest = m.group(2)
+        refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', rest)
         frus = {branch_to_fru.get(r) for r in refs if r in branch_to_fru}
         frus.discard(None)
+        if not frus:
+            # AAS/integrated-antenna radios (confirmed: HXIN090147F) have NO
+            # AntennaUnitGroup/RfBranch chain at all - the SEF's own
+            # rfBranchRef names FieldReplaceableUnit=AAS-... directly
+            # ('SectorEquipmentFunction=...N077A_1 [1] =
+            # FieldReplaceableUnit=AAS-056284_N077A_1,Transceiver=1'). Without
+            # this direct-reference fallback, every AAS/CBAND cell on such a
+            # node reports no RRU at all, which is the bug this fallback
+            # fixes: CBAND sites can be served by either plain RRU-N radios
+            # (AUG/RfBranch chain) or AAS radios (direct FRU reference), and
+            # only the first case was previously handled.
+            direct = re.findall(r'FieldReplaceableUnit=([^,\s]+)', rest)
+            frus = set(direct)
         if frus:
             sef_to_fru[m.group(1)] = ", ".join(sorted(frus))
 
