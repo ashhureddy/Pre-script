@@ -654,6 +654,26 @@ def collect_manual_overrides(checklist):
 st.session_state.setdefault("has_run", False)
 
 
+def strip_ansi(text):
+    """Removes terminal control sequences from a raw log capture. Some Pre
+    kget-all logs are captured via a terminal client (e.g. PuTTY) with
+    color/bold formatting enabled, which wraps the node-id prompt in ANSI
+    codes: 'FCL04120> lt all' becomes '\\x1b[1mFCL04120\\x1b[0m> lt all'.
+    Every regex in this project that matches a prompt line expects it to
+    start with the bare node id, so without this the ANSI codes make
+    node_id_from_log()/split_commands() fail silently — the whole log then
+    parses to nothing, and node identification falls back to the uploaded
+    FILENAME (confirmed: a real PuTTY-captured log showed Node ID as
+    'FCL04120.txt', SW Version, BB Type, and all cell tables empty).
+    Applied once here, at the single point every uploaded log's raw bytes
+    are first decoded to text, so every downstream function (which all
+    receive already-decoded text) is unaffected regardless of capture tool."""
+    text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)  # CSI: colors, bold, cursor movement
+    text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)  # OSC: window title/icon name
+    text = re.sub(r'\x1b.', '', text)  # any remaining lone ESC + one char
+    return text
+
+
 def _tmp_path(data, suffix):
     tf = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     tf.write(data)
@@ -704,7 +724,7 @@ if not st.session_state["has_run"]:
     if st.button("▶ Run Validation", type="primary", disabled=not ready, use_container_width=True):
         node_logs_text = {}
         for u in (log_ups or []):
-            text = u.getvalue().decode("utf-8", errors="ignore")
+            text = strip_ansi(u.getvalue().decode("utf-8", errors="ignore"))
             nid = pe.node_id_from_log(text) or u.name
             node_logs_text[nid] = text
         with st.spinner("Running full validation…"):
@@ -1036,6 +1056,7 @@ with tab_audit:
             sow, results, checked_nodes,
             amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
             ciq_lte_rows=ciq_lte_rows, ciq_nr_rows=ciq_nr_rows,
+            node_logs_text=node_logs_text,
         )
 
     with sub_crdesc:
