@@ -218,6 +218,17 @@ div[data-testid="stExpander"] summary:hover { background:#f4f7fc; border-radius:
   border-left:3px solid #101F90; padding:3px 0 3px 9px;
   background:linear-gradient(90deg,#eef1fb 0%,rgba(238,241,251,0) 100%);
 }
+/* Spreadsheet-style grid for the RRNRBL checklist: real vertical column
+   borders on every cell (qkx-table's default only has horizontal row
+   borders), so merged Category/Sub-section cells (via rowspan) read as
+   genuine grouped spreadsheet cells rather than a plain list. */
+.qkx-grid td, .qkx-grid th {
+  border-right:1px solid #dde5ef;
+}
+.qkx-grid td:first-child, .qkx-grid td:nth-child(2) {
+  border-right:2px solid #cbd5e1;
+}
+.qkx-grid-wrap { margin-bottom:16px; }
 </style>
 <div class="qkx-topbar">
   <div><span class="qkx-logo">MAS<span>TEC</span></span><span class="qkx-title">QUICK IX — Pre-Script Validation</span></div>
@@ -525,25 +536,73 @@ def _chip(status):
     return f'<span class="qkx-chip {cls}">{esc(STATUS_LABEL.get(status, status))}</span>'
 
 
-def render_checklist_rows(rows):
-    """Auto-check rows as one table: Status chip | Item | Detail. Separate
-    from render_table() because the status needs to be a visible chip column
-    rather than only a row background."""
+def render_checklist_grid(rows, manual_values):
+    """One continuous spreadsheet-style grid for the WHOLE checklist:
+    Category | Sub-section | Item | Detail | Status, covering every row
+    (auto AND manual) in reading order. Category/Sub-section cells use
+    rowspan to merge consecutive identical values — the actual spreadsheet
+    "grouped cell" look, rather than repeating the same category name on
+    every row or breaking the table into one fragment per category (the
+    old render_rrnrbl_checklist() approach).
+
+    manual_values: {row_number: {"done": bool, "comment": str}} — the
+    CURRENTLY SAVED values for manual items (read from session_state by the
+    caller), so a manual row's Detail column shows what's actually been
+    entered so far instead of always looking blank. Manual rows remain
+    read-only in this grid; actually entering a comment still happens in
+    the separate fill-in section below (a raw HTML table cannot host a
+    live checkbox/text-input widget)."""
     if not rows:
-        return ""
-    head = '<th style="width:96px;">Status</th><th style="width:32%;">Item</th><th>Detail</th>'
+        return '<div class="qkx-empty">Run validation to populate the checklist.</div>'
+
+    # Precompute rowspans: for each row, how many rows below it (inclusive)
+    # share the same (cat) or (cat, sub) — 0 means "this row is covered by
+    # an earlier rowspan, emit no <td> for this column at all".
+    n = len(rows)
+    cat_span = [0] * n
+    sub_span = [0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j < n and rows[j]["cat"] == rows[i]["cat"]:
+            j += 1
+        cat_span[i] = j - i
+        i = j
+    i = 0
+    while i < n:
+        j = i
+        while j < n and rows[j]["cat"] == rows[i]["cat"] and rows[j].get("sub") == rows[i].get("sub"):
+            j += 1
+        sub_span[i] = j - i
+        i = j
+
+    head = ('<th style="width:15%;">Category</th><th style="width:15%;">Sub-section</th>'
+            '<th style="width:24%;">Item</th><th>Detail</th><th style="width:96px;">Status</th>')
     body = []
-    for r in rows:
-        color, bg = STATUS_COLORS.get(r["status"], DEFAULT_COLOR)
-        body.append(
-            f'<tr style="background:{bg};">'
-            f'<td style="width:96px;">{_chip(r["status"])}</td>'
-            f'<td style="color:{color};font-weight:600;">{esc(r["item"])}</td>'
-            f'<td style="color:{color};">{esc(r.get("detail", ""))}</td></tr>'
-        )
-    return (f'<div class="qkx-table-wrap" style="border-radius:0 0 8px 8px;">'
-            f'<table class="qkx-table"><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+    for idx, r in enumerate(rows):
+        status = r["status"]
+        color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
+        if status == "manual":
+            mv = manual_values.get(r["row"], {})
+            detail = mv.get("comment") or "—"
+            if mv.get("done"):
+                detail = f"\u2713 {detail}" if detail != "—" else "\u2713 Marked done"
+        else:
+            detail = r.get("detail", "")
+
+        cells = ""
+        if cat_span[idx] > 0:
+            cells += f'<td rowspan="{cat_span[idx]}" style="font-weight:700;vertical-align:top;background:#f8fafc;">{esc(r["cat"])}</td>'
+        if sub_span[idx] > 0:
+            sub_text = esc(r.get("sub")) if r.get("sub") else "\u2014"
+            cells += f'<td rowspan="{sub_span[idx]}" style="vertical-align:top;color:#475569;">{sub_text}</td>'
+        cells += (f'<td style="color:{color};font-weight:600;">{esc(r["item"])}</td>'
+                  f'<td style="color:{color};">{esc(detail)}</td>'
+                  f'<td style="width:96px;">{_chip(status)}</td>')
+        body.append(f'<tr style="background:{bg};">{cells}</tr>')
+
+    return (f'<div class="qkx-table-wrap qkx-grid-wrap"><table class="qkx-table qkx-grid">'
+            f'<thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>')
 
 
 def render_rrnrbl_checklist(rows):
@@ -562,77 +621,36 @@ def render_rrnrbl_checklist(rows):
     )
     st.markdown(f'<div style="margin:2px 0 10px 0;">{pills}</div>', unsafe_allow_html=True)
 
-    cats = []
-    for r in rows:
-        if not cats or cats[-1]["cat"] != r["cat"]:
-            cats.append({"cat": r["cat"], "rows": []})
-        cats[-1]["rows"].append(r)
+    manual_values = {
+        r["row"]: {
+            "done": st.session_state.get(f'rrnrbl_{r["row"]}_done', False),
+            "comment": st.session_state.get(f'rrnrbl_{r["row"]}_comment', ""),
+        }
+        for r in rows if r["status"] == "manual"
+    }
+    st.markdown(render_checklist_grid(rows, manual_values), unsafe_allow_html=True)
 
-    for c in cats:
-        cc = {}
-        for r in c["rows"]:
-            cc[r["status"]] = cc.get(r["status"], 0) + 1
-        badge_map = [("mismatch", "bad"), ("manual", "man"), ("match", "ok")]
-        badges = "".join(
-            f'<span class="qkx-cat-count {klass}">{cc[key]} {esc(STATUS_LABEL.get(key, key))}</span>'
-            for key, klass in badge_map if cc.get(key)
-        )
-        other = sum(v for k, v in cc.items() if k not in ("mismatch", "manual", "match"))
-        if other:
-            badges += f'<span class="qkx-cat-count na">{other} other</span>'
-        st.markdown(
-            f'<div class="qkx-cat-banner"><span>{esc(c["cat"])}</span>'
-            f'<span class="qkx-cat-counts">{badges}</span></div>',
-            unsafe_allow_html=True,
-        )
-
-        # Within each sub-section, ALL auto rows render as one table and ALL
-        # manual rows as one card — rather than emitting them in raw blueprint
-        # order, which alternated table/card/table/card per row and shredded
-        # each category into ~28 fragments (measured). Partitioning this way
-        # drops it to ~20 while keeping the blueprint's own category and
-        # sub-section grouping intact, which is what the row order actually
-        # encodes; the manual/auto interleave within a sub-section does not
-        # carry meaning.
-        subs = []
-        for r in c["rows"]:
-            if not subs or subs[-1]["sub"] != r.get("sub"):
-                subs.append({"sub": r.get("sub"), "rows": []})
-            subs[-1]["rows"].append(r)
-
-        for s in subs:
-            if s["sub"]:
-                st.markdown(f'<div class="qkx-sub-header">{esc(s["sub"])}</div>', unsafe_allow_html=True)
-
-            auto_rows = [r for r in s["rows"] if r["status"] != "manual"]
-            man_rows = [r for r in s["rows"] if r["status"] == "manual"]
-
-            if auto_rows:
-                st.markdown(render_checklist_rows(
-                    [{"item": r["item"], "detail": r.get("detail", ""), "status": r["status"]} for r in auto_rows]
-                ), unsafe_allow_html=True)
-
-            if man_rows:
-                with st.container(border=True):
-                    st.markdown(f'<div class="qkx-manual-label">\u270e Manual verification'
-                                f'<span class="qkx-manual-tag">{len(man_rows)} ITEM'
-                                f'{"S" if len(man_rows) > 1 else ""}</span></div>', unsafe_allow_html=True)
-                    for i, mr in enumerate(man_rows):
-                        key = f'rrnrbl_{mr["row"]}'
-                        detail = mr.get("detail") or ""
-                        st.markdown(
-                            f'<div class="qkx-manual-item">{esc(mr["item"])}'
-                            + (f'<div class="qkx-manual-detail">{esc(detail)}</div>' if detail else "")
-                            + "</div>", unsafe_allow_html=True)
-                        col = st.columns([0.06, 0.94])
-                        with col[0]:
-                            st.checkbox("Done", key=f"{key}_done", label_visibility="collapsed")
-                        with col[1]:
-                            st.text_input("Comment", key=f"{key}_comment", label_visibility="collapsed",
-                                          placeholder="Comment / evidence…")
-                        if i < len(man_rows) - 1:
-                            st.markdown('<div style="height:1px;background:#eef1f6;margin:2px 0 6px 0;"></div>',
-                                        unsafe_allow_html=True)
+    man_rows = [r for r in rows if r["status"] == "manual"]
+    if man_rows:
+        with st.expander(f"\u270e Fill in manual items ({len(man_rows)})", expanded=False):
+            last_cat = last_sub = object()
+            for i, mr in enumerate(man_rows):
+                if mr["cat"] != last_cat or mr.get("sub") != last_sub:
+                    st.markdown(f'<div class="qkx-sub-header">{esc(mr["cat"])}'
+                                + (f' \u2014 {esc(mr["sub"])}' if mr.get("sub") else "") + '</div>',
+                                unsafe_allow_html=True)
+                    last_cat, last_sub = mr["cat"], mr.get("sub")
+                key = f'rrnrbl_{mr["row"]}'
+                st.markdown(f'<div class="qkx-manual-item">{esc(mr["item"])}</div>', unsafe_allow_html=True)
+                col = st.columns([0.06, 0.94])
+                with col[0]:
+                    st.checkbox("Done", key=f"{key}_done", label_visibility="collapsed")
+                with col[1]:
+                    st.text_input("Comment", key=f"{key}_comment", label_visibility="collapsed",
+                                  placeholder="Comment / evidence…")
+                if i < len(man_rows) - 1:
+                    st.markdown('<div style="height:1px;background:#eef1f6;margin:2px 0 10px 0;"></div>',
+                                unsafe_allow_html=True)
 
 
 def collect_manual_overrides(checklist):
