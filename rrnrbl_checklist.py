@@ -642,15 +642,32 @@ def build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows):
     the 6 bearer/OAM fields — one row per node in node_role_list that has
     a Pre log available. A node with no uploaded Pre log is skipped (there
     is nothing to compare, not a MISMATCH)."""
+    import ipaddress
     import pre_extract as pe
 
+    def _ipv6_equal(a, b):
+        """Two IPv6 address strings are the SAME address even when written
+        differently — confirmed real case: Pre reports '...6:954:2' and EDP
+        reports '...6:0954:2' for the identical address (a zero-padded
+        hextet). A plain string compare after stripping '/64' called that a
+        mismatch; this parses both through ipaddress.IPv6Address so
+        zero-padding, letter case, and '::' compression differences are all
+        normalised before comparing. Falls back to the stripped-string
+        compare if either side fails to parse (e.g. a genuinely malformed
+        value), so a parse failure surfaces as its own mismatch rather than
+        silently passing."""
+        try:
+            return ipaddress.IPv6Address(a.split("/")[0]) == ipaddress.IPv6Address(b.split("/")[0])
+        except ValueError:
+            return a.split("/")[0] == b.split("/")[0]
+
     field_map = [
-        ("bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID", "Bearer VLAN"),
-        ("bearer_ip", "IPV6_ENODEB_BEARER_IP", "Bearer IPv6"),
-        ("bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "Bearer Default Router"),
-        ("oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN", "OAM VLAN"),
-        ("oam_ip", "IPV6_ENODEB_OAM_IP", "OAM IPv6"),
-        ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "OAM Default Router"),
+        ("bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID", "Bearer VLAN", False),
+        ("bearer_ip", "IPV6_ENODEB_BEARER_IP", "Bearer IPv6", True),
+        ("bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "Bearer Default Router", True),
+        ("oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN", "OAM VLAN", False),
+        ("oam_ip", "IPV6_ENODEB_OAM_IP", "OAM IPv6", True),
+        ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "OAM Default Router", True),
     ]
 
     out = []
@@ -662,17 +679,17 @@ def build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows):
         pre_vals = pe.extract_bearer_oam_ipv6(log_text)
         rows = cer.edp_rows_for_site(edp_rows, nid)
         edp_rec = rows[0] if rows else None
-        for pre_key, edp_key, label in field_map:
+        for pre_key, edp_key, label, is_ipv6 in field_map:
             pre_v = pre_vals.get(pre_key)
             edp_v = _norm(edp_rec.get(edp_key)) if edp_rec else None
             if pre_v is None and not edp_v:
                 continue  # neither side has data - nothing to show
-            # IPv6 addresses in the log carry a "/64" prefix-length suffix
-            # the EDP field does not; strip it before comparing so a real
-            # match isn't reported as a mismatch over formatting alone.
-            pre_cmp = pre_v.split("/")[0] if pre_v else pre_v
-            status = "match" if (pre_cmp and edp_v and pre_cmp == edp_v) else \
-                     ("unknown" if not pre_v or not edp_v else "mismatch")
+            if not pre_v or not edp_v:
+                status = "unknown"
+            elif is_ipv6:
+                status = "match" if _ipv6_equal(pre_v, edp_v) else "mismatch"
+            else:
+                status = "match" if pre_v == edp_v else "mismatch"
             out.append({
                 "node": nid, "role": entry["role"], "field": label,
                 "pre_value": pre_v or "Not found in Pre log",
