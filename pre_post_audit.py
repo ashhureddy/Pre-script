@@ -267,19 +267,43 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
     unchanged rather than needing a separate NR-specific normalizer.
 
     Only CIQ cells are shown (per instruction) - a Pre cell with no CIQ
-    counterpart is no longer appended as a synthetic 'NR Cell Deleted' row."""
+    counterpart is no longer appended as a synthetic 'NR Cell Deleted' row.
+
+    Node and the 'Sector moved' comment both use the PRIMARY (LTE-paired)
+    node name, not the raw gNodeB-style prefix baked into the NR cell name
+    itself - confirmed real case: FSNN090877_N005B_1's own prefix is
+    'FSNN090877', but its actual primary node is 'FSL00877' (from Mixed
+    Mode Info's gNBId mapping). Without this substitution both the Node
+    column and 'NR Sector moved: X -> Y' showed the 5G-only identity on
+    both sides, even though every other part of this project (Node Summary,
+    LTE Sector Movement comments) uses the primary node name."""
     amos = _amos_nr_index(node_logs_text)
     ciq_rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"]) if "5G Info" in ciq_wb.sheetnames else []
+
+    # Primary (LTE-paired) node name per gNBId, from Mixed Mode Info - same
+    # source ciq_checks._node_name_maps() reads. A gNBId with no Mixed Mode
+    # Info entry (a pure 5G-only node, no LTE pairing) falls back to the raw
+    # gNodeB-style prefix, since there is no primary name to substitute.
+    gnb_to_primary = {}
+    for m in cer.mixed_mode_rows(ciq_wb):
+        gnb = str(m.get("gNBId") or "").strip()
+        node = m.get("Node to be built as")
+        if gnb and node:
+            gnb_to_primary[gnb] = node
 
     result = []
     for c in ciq_rows:
         cell_full = c.get("NRCellDU") or ""
-        final_pfx, final_sfx = _get_prefix(cell_full), _get_suffix(cell_full)
+        raw_pfx, final_sfx = _get_prefix(cell_full), _get_suffix(cell_full)
+        final_pfx = gnb_to_primary.get(str(c.get("gNBId") or "").strip(), raw_pfx)
         match = next((a for a in amos if _get_suffix(a["Cell"]) == final_sfx), None)
         if not match:
             comment, row_type = "Newly Adding NR Cell", "new"
         else:
-            pre_pfx = _get_prefix(match["Cell"])
+            # match["Node"] is the Pre log's own dict key (already the
+            # LTE-style primary name, e.g. 'FSL02877') - NOT re-derived from
+            # the matched cell's own gNodeB-style prefix.
+            pre_pfx = match.get("Node") or _get_prefix(match["Cell"])
             comment, row_type = ("No Sector Movement", "nochange") if pre_pfx == final_pfx \
                 else (f"NR Sector moved: {pre_pfx} -> {final_pfx}", "change")
 
@@ -293,7 +317,7 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
         rru_text, rru_ok = _cmp(_nz(match["Model"]) if match else "", c.get("RRU Type") or c.get("RRU type"), is_rru=True)
 
         result.append({
-            "node": c.get("Node") or final_pfx, "cell": cell_full,
+            "node": final_pfx, "cell": cell_full,
             "cellid": cellid_text, "_cellid_ok": cellid_ok, "dl": dl_text, "_dl_ok": dl_ok,
             "ul": ul_text, "_ul_ok": ul_ok, "bw_dl": bwdl_text, "_bw_dl_ok": bwdl_ok,
             "bw_ul": bwul_text, "_bw_ul_ok": bwul_ok, "power": pwr_text, "_power_ok": pwr_ok,
