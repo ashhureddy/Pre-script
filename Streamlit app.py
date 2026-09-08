@@ -1022,7 +1022,9 @@ with tab_consolidated:
     with st.expander("CIQ Sanity Check", expanded=False):
         sanity_rows = (results.get("pci_4g", []) + results.get("pci_5g", []) + results.get("antenna", [])
                        + results.get("port_uniqueness", []) + results.get("sef_fru", [])
-                       + results.get("radio_sharing", []) + results.get("nbiot", []))
+                       + results.get("radio_sharing", []) + results.get("nbiot", [])
+                       + results.get("sector_id_4890", []) + results.get("rfbranch_per_aug", [])
+                       + results.get("dss", []) + results.get("ptp_matrix", []))
         st.markdown(render_table(sanity_rows, columns=[("rule", "Rule"), ("node", "Node"), ("cell", "Cell"),
                                                           ("status", "Status"), ("note", "Note")]),
                     unsafe_allow_html=True)
