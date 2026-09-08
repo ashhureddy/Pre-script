@@ -1151,23 +1151,32 @@ with tab_edp:
             mm_by_node[n] = m
     controller_ids = [r.get("Controller ID") for r in cer.sheet_rows_as_dicts(ciq_wb["Controller Info"])
                        if r.get("Controller ID")] if "Controller Info" in ciq_wb.sheetnames else []
+    # Primary AND Secondary node ids, not just checked_nodes (which only ever
+    # holds the Primary name — 'Node to be built as' — so every check below
+    # was silently skipping every Secondary physical node, e.g. HXIN010147
+    # paired with HXL04147, even though these check functions already have
+    # their own Primary/Secondary-aware logic via _edp_role() and were
+    # clearly written to validate both — they just never received the
+    # Secondary node's name as input.
+    node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
+    edp_check_node_ids = [n["node"] for n in node_role_list]
     checks = {
-        "Found in EDP": rc._edp_found_status(edp_rows, checked_nodes),
-        "Cabinet naming": rc._edp_cabinet_status(edp_rows, checked_nodes),
-        "Port size (BBU mode)": rc._edp_port_size_status(edp_rows, checked_nodes, mm_by_node),
-        "Port facing (Primary/Secondary)": rc._edp_port_facing_status(edp_rows, checked_nodes),
-        "Bearer VLAN clash": rc._edp_bearer_vlan_status(edp_rows, checked_nodes),
-        "IPv6 bearer addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_BEARER_FIELDS, "IPv6 bearer"),
-        "IPv6 OAM addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_OAM_FIELDS, "IPv6 OAM"),
+        "Found in EDP": rc._edp_found_status(edp_rows, edp_check_node_ids),
+        "Cabinet naming": rc._edp_cabinet_status(edp_rows, edp_check_node_ids),
+        "Port size (BBU mode)": rc._edp_port_size_status(edp_rows, edp_check_node_ids, mm_by_node),
+        "Port facing (Primary/Secondary)": rc._edp_port_facing_status(edp_rows, edp_check_node_ids),
+        "Bearer VLAN clash": rc._edp_bearer_vlan_status(edp_rows, edp_check_node_ids),
+        "IPv6 bearer addressing": rc._edp_group_status(edp_rows, edp_check_node_ids, rc.IPV6_BEARER_FIELDS, "IPv6 bearer"),
+        "IPv6 OAM addressing": rc._edp_group_status(edp_rows, edp_check_node_ids, rc.IPV6_OAM_FIELDS, "IPv6 OAM"),
         "Controller (ANCEQ)": rc._edp_controller_status(edp_rows, controller_ids),
-        "PTP configuration": rc._edp_ptp_status(edp_rows, checked_nodes),
+        "PTP configuration": rc._edp_ptp_status(edp_rows, edp_check_node_ids),
     }
     n_pass = sum(1 for s, _ in checks.values() if s == "match")
     n_fail = sum(1 for s, _ in checks.values() if s == "mismatch")
     n_unk = sum(1 for s, _ in checks.values() if s not in ("match", "mismatch"))
 
     s1, s2, s3, s4 = st.columns(4)
-    s1.markdown(f'<div class="qkx-stat"><b>{len(checked_nodes)}</b><br>Expected Nodes</div>', unsafe_allow_html=True)
+    s1.markdown(f'<div class="qkx-stat"><b>{len(edp_check_node_ids)}</b><br>Expected Nodes</div>', unsafe_allow_html=True)
     s2.markdown(f'<div class="qkx-stat"><b>{n_pass}</b><br>Pass</div>', unsafe_allow_html=True)
     s3.markdown(f'<div class="qkx-stat"><b>{n_fail}</b><br>Fail</div>', unsafe_allow_html=True)
     s4.markdown(f'<div class="qkx-stat"><b>{n_unk}</b><br>No data</div>', unsafe_allow_html=True)
@@ -1178,7 +1187,6 @@ with tab_edp:
                 unsafe_allow_html=True)
 
     section_title("EDP Field Values — Primary & Secondary Nodes")
-    node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
     edp_field_rows = rc.build_edp_field_table(edp_rows, node_role_list)
     st.markdown(render_table(edp_field_rows, status_key=None, columns=[
         ("node", "Node"), ("role", "Role"), ("SITE_NAME", "SITE_NAME"), ("CABINET", "CABINET"),
