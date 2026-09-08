@@ -735,11 +735,57 @@ rfds_pages = state["rfds_pages"]
 node_logs_text = state["node_logs_text"]
 sow = state["sow"]
 
-top_l, top_r = st.columns([1, 5])
+@st.dialog("Revision History", width="large")
+def _show_revision_history_dialog(ciq_wb):
+    sheet_name, rows = cer.read_revision_history(ciq_wb)
+    if not rows:
+        st.caption("No Revision History sheet found in this CIQ.")
+        return
+    # The sheet stacks TWO mini-tables with different headers (Version/
+    # Description/Updated Date/Updated By, then Date/Confirmations
+    # Received) — a header row is any row whose first two cells are both
+    # non-numeric-looking text, same detection QUICKIX's own renderer uses
+    # rather than assuming a fixed row count for the first table.
+    def _looks_like_header(row):
+        a, b = str(row[0]).strip(), str(row[1]).strip()
+        return bool(a) and bool(b) and not any(ch.isdigit() for ch in a[:1])
+
+    blocks, current = [], None
+    for row in rows:
+        if _looks_like_header(row):
+            current = {"header": row, "rows": []}
+            blocks.append(current)
+        elif current is not None:
+            current["rows"].append(row)
+        else:
+            current = {"header": ["", "", "", "", ""], "rows": [row]}
+            blocks.append(current)
+
+    for block in blocks:
+        # Keep every header column that has a label OR that any data row in
+        # this block actually uses (drops the sheet's trailing blank 5th
+        # column when nothing in the block ever fills it, without hiding a
+        # legitimately blank-labelled column that does have data).
+        n = len(block["header"])
+        used = [bool(str(block["header"][i]).strip()) or any(str(r[i]).strip() for r in block["rows"] if i < len(r))
+                for i in range(n)]
+        columns = [(i, str(block["header"][i]) or f"Col {i+1}") for i in range(n) if used[i]]
+        if not columns:
+            continue
+        st.markdown(render_table(
+            [dict(zip(range(n), r)) for r in block["rows"]],
+            columns=columns, status_key=None,
+        ), unsafe_allow_html=True)
+
+
+top_l, top_m, top_r = st.columns([1, 1, 4])
 with top_l:
     if st.button("🔄 New Validation Run", use_container_width=True):
         st.session_state.clear()
         st.rerun()
+with top_m:
+    if st.button("📜 Revision History", use_container_width=True):
+        _show_revision_history_dialog(ciq_wb)
 with top_r:
     bits = [f"Site ID: `{site_details.get('site_id') or '—'}`", f"FA Code: `{site_details.get('fa_code') or '—'}`",
             f"USID: `{site_details.get('usid') or '—'}`", f"Nodes: `{', '.join(checked_nodes) or '—'}`"]
