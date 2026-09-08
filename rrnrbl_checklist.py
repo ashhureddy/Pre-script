@@ -259,13 +259,21 @@ def _nr_sa_tac_status(ciq_wb):
 
 
 def _fa_code_status(site_details, ciq_wb):
-    rfds_fa = _norm(site_details.get("fa_code"))
+    """Compares the CIQ's own FA Code (site_details['fa_code'], always
+    CIQ-sourced per build_site_details()) against the RFDS-sourced value
+    (site_details['rfds_fa_code']) - NOT against itself. An earlier version
+    of this function read site_details.get('fa_code') and called it
+    'rfds_fa', but that key has never held the RFDS value (RFDS's own value
+    is never merged into 'fa_code' - see build_site_details()), so this was
+    silently comparing the CIQ FA Code against itself and never actually
+    checked RFDS at all."""
+    rfds_fa = _norm(site_details.get("rfds_fa_code"))
     if "5G Info" not in ciq_wb.sheetnames:
         return "unknown", "No 5G Info sheet (LTE-only build) to compare."
     rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"])
     ciq_fas = sorted({_norm(r.get("FA Code")) for r in rows if _norm(r.get("FA Code"))})
     if not rfds_fa:
-        return "mismatch", "FA Code not found on the RFDS Site Details / 5G Info page."
+        return "unknown", "No FA Code found on the RFDS Site Details page - not checked."
     if not ciq_fas:
         return "unknown", "No FA Code on the CIQ 5G Info sheet."
     bad = [f for f in ciq_fas if f != rfds_fa]
