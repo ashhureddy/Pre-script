@@ -185,8 +185,7 @@ def _build_engineer_comments_inner(sow, results, checked_nodes, amos_lte_rows=No
         try:
             band_str = "/".join(sorted(str(b) for b in bands if b))
             comments.append({
-                "text": f"{band_str} {sector} sectors moving from {from_node} to {to_node} node "
-                        f"(Sector Movement — delete {from_node} node).",
+                "text": f"{band_str} {sector} sectors moving from {from_node} to {to_node} node.",
                 "cls": "move-comment",
             })
         except Exception:
