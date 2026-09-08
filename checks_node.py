@@ -91,8 +91,17 @@ def build_site_details(ciq_wb, rfds_pages=None):
                 out[key] = rfds_details[key]
         # Cross-check: RFDS agrees with the CIQ on FA Code / USID? Disagreement
         # is worth surfacing rather than silently preferring one source.
+        # rfds_fa_code/rfds_usid are kept as their OWN keys (not merged into
+        # fa_code/usid) so a caller can compare CIQ vs RFDS explicitly —
+        # confirmed real bug this fixes: rrnrbl_checklist._fa_code_status()
+        # previously read site_details['fa_code'] expecting the RFDS value,
+        # but that key is always CIQ-sourced (see loop above), so it was
+        # comparing the CIQ FA Code against itself under an RFDS label and
+        # never actually consulting RFDS at all.
         for key in ('fa_code', 'usid'):
             rv = rfds_details.get(key)
+            if rv:
+                out[f'rfds_{key}'] = rv
             if rv and out.get(key) and rv != out[key]:
                 out.setdefault('conflicts', []).append(f'{key}: CIQ={out[key]} vs RFDS={rv}')
 
