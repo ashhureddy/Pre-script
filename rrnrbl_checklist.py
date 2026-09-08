@@ -566,3 +566,71 @@ def fill_checklist_xlsx(checklist, site_id_fa, engineer_name=None, sow=None, dat
     wb.save(buf)
     buf.seek(0)
     return _restore_native_checkboxes(buf.read(), template_path)
+
+
+EDP_FIELD_TABLE_COLUMNS = [
+    "SITE_NAME", "CABINET", "BBU_TYPE", "NODE_MODEL", "SIAD_PORT_SIZE_BBU",
+    "SIAD_PORT_FACING_BBU", "BEARER_ENODEB_SB_VLAN_ID", "IPV6_SIAD_BEARER_IP_DEF_ROUTER",
+    "IPV6_ENODEB_BEARER_IP", "OAM_ENODEB_SIAD_OAM_VLAN", "IPV6_SIAD_OAM_IP_DEF_ROUTER",
+    "IPV6_ENODEB_OAM_IP",
+]
+
+
+def build_primary_secondary_node_list(ciq_wb):
+    """One {node, role} entry per PHYSICAL node declared in Mixed Mode
+    Info — both the Primary (whichever of eNodeB/gNodeB Name matches 'Node
+    to be built as') and the Secondary (the other one), when both exist.
+
+    This does NOT reuse checked_nodes (run_validation.py's own node list):
+    checked_nodes only ever holds the PRIMARY name ('Node to be built as'),
+    so every existing EDP check in this module (_edp_found_status etc.,
+    all called with checked_nodes) has only ever looked up the primary
+    node's own EDP row — a real gap confirmed on a real dual-tech site:
+    HXL04147 (primary) and HXIN010147 (secondary) are two separate EDP
+    rows under different SITE_NAME values, and HXIN010147's row was never
+    looked up anywhere. This function is additive: it does not change
+    checked_nodes or any existing check, it only supplies both node names
+    for the field-value display table below."""
+    out = []
+    for m in cer.mixed_mode_rows(ciq_wb):
+        build_as = _norm(m.get("Node to be built as")).upper()
+        e_name = _norm(m.get("eNodeB Name"))
+        g_name = _norm(m.get("gNodeB Name"))
+        bbu_mode = _norm(m.get("BBU Mode")).upper()
+        if e_name and e_name.upper() == build_as:
+            primary, secondary = e_name, g_name
+        elif g_name and g_name.upper() == build_as:
+            primary, secondary = g_name, e_name
+        else:
+            primary, secondary = (e_name or g_name), (g_name if e_name else "")
+        if primary:
+            out.append({"node": primary, "role": "Primary"})
+        if secondary and bbu_mode != "SMBB":
+            out.append({"node": secondary, "role": "Secondary"})
+    return out
+
+
+def build_edp_field_table(edp_rows, node_role_list):
+    """One row per (node, role) in node_role_list, with the raw EDP field
+    values requested for a side-by-side view: SITE_NAME/CABINET/BBU_TYPE/
+    NODE_MODEL/SIAD_PORT_SIZE_BBU/SIAD_PORT_FACING_BBU/
+    BEARER_ENODEB_SB_VLAN_ID/IPV6_SIAD_BEARER_IP_DEF_ROUTER/
+    IPV6_ENODEB_BEARER_IP/OAM_ENODEB_SIAD_OAM_VLAN/
+    IPV6_SIAD_OAM_IP_DEF_ROUTER/IPV6_ENODEB_OAM_IP.
+
+    Uses the same per-node EDP row lookup (cer.edp_rows_for_site) every
+    other EDP check in this module uses, via node_role_list from
+    build_primary_secondary_node_list() so both Primary and Secondary
+    physical nodes get their OWN row looked up (see that function's
+    docstring for why this differs from every existing check's node list).
+    This is a raw-value DISPLAY table, not a new check."""
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        rec = rows[0] if rows else None
+        row = {"node": nid, "role": entry["role"]}
+        for col in EDP_FIELD_TABLE_COLUMNS:
+            row[col] = _norm(rec.get(col)) if rec else "NOT FOUND"
+        out.append(row)
+    return out
