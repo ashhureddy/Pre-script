@@ -36,6 +36,34 @@ def _band_only(cell_name):
 
 def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amos_nr_rows=None,
                              ciq_lte_rows=None, ciq_nr_rows=None, node_logs_text=None):
+    """Public entry point. Wraps _build_engineer_comments_inner() in a
+    top-level try/except: this function runs unconditionally on every
+    validation run (its result feeds CR Desc's auto-detected Nodes/Bands
+    even when the Audit tab is never opened), so an unhandled exception
+    anywhere inside it previously crashed the ENTIRE app on every tab, not
+    just Audit — confirmed by a real Streamlit Cloud TypeError whose
+    message was redacted, at the call site (not inside any specific
+    sub-block), meaning the failure could have originated in ANY part of
+    this function, including the Additions/Deletions/Radio-swap sections
+    that predate this session's changes. On any failure, returns just the
+    general note plus a visible error line, rather than taking the app
+    down."""
+    try:
+        return _build_engineer_comments_inner(
+            sow, results, checked_nodes, amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
+            ciq_lte_rows=ciq_lte_rows, ciq_nr_rows=ciq_nr_rows, node_logs_text=node_logs_text,
+        )
+    except Exception as e:
+        return [
+            {"text": "PCI, delay, attenuation, RACH, power, BW, EARFCN DL/UL for existing sectors "
+                     "should be as per PRE configuration.", "cls": ""},
+            {"text": f"Engineer Comments could not be fully generated ({type(e).__name__}: {e}). "
+                     f"Some scope-of-work lines may be missing.", "cls": ""},
+        ]
+
+
+def _build_engineer_comments_inner(sow, results, checked_nodes, amos_lte_rows=None, amos_nr_rows=None,
+                                    ciq_lte_rows=None, ciq_nr_rows=None, node_logs_text=None):
     """sow: sow_analysis.classify_carriers() output.
     results: run_validation's results dict (uses results['board_type']).
     checked_nodes: list of node ids in scope for this run.
@@ -115,7 +143,13 @@ def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amo
     for r in results.get("board_type", []):
         if r.get("status") == "EXPECTED":
             node = r.get("node")
-            pre_model = _pre_board_model(node) or r.get("edp_model", "NOT FOUND")
+            try:
+                pre_model = _pre_board_model(node) or r.get("edp_model", "NOT FOUND")
+            except Exception:
+                # A malformed/unexpected Pre log for this one node should not
+                # take down the whole Engineer Comments block (this function
+                # runs on every validation run, even outside the Audit tab).
+                pre_model = r.get("edp_model", "NOT FOUND")
             ciq_model = r.get("ciq_du_type", "NOT FOUND")
             comments.append({
                 "text": f"Board Swap on {node} — From: {pre_model} To: {ciq_model}.",
@@ -131,22 +165,32 @@ def build_engineer_comments(sow, results, checked_nodes, amos_lte_rows=None, amo
     # Alpha sectors moving from X to Y node' instead of one line per band.
     # Previously grouped by band only (no sector shown at all) — sector
     # letter comes from band_label()'s own second return value, which the
-    # cell name already carries; it just wasn't being read out before. ──
+    # cell name already carries; it just wasn't being read out before.
+    #
+    # Each entry is wrapped individually: a single malformed 'moved' row
+    # (e.g. band_label() raising on an unexpected cell-name shape) should
+    # skip that one row, not crash the whole function. ──
     move_groups = {}
     for m in sow.get("moved", []):
-        cell = m.get("cell")
-        band, sector = band_label(cell) if cell else (None, None)
-        if not band or not sector:
+        try:
+            cell = m.get("cell")
+            band, sector = band_label(cell) if cell else (None, None)
+            if not band or not sector:
+                continue
+            key = (m.get("from_node"), m.get("to_node"), sector)
+            move_groups.setdefault(key, set()).add(band)
+        except Exception:
             continue
-        key = (m.get("from_node"), m.get("to_node"), sector)
-        move_groups.setdefault(key, set()).add(band)
     for (from_node, to_node, sector), bands in move_groups.items():
-        band_str = "/".join(sorted(bands))
-        comments.append({
-            "text": f"{band_str} {sector} sectors moving from {from_node} to {to_node} node "
-                    f"(Sector Movement — delete {from_node} node).",
-            "cls": "move-comment",
-        })
+        try:
+            band_str = "/".join(sorted(str(b) for b in bands if b))
+            comments.append({
+                "text": f"{band_str} {sector} sectors moving from {from_node} to {to_node} node "
+                        f"(Sector Movement — delete {from_node} node).",
+                "cls": "move-comment",
+            })
+        except Exception:
+            continue
 
     # ── Radio Swap / Dual-Link mismatch: compare Pre (AMOS) RRU model per
     # cell against CIQ RRU model for the same cell suffix. Only meaningful
