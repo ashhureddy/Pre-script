@@ -393,11 +393,11 @@ def check_sef_fru(node_id, ciq_wb):
         sef = row.get('SectorEquipmentFunction')
         fru = row.get('RRU FieldReplaceableUnit')
 
-        if '6472' in rru_type or 'AIR' in rru_type.upper():
+        if '6472' in rru_type:
             # sharing expected - just record for cross-cell dup check below, not an error by itself
             results.append({'rule': '#9', 'node': node_id, 'cell': cell, 'status': 'INFO',
                              'rru_type': rru_type, 'sef': sef, 'fru': fru,
-                             'note': '6472/AIR radio - CBAND/DOD/DOD_BWE sharing this radio is expected.'})
+                             'note': '6472 radio - CBAND/DOD/DOD_BWE sharing this radio is expected.'})
         elif any(m in rru_type for m in ('6419', '6449')):
             dup = any(other is not row and other.get('SectorEquipmentFunction') == sef
                       for other in cband_dod_rows if is_cband_cell(other.get('NRCellDU')) or is_dod_cell(other.get('NRCellDU')))
@@ -420,12 +420,12 @@ def check_port_uniqueness(node_id, ciq_wb):
     (if XMU is present, its ports must not be reused by any other sector on
     that node - per confirmed addition).
 
-    Exemption: cells sharing a 6472/AIR radio (per rule #9's confirmed
+    Exemption: cells sharing a 6472 radio (per rule #9's confirmed
     sharing-is-expected logic) legitimately share the same physical ports too
     - e.g. a CBAND+DOD pair on one 6472 radio. Without this exemption, every
     such pair would false-positive here even though check_sef_fru() already
     confirms the sharing is correct. Cells are grouped into a shared-radio set
-    by (SectorEquipmentFunction, RRU Type) when RRU Type contains 6472/AIR."""
+    by (SectorEquipmentFunction, RRU Type) when RRU Type contains 6472."""
     fiveg_rows = _rows(ciq_wb, '5G Info')
     port_cols = ['Port 1', 'Port 2', 'Port 3', 'Port 4']
 
@@ -476,10 +476,10 @@ def check_port_uniqueness(node_id, ciq_wb):
 
     xmu_ports = set().union(*xmu_ports_by_prefix.values()) if xmu_ports_by_prefix else set()
 
-    shared_radio_group = {}  # cell -> group key, for 6472/AIR-sharing cells only
+    shared_radio_group = {}  # cell -> group key, for 6472-sharing cells only
     for row in fiveg_rows:
         rru_type = str(row.get('RRU Type', '')).strip()
-        if '6472' in rru_type or 'AIR' in rru_type.upper():
+        if '6472' in rru_type:
             cell = row.get('NRCellDU')
             sef = row.get('SectorEquipmentFunction')
             if cell and sef:
@@ -531,7 +531,7 @@ def check_port_uniqueness(node_id, ciq_wb):
 
     results = []
     for (bbu, port), cells in usage.items():
-        # if every cell sharing this port belongs to the same 6472/AIR shared-radio
+        # if every cell sharing this port belongs to the same 6472 shared-radio
         # group, the sharing is expected (rule #9) - not a violation.
         groups = {shared_radio_group.get(c) for c in cells}
         exempt = len(cells) > 1 and len(groups) == 1 and None not in groups
@@ -545,7 +545,7 @@ def check_port_uniqueness(node_id, ciq_wb):
                 status = 'MISMATCH'
                 note = f"Port {port} is assigned to an XMU on this node but reused by this sector."
             elif exempt:
-                status, note = 'MATCH', 'Port shared as expected (6472/AIR sharing radio, per rule #9).'
+                status, note = 'MATCH', 'Port shared as expected (6472 sharing radio, per rule #9).'
             else:
                 status, note = 'MATCH', 'Port unique.'
             results.append({'rule': '#11/#26/#27', 'node': node_id, 'cell': cell, 'status': status,
