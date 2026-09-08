@@ -945,6 +945,45 @@ def check_xmu_port_overlap(node_id, enb_row, gnb_row, ciq_wb):
               'note': 'Unique.' if unique else f'XMU ports reused elsewhere: {sorted(used_elsewhere)}'}]
 
 
+def check_radio_port_conflict(node_id, ciq_wb):
+    """NEW - not part of the confirmed Blueprint rule set. General Radio Map
+    port-conflict check (the HTML tool's 'Port Conflict (Multiple Radios)'):
+    does the same (DUS/XMU board, DUS/XMU Port) get declared for cells
+    belonging to more than one distinct RRU type? Broader than
+    check_xmu_port_overlap(), which only looks at a node's own declared
+    1st/2nd XMU ports - this looks at every LTE cell's port assignment
+    regardless of XMU declaration. Tested against real CIQs; not yet run
+    against enough real *conflicting* sites to carry the 'confirmed' bar."""
+    port_to_rrus = {}
+    port_to_cells = {}
+    for row in _rows(ciq_wb, 'eUtran Parameters'):
+        cell = row.get('EutranCellFDDId')
+        if not cell or not (node_id and str(cell).startswith(node_id)):
+            continue
+        board = str(row.get('DUS / XMU') or '').strip()
+        port = str(row.get('DUS / XMU Port') or '').strip()
+        rru = str(row.get('RRU type') or '').strip()
+        if not (board and port):
+            continue
+        key = (board, port)
+        port_to_rrus.setdefault(key, set()).add(rru)
+        port_to_cells.setdefault(key, set()).add(cell)
+
+    results = []
+    for key, rrus in port_to_rrus.items():
+        board, port = key
+        cells = sorted(port_to_cells[key])
+        if len(rrus) > 1:
+            results.append({'rule': 'NEW', 'node': node_id, 'cell': ', '.join(cells),
+                             'board': board, 'port': port, 'status': 'MISMATCH',
+                             'note': f"Port {port} on board {board} used by {len(rrus)} different RRU types: {', '.join(sorted(rrus))}"})
+        else:
+            results.append({'rule': 'NEW', 'node': node_id, 'cell': ', '.join(cells),
+                             'board': board, 'port': port, 'status': 'MATCH',
+                             'note': 'Single RRU type on this port.'})
+    return results
+
+
 def check_pci_uniqueness(node_id, ciq_wb, e_name=None):
     """Rule #23 - PCI uniqueness within same band. PCI = PhysicalLayerCellIdGroup*3
     + physicalLayerSubCellId (verified against CIQ's own 'PCI' column); flags
@@ -1110,3 +1149,90 @@ def check_antenna_uniqueness(node_id, ciq_wb):
                              'aug_au_asu_1': a1, 'aug_au_asu_2': a2,
                              'note': verdict})
     return results
+
+
+def check_dss_pre_existing(node_id, log_text, ciq_wb):
+    """Blueprint #35 'pre existing DSS'. Warns when a Pre cell already has
+    DSS active (non-zero essScLocalId AND essScPairId on its SectorCarrier),
+    naming the LTE band it's active on.
+
+    This was previously listed in run_validation.py's unavailable_notes as
+    'no DSS signal found in Pre kget-all logs'. That note was wrong: the
+    'get . essScLocalId' / 'get . essScPairId' commands carry it directly
+    (confirmed against a real log — HXL04147's SectorCarrier=7_3/8_3/9_3
+    report non-zero on both and correspond to that site's real DSS cells).
+    pre_extract.extract_dss_status() does the extraction."""
+    if not log_text:
+        return [{'rule': '#35', 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
+                 'note': 'No Pre log for this node - DSS state unknown.'}]
+    dss = pe.extract_dss_status(log_text)
+    active = sorted(c for c, on in dss.items() if on)
+    if not active:
+        return [{'rule': '#35', 'node': node_id, 'cell': '-', 'status': 'MATCH',
+                 'note': 'No pre-existing DSS on this node.'}]
+    out = []
+    for cell in active:
+        band, _ = band_label(cell)
+        out.append({'rule': '#35', 'node': node_id, 'cell': cell, 'status': 'INFO',
+                    'note': f'Pre existing DSS Activated on the {band or "unknown band"}'})
+    return out
+
+
+def check_sector_id_4890(node_id, ciq_wb, e_name=None):
+    """Blueprint #22 'Check for sectorID for 4890 Radio Type. "_s" should
+    not be present'. CIQ-side check: any eUtran Parameters row whose RRU
+    type is a 4890 and whose sectorId carries an '_s' suffix is flagged.
+
+    Scoped by CELL-NAME PREFIX rather than an 'eNodeB Name' column — that
+    column does not exist on this sheet, so filtering on it silently matched
+    every row and produced one duplicate set of results per node."""
+    out = []
+    prefix = str(e_name or node_id).strip().upper()
+    for r in _rows(ciq_wb, 'eUtran Parameters'):
+        cell = r.get('EutranCellFDDId')
+        if not cell:
+            continue
+        if str(cell).split('_')[0].strip().upper() != prefix:
+            continue
+        rru = str(r.get('RRU type') or '').upper()
+        if '4890' not in rru:
+            continue
+        sector_id = str(r.get('sectorId') or '').strip()
+        if re.search(r'_S\b|_S$', sector_id, re.I):
+            out.append({'rule': '#22', 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
+                        'note': f'sectorId "{sector_id}" contains "_s" on a 4890 radio - remove the _s suffix.'})
+        else:
+            out.append({'rule': '#22', 'node': node_id, 'cell': cell, 'status': 'MATCH',
+                        'note': f'sectorId "{sector_id}" OK for 4890 radio.'})
+    return out
+
+
+def check_rfbranch_per_aug(node_id, log_text):
+    """Blueprint #34 'The RF branch number should not exceed 24 for each
+    AUG'. Counts DISTINCT RfBranch numbers per AntennaUnitGroup across every
+    SectorCarrier's rfBranchTxRef/rfBranchRxRef in the Pre log, via
+    pre_extract.extract_rf_branch_refs()'s own source data.
+
+    Pre-side rather than CIQ-side because the AntennaUnitGroup->RfBranch
+    mapping only exists in the Pre kget-all log ('hget sector rfbranch');
+    the CIQ has no equivalent per-AUG branch listing."""
+    if not log_text:
+        return [{'rule': '#34', 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
+                 'note': 'No Pre log for this node - AUG/RfBranch mapping unavailable.'}]
+    from log_parser import get_command_block
+    block = get_command_block(log_text, 'sector rfbranch') or ''
+    per_aug = {}
+    for m in re.finditer(r'AntennaUnitGroup=(\d+),RfBranch=(\d+)', block):
+        per_aug.setdefault(m.group(1), set()).add(int(m.group(2)))
+    if not per_aug:
+        return [{'rule': '#34', 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
+                 'note': 'No AntennaUnitGroup/RfBranch references in this log (AAS/AIR node).'}]
+    out = []
+    for aug, branches in sorted(per_aug.items(), key=lambda kv: int(kv[0])):
+        n = len(branches)
+        status = 'MISMATCH' if n > 24 else 'MATCH'
+        note = (f'AntennaUnitGroup={aug} has {n} RfBranches (limit 24).'
+                if status == 'MISMATCH' else f'AntennaUnitGroup={aug}: {n} RfBranches.')
+        out.append({'rule': '#34', 'node': node_id, 'cell': f'AntennaUnitGroup={aug}',
+                    'status': status, 'note': note})
+    return out
