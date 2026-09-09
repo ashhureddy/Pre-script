@@ -537,6 +537,55 @@ def extract_cell_to_rilink(text):
     return result
 
 
+def extract_cell_to_rilink_detail(text, fru_by_cell):
+    """Cell -> {'rilink_id': str, 'rilink_port': str}, from the 'hget
+    rilink=' rows, matched to each cell via its OWN already-resolved radio
+    FRU (fru_by_cell — the same extract_cell_to_fru() output every caller
+    in amos_view.py already computes for the 'RRUs' column).
+
+    Deliberately does NOT hardcode an 'RRU-' prefix the way
+    extract_cell_to_rilink()'s Single/Double counter does — confirmed
+    against real logs that a plain RRU (FieldReplaceableUnit=RRU-10,...)
+    and an AAS radio (FieldReplaceableUnit=AAS-056284_N077A_1,...) both
+    appear as riPortRef1/riPortRef2 values here, and a prefix-only match
+    silently returns nothing for every AAS/5G cell. Matching on the cell's
+    own resolved FRU string instead (whatever family it is) covers both.
+
+    Also does NOT assume the RiPort value is numeric (\\d+) — confirmed
+    against real logs it's frequently alphanumeric (RiPort=DATA_1,
+    RiPort=D, RiPort=A), the same 'not always numeric' bug class already
+    flagged for the DL/UL Loss RiL column in the other tool's HANDOFF.md.
+
+    A cell whose radio FRU is linked via more than one RiLink row (dual-
+    link radio) gets both ids/ports joined with '+', matching the Radio
+    Swap dual-band '+' convention elsewhere in this project. Returns {} if
+    the rilink= command isn't present in this log."""
+    if not text or not fru_by_cell:
+        return {}
+    fru_to_links = {}
+    for line in (get_command_block(text, 'rilink=') or '').splitlines():
+        m = re.match(r'^RiLink=(\d+)\b(.*)$', line)
+        if not m:
+            continue
+        rilink_id, rest = m.group(1), m.group(2)
+        for fru, port in re.findall(r'FieldReplaceableUnit=(\S+?),RiPort=(\S+)', rest):
+            fru_to_links.setdefault(fru, []).append((rilink_id, port))
+
+    result = {}
+    for cell, fru_str in fru_by_cell.items():
+        if not fru_str or fru_str == "-":
+            continue
+        links = []
+        for fru in (f.strip() for f in fru_str.split(",")):
+            links += fru_to_links.get(fru, [])
+        if links:
+            result[cell] = {
+                "rilink_id": "+".join(i for i, _ in links),
+                "rilink_port": "+".join(p for _, p in links),
+            }
+    return result
+
+
 def parse_rbb_txrx(rbb_type):
     """'RBB44_1D' -> '4x4'. Returns None if not RBB44/42/22-style."""
     if not rbb_type:
