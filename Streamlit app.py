@@ -1201,6 +1201,17 @@ with tab_edp:
         else:
             st.markdown(render_pre_vs_edp_pivot_table(pivot_rows), unsafe_allow_html=True)
 
+    section_title("Checklist — Pre/CIQ vs Post (EDP)")
+    st.caption("Highlighted fields per the confirmed spec — Default Router (Bearer/OAM) shown but never "
+               "highlighted. A node with no uploaded Pre log shows 'no data' (grey), not a mismatch — this "
+               "is what an SMBB→MMBB-added Secondary is expected to look like; the Primary's own row is "
+               "unaffected.")
+    checklist_field_rows = rc.build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb, results)
+    st.markdown(render_table(checklist_field_rows, status_key="status", columns=[
+        ("node", "Node"), ("role", "Role"), ("field", "Field"),
+        ("pre_value", "Pre / CIQ Value"), ("edp_value", "Post (EDP) Value"),
+    ]), unsafe_allow_html=True)
+
 # ══════════════════════════════════════════════════════════════════════
 # TAB 4 — RET Antenna Checklist — ON HOLD. Placeholder only, no logic.
 # The RRNRBL Checklist is a different feature and lives inside
