@@ -697,3 +697,37 @@ def build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows):
                 "status": status,
             })
     return out
+
+
+def build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows):
+    """One row per (node, role): Bearer/OAM VLAN, IPv6, Default Router,
+    pre + EDP side by side — wide layout (Node ID + 2-col-per-field),
+    replacing the long one-row-per-field format from
+    build_pre_vs_edp_ipv6_table() above. A node with no uploaded Pre log
+    still gets a row (pre columns show '—'), so the Node ID list is
+    complete regardless of which logs were uploaded this run."""
+    import pre_extract as pe
+
+    field_map = [
+        ("bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID", "bearer_vlan"),
+        ("bearer_ip", "IPV6_ENODEB_BEARER_IP", "bearer_ipv6"),
+        ("bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "bearer_router"),
+        ("oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN", "oam_vlan"),
+        ("oam_ip", "IPV6_ENODEB_OAM_IP", "oam_ipv6"),
+        ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "oam_router"),
+    ]
+    role_short = {"Primary": "P", "Secondary": "S"}
+
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        log_text = (node_logs_text or {}).get(nid)
+        pre_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+        row = {"label": f"{nid} ({role_short.get(entry['role'], entry['role'][:1])})"}
+        for pre_key, edp_key, out_key in field_map:
+            row[f"{out_key}_pre"] = pre_vals.get(pre_key) or "—"
+            row[f"{out_key}_edp"] = _norm(edp_rec.get(edp_key)) if edp_rec else "—"
+        out.append(row)
+    return out
