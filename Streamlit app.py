@@ -735,7 +735,7 @@ def run_full_validation(ciq_bytes, edp_bytes, edp_ext, rfds_bytes, node_logs_tex
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
 
-    checklist = rc.build_checklist(results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages)
+    checklist = rc.build_checklist(results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages, node_logs_text)
     site_id_fa = " / ".join(v for v in (site_details.get("site_id"), site_details.get("fa_code")) if v)
 
     # Computed once here rather than inline in each tab: those call sites ran on
