@@ -539,27 +539,27 @@ def extract_cell_to_rilink(text):
 
 def extract_cell_to_rilink_detail(text, fru_by_cell):
     """Cell -> {'rilink_id': str, 'rilink_port': str}, from the 'hget
-    rilink=' rows, matched to each cell via its OWN already-resolved radio
-    FRU (fru_by_cell — the same extract_cell_to_fru() output every caller
-    in amos_view.py already computes for the 'RRUs' column).
+    rilink=' rows.
 
-    Deliberately does NOT hardcode an 'RRU-' prefix the way
-    extract_cell_to_rilink()'s Single/Double counter does — confirmed
-    against real logs that a plain RRU (FieldReplaceableUnit=RRU-10,...)
-    and an AAS radio (FieldReplaceableUnit=AAS-056284_N077A_1,...) both
-    appear as riPortRef1/riPortRef2 values here, and a prefix-only match
-    silently returns nothing for every AAS/5G cell. Matching on the cell's
-    own resolved FRU string instead (whatever family it is) covers both.
-
-    Also does NOT assume the RiPort value is numeric (\\d+) — confirmed
-    against real logs it's frequently alphanumeric (RiPort=DATA_1,
-    RiPort=D, RiPort=A), the same 'not always numeric' bug class already
-    flagged for the DL/UL Loss RiL column in the other tool's HANDOFF.md.
+    Confirmed against real logs (HXL00147, HXL04147, HXIN090147F): the
+    table's column order is fixed (riPortRef1 THEN riPortRef2 on every
+    row) and the two sides are never swapped —
+        riPortRef1 = baseband-side connection: either straight to the
+            board slot (FieldReplaceableUnit=1,RiPort=<letter A-F>) or to
+            an XMU expansion port (FieldReplaceableUnit=XMU03-1-1,
+            RiPort=<number>).
+        riPortRef2 = the radio side (FieldReplaceableUnit=RRU-N or
+            AAS-..., RiPort=DATA_1/DATA_2).
+    The cell's own already-resolved radio FRU (fru_by_cell, from
+    extract_cell_to_fru() — works for both RRU-N and AAS-... radios) is
+    matched against riPortRef2 to find which RiLink row/sector a cell
+    belongs to, but the id and port reported are riPortRef1's — the
+    baseband/XMU-side port (letter or number), not the radio-side DATA_n
+    port.
 
     A cell whose radio FRU is linked via more than one RiLink row (dual-
-    link radio) gets both ids/ports joined with '+', matching the Radio
-    Swap dual-band '+' convention elsewhere in this project. Returns {} if
-    the rilink= command isn't present in this log."""
+    link radio) gets both ids/ports joined with '+'. Returns {} if the
+    rilink= command isn't present in this log."""
     if not text or not fru_by_cell:
         return {}
     fru_to_links = {}
@@ -568,8 +568,11 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
         if not m:
             continue
         rilink_id, rest = m.group(1), m.group(2)
-        for fru, port in re.findall(r'FieldReplaceableUnit=(\S+?),RiPort=(\S+)', rest):
-            fru_to_links.setdefault(fru, []).append((rilink_id, port))
+        pairs = re.findall(r'FieldReplaceableUnit=(\S+?),RiPort=(\S+)', rest)
+        if len(pairs) < 2:
+            continue
+        (_ref1_fru, ref1_port), (ref2_fru, _ref2_port) = pairs[0], pairs[1]
+        fru_to_links.setdefault(ref2_fru, []).append((rilink_id, ref1_port))
 
     result = {}
     for cell, fru_str in fru_by_cell.items():
