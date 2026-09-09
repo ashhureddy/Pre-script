@@ -886,3 +886,32 @@ def extract_bearer_oam_ipv6(text):
         'bearer_ip': bearer_ip, 'oam_ip': oam_ip,
         'bearer_router_ip': bearer_router_ip, 'oam_router_ip': oam_router_ip,
     }
+
+
+# Confirmed board-generation -> transport EthernetPort name mapping (G2
+# boards can show either TN_A or TN_B in practice, hence trying both).
+BOARD_TRANSPORT_PORTS = {
+    "6630": ["TN_A", "TN_B"], "5216": ["TN_A", "TN_B"],   # G2
+    "6648": ["TN_IDL_B"], "6651": ["TN_IDL_B"],            # G3
+    "6672": ["TN_IDL_C"],                                   # G4
+}
+
+
+def extract_transport_port_mode(text, board_model):
+    """admOperatingMode ('9 (10G_FULL)' / '6 (1G_FULL)' -> '10GE'/'1GE') off
+    the Transport=1,EthernetPort=<name> MO expected for this board
+    generation - confirmed directly against real logs: G2 (6630/5216)
+    tries TN_A then TN_B, G3 (6648/6651) tries TN_IDL_B, G4 (6672) tries
+    TN_IDL_C. Returns (port_name_used, mapped_size) or (None, None) if the
+    board has no known port mapping, or none of its candidate ports appear
+    in this particular log (a real, confirmed case — not every log has
+    every candidate port configured)."""
+    if not text:
+        return None, None
+    candidates = BOARD_TRANSPORT_PORTS.get(str(board_model).strip(), [])
+    for port in candidates:
+        m = re.search(re.escape(f"EthernetPort={port}") + r'\r?\n=+\r?\nadmOperatingMode\s+\d+\s*\((\w+)\)', text)
+        if m:
+            mapped = {"10G_FULL": "10GE", "1G_FULL": "1GE"}.get(m.group(1), m.group(1))
+            return port, mapped
+    return None, None
