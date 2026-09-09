@@ -653,26 +653,37 @@ def render_rrnrbl_checklist(rows):
     STATUS_TICK = {"match": ("\u2713", "#059669"), "mismatch": ("\u2717", "#dc2626"),
                    "manual": ("\u270e", "#b45309"), "unknown": ("\u2013", "#94a3b8"),
                    "info": ("i", "#2563eb"), "na": ("\u2013", "#94a3b8")}
-    COLS = [0.07, 0.33, 0.07, 0.13, 0.40]
+    COLS = [0.06, 0.34, 0.06, 0.12, 0.42]
 
     st.markdown("""
     <style>
-    .qkx-chk-hdr { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.85em;
-                   padding:6px 8px; border:1px solid #14283f; text-align:center; }
+    .qkx-chk-wrap [data-testid="stVerticalBlock"] { gap: 0rem !important; }
+    .qkx-chk-wrap [data-testid="stElementContainer"] { margin: 0 !important; }
+    .qkx-chk-wrap [data-testid="column"] { padding: 0 !important; }
+    .qkx-chk-wrap [data-testid="stHorizontalBlock"] { gap: 0rem !important; }
+    .qkx-chk-hdr { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.78em;
+                   padding:4px 8px; border:1px solid #14283f; text-align:center; line-height:1.4; }
     .qkx-chk-hdr.left { text-align:left; }
-    .qkx-chk-cat2 { background:#1e3a5f; color:#fff; font-weight:700; padding:6px 10px;
-                    border:1px solid #14283f; margin-top:2px; }
-    .qkx-chk-cell { padding:5px 8px; border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
-                    min-height:34px; display:flex; align-items:center; }
-    .qkx-chk-row [data-testid="stCheckbox"], .qkx-chk-row [data-testid="stTextInput"] {
-        border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea; padding:2px 6px;
-        min-height:34px; display:flex; align-items:center;
+    .qkx-chk-cat2 { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.85em;
+                    padding:4px 10px; border:1px solid #14283f; line-height:1.5; }
+    .qkx-chk-cell { padding:2px 8px; border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
+                    height:24px; min-height:24px; display:flex; align-items:center;
+                    font-size:0.82em; background:#fff; }
+    .qkx-chk-wrap [data-testid="stCheckbox"], .qkx-chk-wrap [data-testid="stTextInput"] {
+        border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
+        height:24px; min-height:24px; display:flex; align-items:center; background:#fff;
     }
-    .qkx-chk-row [data-testid="column"] { padding:0 !important; }
-    .qkx-chk-row [data-testid="stHorizontalBlock"] { gap:0 !important; }
+    .qkx-chk-wrap [data-testid="stCheckbox"] label { padding:0 6px !important; margin:0 !important; }
+    .qkx-chk-wrap [data-testid="stCheckbox"] input { transform:scale(0.85); margin:0 !important; }
+    .qkx-chk-wrap [data-testid="stTextInput"] > div { border:none !important; background:transparent !important;
+                    height:24px !important; min-height:24px !important; }
+    .qkx-chk-wrap [data-testid="stTextInput"] input { height:22px !important; min-height:22px !important;
+                    padding:0 6px !important; font-size:0.82em !important; border-radius:0 !important;
+                    background:transparent !important; box-shadow:none !important; }
     </style>
     """, unsafe_allow_html=True)
 
+    st.markdown('<div class="qkx-chk-wrap">', unsafe_allow_html=True)
     hc = st.columns(COLS, gap="small")
     for c, label, cls in zip(hc, ["Indication", "Check", "Tick", "Scope", "Remarks"],
                               ["", "left", "", "left", "left"]):
@@ -690,11 +701,10 @@ def render_rrnrbl_checklist(rows):
         default_comment = "" if r["status"] == "manual" else (r.get("detail") or "")
         tick, color = STATUS_TICK.get(r["status"], ("\u2013", "#94a3b8"))
 
-        st.markdown('<div class="qkx-chk-row">', unsafe_allow_html=True)
         c0, c1, c2, c3, c4 = st.columns(COLS, gap="small")
         with c0:
             st.markdown(f'<div class="qkx-chk-cell" style="justify-content:center;border-left:none;'
-                        f'color:{color};font-weight:800;font-size:1.05em;">{tick}</div>', unsafe_allow_html=True)
+                        f'color:{color};font-weight:800;">{tick}</div>', unsafe_allow_html=True)
         with c1:
             st.markdown(f'<div class="qkx-chk-cell">{esc(r["item"])}</div>', unsafe_allow_html=True)
         with c2:
@@ -704,7 +714,7 @@ def render_rrnrbl_checklist(rows):
         with c4:
             st.text_input("Remarks", value=default_comment, key=f"{key}_comment",
                           label_visibility="collapsed", placeholder="Remarks\u2026")
-        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def collect_manual_overrides(checklist):
