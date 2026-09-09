@@ -17,12 +17,14 @@ block per matching MO type). We parse every table under every command into a
 list of dict rows, keyed by the header tokens.
 """
 import re
+import functools
 
 _PROMPT_RE = re.compile(r'^(?P<node>[A-Za-z0-9_]+)>\s*(?P<cmd>.*)$')
 _SEP_RE = re.compile(r'^=+\s*$')
 _TOTAL_RE = re.compile(r'^Total:\s*(\d+)\s*MOs?\s*$', re.I)
 
 
+@functools.lru_cache(maxsize=16)
 def split_commands(text):
     """Split a full log into a list of (node_id, command, block_text) in order.
 
@@ -127,6 +129,7 @@ def get_command_block(text, command_substr):
     return None
 
 
+@functools.lru_cache(maxsize=16)
 def parse_log(text):
     """Top-level entry point. Returns a list of:
         {'node': str, 'command': str, 'tables': [ {header, rows}, ... ]}
