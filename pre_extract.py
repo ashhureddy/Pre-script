@@ -245,18 +245,34 @@ def extract_rf_branch_refs(text):
     # (and NRSectorCarrier's) rfBranchRxRef/rfBranchTxRef, then
     # SectorEquipmentFunction's rfBranchRef. Parsed as one combined block
     # since both use the same '[N] = <refs...>' cross-reference syntax and
-    # a shared MO-name regex distinguishes which table a row belongs to. ──
+    # a shared MO-name regex distinguishes which table a row belongs to.
+    #
+    # Parsed ONE LINE AT A TIME rather than with a single re.finditer(...,
+    # re.M) over the whole block — confirmed real bug (real ALL01748 log,
+    # SectorCarrier=13_1's refs going missing): \s*/\s+ match '\n' too, so
+    # when a row's own bracket value is EMPTY (e.g. 'SectorCarrier=1 [0] =
+    # <padding> [0] = <padding>'), the trailing \s* before the final
+    # capture group greedily eats through the row's own newline and
+    # swallows the ENTIRE NEXT ROW into this (empty) row's capture —
+    # corrupting that next row's refs and vanishing it from the dict
+    # entirely. Every SectorCarrier/SEF immediately following an
+    # empty-refs row was silently lost this way. Splitting on lines first
+    # means \s can never reach past the row's own newline, since the
+    # string being matched no longer contains one. ──
     branch_block = get_command_block(text, 'sector rfbranch') or ''
     sc_tx, sc_rx, sef_refs = {}, {}, {}
-    for m in re.finditer(
-        r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+\[\d+\]\s*=\s*([^\[]*?)\s+\[\d+\]\s*=\s*(.*)$',
-        branch_block, re.M
-    ):
-        mo, rx_part, tx_part = m.group(1), m.group(2), m.group(3)
-        sc_rx[mo] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', rx_part)
-        sc_tx[mo] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', tx_part)
-    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$', branch_block, re.M):
-        sef_refs[m.group(1)] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
+    _sc_row_re = re.compile(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+\[\d+\]\s*=\s*([^\[]*?)\s+\[\d+\]\s*=\s*(.*)$')
+    _sef_row_re = re.compile(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$')
+    for line in branch_block.splitlines():
+        m = _sc_row_re.match(line)
+        if m:
+            mo, rx_part, tx_part = m.group(1), m.group(2), m.group(3)
+            sc_rx[mo] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', rx_part)
+            sc_tx[mo] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', tx_part)
+            continue
+        m = _sef_row_re.match(line)
+        if m:
+            sef_refs[m.group(1)] = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', m.group(2))
 
     result = {}
     for cell, sc in cell_to_sc.items():
@@ -299,7 +315,17 @@ def extract_cell_to_fru(text):
         if frus:
             carrier_to_fru[m.group(1)] = ", ".join(sorted(frus))
     sef_to_fru = {}
-    for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$', branch_block, re.M):
+    # Per-line (not one re.finditer(..., re.M) over the whole block) for the
+    # same reason as extract_rf_branch_refs's SEF loop: \[\d+\]\s*=\s*(.*)$
+    # has a \s* that matches '\n' too, so a SEF with an EMPTY rfBranchRef
+    # ('[0] = ' + padding, no data) would otherwise swallow the entire next
+    # line into its own (empty) capture, corrupting that next SEF's FRU and
+    # dropping it from the dict.
+    _sef_row_re = re.compile(r'^(SectorEquipmentFunction=\S+)\s+\[\d+\]\s*=\s*(.*)$')
+    for line in branch_block.splitlines():
+        m = _sef_row_re.match(line)
+        if not m:
+            continue
         rest = m.group(2)
         refs = re.findall(r'AntennaUnitGroup=\d+,RfBranch=\d+', rest)
         frus = {branch_to_fru.get(r) for r in refs if r in branch_to_fru}
@@ -571,8 +597,16 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
         pairs = re.findall(r'FieldReplaceableUnit=(\S+?),RiPort=(\S+)', rest)
         if len(pairs) < 2:
             continue
-        (_ref1_fru, ref1_port), (ref2_fru, _ref2_port) = pairs[0], pairs[1]
-        fru_to_links.setdefault(ref2_fru, []).append((rilink_id, ref1_port))
+        (ref1_fru, ref1_port), (ref2_fru, _ref2_port) = pairs[0], pairs[1]
+        # riPortRef1 is on the board slot (FRU='1', no bracket needed) OR on
+        # an XMU expansion unit — when it's an XMU, the unit itself isn't
+        # otherwise shown anywhere in this table, so it's appended in
+        # brackets after the port (e.g. '13 (XMU03-1-1)') to disambiguate
+        # which physical XMU a port number belongs to (confirmed real case,
+        # ALL01748: XMU03-1-1 and XMU03-1-2 both use overlapping port
+        # numbers, so the bare port number alone is ambiguous).
+        port_display = f"{ref1_port} ({ref1_fru})" if ref1_fru.upper().startswith("XMU") else ref1_port
+        fru_to_links.setdefault(ref2_fru, []).append((rilink_id, port_display))
 
     result = {}
     for cell, fru_str in fru_by_cell.items():
