@@ -644,47 +644,48 @@ def render_rrnrbl_checklist(rows):
         for k in sorted(counts, key=lambda x: (order.index(x) if x in order else 99, x))
     )
     st.markdown(f'<div style="margin:2px 0 10px 0;">{pills}</div>', unsafe_allow_html=True)
+    st.caption("Auto-checked below \u2014 untick or edit any remarks that need a manual call, then download.")
 
-    manual_values = {
-        r["row"]: {
-            "done": st.session_state.get(f'rrnrbl_{r["row"]}_done', False),
-            "comment": st.session_state.get(f'rrnrbl_{r["row"]}_comment', ""),
-        }
-        for r in rows if r["status"] == "manual"
-    }
-    st.markdown(render_checklist_grid(rows, manual_values), unsafe_allow_html=True)
+    STATUS_TICK = {"match": "\u2705", "mismatch": "\u274c", "manual": "\U0001F7E1", "unknown": "\u2b1c", "info": "\u2139\ufe0f", "na": "\u2b1c"}
 
-    man_rows = [r for r in rows if r["status"] == "manual"]
-    if man_rows:
-        with st.expander(f"\u270e Fill in manual items ({len(man_rows)})", expanded=False):
-            last_cat = last_sub = object()
-            for i, mr in enumerate(man_rows):
-                if mr["cat"] != last_cat or mr.get("sub") != last_sub:
-                    st.markdown(f'<div class="qkx-sub-header">{esc(mr["cat"])}'
-                                + (f' \u2014 {esc(mr["sub"])}' if mr.get("sub") else "") + '</div>',
-                                unsafe_allow_html=True)
-                    last_cat, last_sub = mr["cat"], mr.get("sub")
-                key = f'rrnrbl_{mr["row"]}'
-                st.markdown(f'<div class="qkx-manual-item">{esc(mr["item"])}</div>', unsafe_allow_html=True)
-                col = st.columns([0.06, 0.94])
-                with col[0]:
-                    st.checkbox("Done", key=f"{key}_done", label_visibility="collapsed")
-                with col[1]:
-                    st.text_input("Comment", key=f"{key}_comment", label_visibility="collapsed",
-                                  placeholder="Comment / evidence…")
-                if i < len(man_rows) - 1:
-                    st.markdown('<div style="height:1px;background:#eef1f6;margin:2px 0 10px 0;"></div>',
-                                unsafe_allow_html=True)
+    hc = st.columns([0.06, 0.40, 0.12, 0.42])
+    hc[0].markdown("**Check**")
+    hc[1].markdown("**Item**")
+    hc[2].markdown("**Scope**")
+    hc[3].markdown("**Remarks**")
+
+    last_cat = last_sub = object()
+    for r in rows:
+        if r["cat"] != last_cat or r.get("sub") != last_sub:
+            hdr = esc(r["cat"]) + (f" \u2014 {esc(r['sub'])}" if r.get("sub") else "")
+            st.markdown(f'<div class="qkx-sub-header" style="margin-top:14px;">{hdr}</div>', unsafe_allow_html=True)
+            last_cat, last_sub = r["cat"], r.get("sub")
+
+        key = f'rrnrbl_{r["row"]}'
+        default_checked = r["status"] == "match"
+        default_comment = "" if r["status"] == "manual" else (r.get("detail") or "")
+
+        c0, c1, c2, c3 = st.columns([0.06, 0.40, 0.12, 0.42])
+        with c0:
+            st.checkbox(STATUS_TICK.get(r["status"], "\u2b1c"), value=default_checked,
+                        key=f"{key}_checked", label_visibility="visible")
+        with c1:
+            color = STATUS_COLORS.get(r["status"], DEFAULT_COLOR)[0]
+            st.markdown(f'<span style="color:{color};font-weight:600;">{esc(r["item"])}</span>', unsafe_allow_html=True)
+        with c2:
+            st.markdown(f'<span style="color:#64748b;">{esc(r.get("tag",""))}</span>', unsafe_allow_html=True)
+        with c3:
+            st.text_input("Remarks", value=default_comment, key=f"{key}_comment",
+                          label_visibility="collapsed", placeholder="Remarks\u2026")
 
 
 def collect_manual_overrides(checklist):
     overrides = {}
     for row in checklist:
-        if row["status"] != "manual":
-            continue
         r = row["row"]
+        default_checked = row["status"] == "match"
         overrides[r] = {
-            "done": st.session_state.get(f"rrnrbl_{r}_done", False),
+            "checked": st.session_state.get(f"rrnrbl_{r}_checked", default_checked),
             "comment": st.session_state.get(f"rrnrbl_{r}_comment", ""),
         }
     return overrides
