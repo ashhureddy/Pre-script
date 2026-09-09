@@ -745,7 +745,6 @@ def run_full_validation(ciq_bytes, edp_bytes, edp_ext, rfds_bytes, node_logs_tex
     node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
     edp_field_rows = rc.build_edp_field_table(edp_rows, node_role_list)
     pre_edp_pivot_rows = rc.build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows) if node_logs_text else []
-    checklist_field_rows = rc.build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb, results)
     amos_summary_rows, amos_lte_rows, amos_nr_rows = av.build_amos_tables(node_logs_text) if node_logs_text else ([], [], [])
 
     return dict(
@@ -754,7 +753,7 @@ def run_full_validation(ciq_bytes, edp_bytes, edp_ext, rfds_bytes, node_logs_tex
         scope_lines=scope_lines, sow=sow, checklist=checklist, site_id_fa=site_id_fa,
         pdf_bytes=pdf_bytes, node_logs_text=node_logs_text,
         node_role_list=node_role_list, edp_field_rows=edp_field_rows,
-        pre_edp_pivot_rows=pre_edp_pivot_rows, checklist_field_rows=checklist_field_rows,
+        pre_edp_pivot_rows=pre_edp_pivot_rows,
         amos_summary_rows=amos_summary_rows, amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
     )
 
@@ -1203,17 +1202,6 @@ with tab_edp:
             st.caption("No Pre log matched any Primary/Secondary node for this run.")
         else:
             st.markdown(render_pre_vs_edp_pivot_table(pivot_rows), unsafe_allow_html=True)
-
-    section_title("Checklist — Pre/CIQ vs Post (EDP)")
-    st.caption("Highlighted fields per the confirmed spec — Default Router (Bearer/OAM) shown but never "
-               "highlighted. A node with no uploaded Pre log shows 'no data' (grey), not a mismatch — this "
-               "is what an SMBB→MMBB-added Secondary is expected to look like; the Primary's own row is "
-               "unaffected.")
-    checklist_field_rows = state["checklist_field_rows"]
-    st.markdown(render_table(checklist_field_rows, status_key="status", columns=[
-        ("node", "Node"), ("role", "Role"), ("field", "Field"),
-        ("pre_value", "Pre / CIQ Value"), ("edp_value", "Post (EDP) Value"),
-    ]), unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 4 — RET Antenna Checklist — ON HOLD. Placeholder only, no logic.
