@@ -1049,12 +1049,14 @@ with tab_audit:
                 ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
                 ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
                 ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
+                ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"),
             ]), unsafe_allow_html=True)
 
             section_title("5G NR Cells", badge=f"{len(nr_rows)} CELLS")
             st.markdown(render_table(nr_rows, status_key=None, columns=[
                 ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("tx", "TX"), ("rx", "RX"),
                 ("sef_rfbranches", "SEF RFBRANCHES"),
+                ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"),
             ]), unsafe_allow_html=True)
 
     with sub_ciq:
