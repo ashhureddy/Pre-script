@@ -237,17 +237,30 @@ def _sw_status_v2(sw_version_results):
 
 
 def _mme_region_status(ciq_wb):
+    """N2E-ness is a SITE-level fact, not per-node: presence of any real cell
+    row in the CIQ's Nokia_Info tab (the source-Nokia cell being migrated
+    off) means this is an N2E site — confirmed real CIQ structure has a
+    'Nokia Cell Id' column there, non-empty only for actual N2E migrations
+    (every non-N2E CIQ checked has Nokia_Info present but entirely empty).
+    For an N2E site, EVERY node's MME Region (Mixed Mode Info tab) must be
+    N-RAN; E-RAN is flagged so it can be raised as a PI to the design team."""
     if "Mixed Mode Info" not in ciq_wb.sheetnames:
         return "unknown", "No Mixed Mode Info sheet."
+    is_n2e = False
+    if "Nokia_Info" in ciq_wb.sheetnames:
+        nokia_rows = cer.sheet_rows_as_dicts(ciq_wb["Nokia_Info"])
+        is_n2e = any(_norm(r.get("Nokia Cell Id")) for r in nokia_rows)
+    if not is_n2e:
+        return "match", "No cells in Nokia_Info — not an N2E site, MME Region rule does not apply."
     rows = cer.sheet_rows_as_dicts(ciq_wb["Mixed Mode Info"])
-    n2e = [r for r in rows if _norm(r.get("Nokia Site")).lower().startswith("y")]
-    if not n2e:
-        return "match", "Nokia Site = No for every node — N2E MME Region rule does not apply."
-    bad = [r for r in n2e if re.search(r"E-?RAN", _norm(r.get("MME Region")), re.I)
+    bad = [r for r in rows if re.search(r"E-?RAN", _norm(r.get("MME Region")), re.I)
            and not re.search(r"N-?RAN", _norm(r.get("MME Region")), re.I)]
     if bad:
-        return "mismatch", "; ".join(f"{_norm(r.get('eNodeB Name'))}: MME Region '{_norm(r.get('MME Region'))}' — should be N-RAN" for r in bad)
-    return "match", f"{len(n2e)} N2E node(s), MME Region correctly N-RAN."
+        return "mismatch", "; ".join(
+            f"{_norm(r.get('eNodeB Name'))}: MME Region '{_norm(r.get('MME Region'))}' — should be N-RAN, raise PI to design team"
+            for r in bad
+        )
+    return "match", f"N2E site — {len(rows)} node(s), MME Region correctly N-RAN."
 
 
 def _nr_sa_tac_status(ciq_wb):
