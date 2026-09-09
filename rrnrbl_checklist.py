@@ -434,10 +434,11 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
 
         (28, "RFDS Checks", "Pre Vs RFDS Sheet in QWEST", "FACode", "Radio", lambda: _fa_code_status(site_details, ciq_wb)),
         (29, "RFDS Checks", None, "JobDetail", "Radio", None),
-        (30, "RFDS Checks", None, "NonRFInventoryDetails(Final)", "Radio", lambda: _agg(board_type)),
-        (31, "RFDS Checks", None, "CellDetails(Final) -- CellID / RCN /RRH", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (32, "RFDS Checks", None, "AntennaPositionDetails", "Radio", None),
-        (33, "RFDS Checks", None, "Plumbing Diagram (TMA)", "Radio", None),
+        (30, "RFDS Checks", None, "NonRFInventoryDetails(Final)", "Radio", None),
+        (31, "RFDS Checks", None, "CellDetails(Final) -- CellID / RCN /RRH", "Radio",
+         lambda: _agg(results.get("cells_vs_rfds", []) + results.get("radio_type", []))),
+        (32, "RFDS Checks", None, "AntennaPositionDetails -- Model / LinkedCells / Azimuth(Design) / Total Positions", "Radio", None),
+        (33, "RFDS Checks", None, "Plumbing Diagram -- TxRx / TMA / Radio - RET Controller / Total Positions", "Radio", None),
 
         (35, "CIQ tabs checks", "Revision History", "All Confirmation checks", "NR/Radio", None),
         (36, "CIQ tabs checks", "Mixed Mode Info Tab", "eNBId and gNBId ENM vs CIQ", "NR/Radio", lambda: _agg(identity)),
