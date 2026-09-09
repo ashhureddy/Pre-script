@@ -653,39 +653,32 @@ def render_rrnrbl_checklist(rows):
     STATUS_TICK = {"match": ("\u2713", "#059669"), "mismatch": ("\u2717", "#dc2626"),
                    "manual": ("\u270e", "#b45309"), "unknown": ("\u2013", "#94a3b8"),
                    "info": ("i", "#2563eb"), "na": ("\u2013", "#94a3b8")}
-    STATUS_BG = {"match": "#eafaf1", "mismatch": "#fdecea", "manual": "#fff8e5",
-                 "unknown": "#f1f3f6", "info": "#eaf2fb", "na": "#f1f3f6"}
-    COLS = [0.06, 0.36, 0.06, 0.08, 0.44]
+    COLS = [0.06, 0.34, 0.06, 0.12, 0.42]
 
     st.markdown("""
     <style>
-    .qkx-chk-wrap { max-width: 1180px; }
     .qkx-chk-wrap [data-testid="stVerticalBlock"] { gap: 0rem !important; }
     .qkx-chk-wrap [data-testid="stElementContainer"] { margin: 0 !important; }
     .qkx-chk-wrap [data-testid="column"] { padding: 0 !important; }
     .qkx-chk-wrap [data-testid="stHorizontalBlock"] { gap: 0rem !important; }
-    .qkx-chk-hdr { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.85em;
-                   padding:5px 8px; border:1px solid #14283f; text-align:center; line-height:1.4; }
+    .qkx-chk-hdr { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.78em;
+                   padding:4px 8px; border:1px solid #14283f; text-align:center; line-height:1.4; }
     .qkx-chk-hdr.left { text-align:left; }
-    .qkx-chk-cat2 { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.92em;
-                    padding:5px 10px; border:1px solid #14283f; line-height:1.5; }
+    .qkx-chk-cat2 { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.85em;
+                    padding:4px 10px; border:1px solid #14283f; line-height:1.5; }
     .qkx-chk-cell { padding:2px 8px; border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
-                    height:26px; min-height:26px; display:flex; align-items:center; font-size:0.9em; }
+                    height:24px; min-height:24px; display:flex; align-items:center;
+                    font-size:0.82em; background:#fff; }
     .qkx-chk-wrap [data-testid="stCheckbox"], .qkx-chk-wrap [data-testid="stTextInput"] {
         border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
-        height:26px; min-height:26px; display:flex; align-items:center; background:#fff;
+        height:24px; min-height:24px; display:flex; align-items:center; background:#fff;
     }
-    .qkx-chk-wrap [data-testid="stCheckbox"] { justify-content:center; }
-    .qkx-chk-wrap [data-testid="stCheckbox"] label { padding:0 !important; margin:0 !important;
-                    transform:scale(1.25); }
-    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"] {
-                    width:20px !important; height:20px !important; border-radius:3px !important; }
-    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"][aria-checked="true"] {
-                    background:#059669 !important; border-color:#059669 !important; }
+    .qkx-chk-wrap [data-testid="stCheckbox"] label { padding:0 6px !important; margin:0 !important; }
+    .qkx-chk-wrap [data-testid="stCheckbox"] input { transform:scale(0.85); margin:0 !important; }
     .qkx-chk-wrap [data-testid="stTextInput"] > div { border:none !important; background:transparent !important;
-                    height:26px !important; min-height:26px !important; }
-    .qkx-chk-wrap [data-testid="stTextInput"] input { height:24px !important; min-height:24px !important;
-                    padding:0 6px !important; font-size:0.9em !important; border-radius:0 !important;
+                    height:24px !important; min-height:24px !important; }
+    .qkx-chk-wrap [data-testid="stTextInput"] input { height:22px !important; min-height:22px !important;
+                    padding:0 6px !important; font-size:0.82em !important; border-radius:0 !important;
                     background:transparent !important; box-shadow:none !important; }
     </style>
     """, unsafe_allow_html=True)
@@ -707,18 +700,17 @@ def render_rrnrbl_checklist(rows):
         default_checked = r["status"] == "match"
         default_comment = "" if r["status"] == "manual" else (r.get("detail") or "")
         tick, color = STATUS_TICK.get(r["status"], ("\u2013", "#94a3b8"))
-        bg = STATUS_BG.get(r["status"], "#f1f3f6")
 
         c0, c1, c2, c3, c4 = st.columns(COLS, gap="small")
         with c0:
             st.markdown(f'<div class="qkx-chk-cell" style="justify-content:center;border-left:none;'
-                        f'background:{bg};color:{color};font-weight:800;">{tick}</div>', unsafe_allow_html=True)
+                        f'color:{color};font-weight:800;">{tick}</div>', unsafe_allow_html=True)
         with c1:
-            st.markdown(f'<div class="qkx-chk-cell" style="background:{bg};">{esc(r["item"])}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="qkx-chk-cell">{esc(r["item"])}</div>', unsafe_allow_html=True)
         with c2:
             st.checkbox("", value=default_checked, key=f"{key}_checked", label_visibility="collapsed")
         with c3:
-            st.markdown(f'<div class="qkx-chk-cell" style="background:{bg};color:#475569;">{esc(r.get("tag",""))}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="qkx-chk-cell" style="color:#64748b;">{esc(r.get("tag",""))}</div>', unsafe_allow_html=True)
         with c4:
             st.text_input("Remarks", value=default_comment, key=f"{key}_comment",
                           label_visibility="collapsed", placeholder="Remarks\u2026")
@@ -1049,12 +1041,14 @@ with tab_audit:
                 ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
                 ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
                 ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
+                ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"),
             ]), unsafe_allow_html=True)
 
             section_title("5G NR Cells", badge=f"{len(nr_rows)} CELLS")
             st.markdown(render_table(nr_rows, status_key=None, columns=[
                 ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("tx", "TX"), ("rx", "RX"),
                 ("sef_rfbranches", "SEF RFBRANCHES"),
+                ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"),
             ]), unsafe_allow_html=True)
 
     with sub_ciq:
