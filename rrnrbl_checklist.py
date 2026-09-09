@@ -441,7 +441,7 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (33, "RFDS Checks", None, "Plumbing Diagram -- TxRx / TMA / Radio - RET Controller / Total Positions", "Radio", None),
 
         (35, "CIQ tabs checks", "Revision History", "All Confirmation checks", "NR/Radio", None),
-        (36, "CIQ tabs checks", "Mixed Mode Info Tab", "eNBId and gNBId ENM vs CIQ", "NR/Radio", lambda: _agg(identity)),
+        (36, "CIQ tabs checks", "Mixed Mode Info Tab", "eNBId and gNBId Pre vs CIQ", "NR/Radio", lambda: _agg(identity)),
         (37, "CIQ tabs checks", "Mixed Mode Info Tab", "MME Region", "NR/Radio", lambda: _mme_region_status(ciq_wb)),
         (38, "CIQ tabs checks", "Mixed Mode Info Tab", "Primary & secondary node matches RFDS", "Radio", lambda: _agg(results.get("primary_secondary", []))),
 
