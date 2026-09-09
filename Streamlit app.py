@@ -727,23 +727,35 @@ def run_full_validation(ciq_bytes, edp_bytes, edp_ext, rfds_bytes, node_logs_tex
     ciq_path = _tmp_path(ciq_bytes, ".xlsx")
     edp_path = _tmp_path(edp_bytes, edp_ext or ".xls")
     rfds_path = _tmp_path(rfds_bytes, ".pdf") if rfds_bytes else None
-    node_log_paths = {nid: _tmp_path(text.encode("utf-8"), ".txt") for nid, text in node_logs_text.items()}
 
     with tempfile.TemporaryDirectory() as tmp:
         out_pdf = os.path.join(tmp, "validation_report.pdf")
         (pdf_path, results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages,
-         pre_text, post_text, scope_lines, sow) = rv.run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf)
+         pre_text, post_text, scope_lines, sow) = rv.run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf)
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
 
     checklist = rc.build_checklist(results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages)
     site_id_fa = " / ".join(v for v in (site_details.get("site_id"), site_details.get("fa_code")) if v)
 
+    # Computed once here rather than inline in each tab: those call sites ran on
+    # EVERY Streamlit rerun (any widget interaction anywhere in the app reruns
+    # the whole script), so a checkbox click in an unrelated tab was silently
+    # re-parsing every uploaded Pre log again. Tabs now just read these back.
+    node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
+    edp_field_rows = rc.build_edp_field_table(edp_rows, node_role_list)
+    pre_edp_pivot_rows = rc.build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows) if node_logs_text else []
+    checklist_field_rows = rc.build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb, results)
+    amos_summary_rows, amos_lte_rows, amos_nr_rows = av.build_amos_tables(node_logs_text) if node_logs_text else ([], [], [])
+
     return dict(
         results=results, site_details=site_details, ciq_wb=ciq_wb, edp_rows=edp_rows,
         checked_nodes=checked_nodes, rfds_pages=rfds_pages, pre_text=pre_text, post_text=post_text,
         scope_lines=scope_lines, sow=sow, checklist=checklist, site_id_fa=site_id_fa,
         pdf_bytes=pdf_bytes, node_logs_text=node_logs_text,
+        node_role_list=node_role_list, edp_field_rows=edp_field_rows,
+        pre_edp_pivot_rows=pre_edp_pivot_rows, checklist_field_rows=checklist_field_rows,
+        amos_summary_rows=amos_summary_rows, amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
     )
 
 
@@ -976,7 +988,7 @@ with tab_audit:
         if not node_logs_text:
             st.info("No Pre kget-all logs were loaded for this run.")
         else:
-            summary_rows, lte_rows, nr_rows = av.build_amos_tables(node_logs_text)
+            summary_rows, lte_rows, nr_rows = state["amos_summary_rows"], state["amos_lte_rows"], state["amos_nr_rows"]
 
             section_title("Node Summary", badge=f"{len(summary_rows)} NODE(S)")
             st.markdown(render_table(summary_rows, status_key=None, columns=[
@@ -1055,7 +1067,7 @@ with tab_audit:
         import pre_post_audit as ppa
 
         section_title("Pre vs Post")
-        pre_summary_rows, _, _ = av.build_amos_tables(node_logs_text) if node_logs_text else ([], [], [])
+        pre_summary_rows = state["amos_summary_rows"]
         ciq_node_rows = cv.build_node_integration(ciq_wb)
         node_pre_post_rows = ppa.build_node_pre_post(pre_summary_rows, ciq_node_rows, node_logs_text, edp_rows)
         st.markdown(render_node_pre_post_table(node_pre_post_rows), unsafe_allow_html=True)
@@ -1089,9 +1101,8 @@ with tab_audit:
         # Engineer Comments is computed silently here (not displayed in this
         # tab) purely so CR Desc's auto-detected Nodes/Bands still populate —
         # CR Desc reads state["engineer_comments"] via extract_bands_from_comments().
-        amos_lte_rows = amos_nr_rows = None
-        if node_logs_text:
-            _, amos_lte_rows, amos_nr_rows = av.build_amos_tables(node_logs_text)
+        amos_lte_rows = state["amos_lte_rows"] if node_logs_text else None
+        amos_nr_rows = state["amos_nr_rows"] if node_logs_text else None
         ciq_lte_rows = cv.build_param_table(ciq_wb, "eUtran Parameters", ["EutranCellFDDId", "RRU type"])
         ciq_nr_rows = cv.build_param_table(ciq_wb, "5G Info", ["NRCellDU", "RRU Type"])
         state["engineer_comments"] = build_engineer_comments(
@@ -1168,18 +1179,10 @@ with tab_audit:
 # ══════════════════════════════════════════════════════════════════════
 with tab_edp:
     st.subheader("EDP Validator")
-    # Primary AND Secondary node ids, not just checked_nodes (which only ever
-    # holds the Primary name — 'Node to be built as' — so every check below
-    # was silently skipping every Secondary physical node, e.g. HXIN010147
-    # paired with HXL04147, even though these check functions already have
-    # their own Primary/Secondary-aware logic via _edp_role() and were
-    # clearly written to validate both — they just never received the
-    # Secondary node's name as input.
-    node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
-    edp_check_node_ids = [n["node"] for n in node_role_list]
+    node_role_list = state["node_role_list"]
 
     section_title("EDP Field Values — Primary & Secondary Nodes")
-    edp_field_rows = rc.build_edp_field_table(edp_rows, node_role_list)
+    edp_field_rows = state["edp_field_rows"]
     st.markdown(render_table(edp_field_rows, status_key=None, columns=[
         ("node", "Node"), ("role", "Role"), ("SITE_NAME", "SITE_NAME"), ("CABINET", "CABINET"),
         ("BBU_TYPE", "BBU_TYPE"), ("NODE_MODEL", "NODE_MODEL"), ("SIAD_PORT_SIZE_BBU", "SIAD_PORT_SIZE_BBU"),
@@ -1195,7 +1198,7 @@ with tab_edp:
     if not node_logs_text:
         st.caption("Upload Pre kget-all logs to compare these fields against EDP.")
     else:
-        pivot_rows = rc.build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows)
+        pivot_rows = state["pre_edp_pivot_rows"]
         if not pivot_rows:
             st.caption("No Pre log matched any Primary/Secondary node for this run.")
         else:
@@ -1206,7 +1209,7 @@ with tab_edp:
                "highlighted. A node with no uploaded Pre log shows 'no data' (grey), not a mismatch — this "
                "is what an SMBB→MMBB-added Secondary is expected to look like; the Primary's own row is "
                "unaffected.")
-    checklist_field_rows = rc.build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb, results)
+    checklist_field_rows = state["checklist_field_rows"]
     st.markdown(render_table(checklist_field_rows, status_key="status", columns=[
         ("node", "Node"), ("role", "Role"), ("field", "Field"),
         ("pre_value", "Pre / CIQ Value"), ("edp_value", "Post (EDP) Value"),
