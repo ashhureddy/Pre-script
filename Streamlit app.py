@@ -505,6 +505,30 @@ def render_rfds_grouped_table(rows):
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
 
+def render_pre_vs_edp_pivot_table(rows):
+    """Node ID + one 2-col (pre | EDP) group per Bearer/OAM field — matches
+    the wide screenshot layout. rows come from
+    rrnrbl_checklist.build_pre_vs_edp_pivot_rows()."""
+    if not rows:
+        return '<div class="qkx-empty">No data.</div>'
+    groups = [("Bearer VLAN", "bearer_vlan"), ("Bearer IPv6", "bearer_ipv6"),
+              ("Bearer Default Router", "bearer_router"), ("OAM VLAN", "oam_vlan"),
+              ("OAM IPv6", "oam_ipv6"), ("OAM Default Router", "oam_router")]
+    head1 = '<th rowspan="2">Node ID</th>' + "".join(
+        f'<th colspan="2" class="qkx-group-start">{esc(label)}</th>' for label, _ in groups)
+    head2 = "".join('<th class="qkx-group-start">pre</th><th>EDP</th>' for _ in groups)
+    body = []
+    for r in rows:
+        cells = f"<td>{esc(r['label'])}</td>"
+        for _, key in groups:
+            cells += (f'<td class="qkx-group-start">{esc(r.get(key + "_pre", ""))}</td>'
+                      f'<td>{esc(r.get(key + "_edp", ""))}</td>')
+        body.append(f"<tr>{cells}</tr>")
+    return (f'<div class="qkx-table-wrap"><table class="qkx-table">'
+            f'<thead><tr>{head1}</tr><tr>{head2}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
 def section_title(text, badge=None):
     """badge: optional right-aligned pill (e.g. '18 CELLS'), matching
     QUICKIX HTML's card-header count badge."""
@@ -1144,13 +1168,6 @@ with tab_audit:
 # ══════════════════════════════════════════════════════════════════════
 with tab_edp:
     st.subheader("EDP Validator")
-    mm_by_node = {}
-    for m in cer.mixed_mode_rows(ciq_wb):
-        n = str(m.get("Node to be built as") or m.get("eNodeB Name") or "").strip()
-        if n:
-            mm_by_node[n] = m
-    controller_ids = [r.get("Controller ID") for r in cer.sheet_rows_as_dicts(ciq_wb["Controller Info"])
-                       if r.get("Controller ID")] if "Controller Info" in ciq_wb.sheetnames else []
     # Primary AND Secondary node ids, not just checked_nodes (which only ever
     # holds the Primary name — 'Node to be built as' — so every check below
     # was silently skipping every Secondary physical node, e.g. HXIN010147
@@ -1160,31 +1177,6 @@ with tab_edp:
     # Secondary node's name as input.
     node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
     edp_check_node_ids = [n["node"] for n in node_role_list]
-    checks = {
-        "Found in EDP": rc._edp_found_status(edp_rows, edp_check_node_ids),
-        "Cabinet naming": rc._edp_cabinet_status(edp_rows, edp_check_node_ids),
-        "Port size (BBU mode)": rc._edp_port_size_status(edp_rows, edp_check_node_ids, mm_by_node),
-        "Port facing (Primary/Secondary)": rc._edp_port_facing_status(edp_rows, edp_check_node_ids),
-        "Bearer VLAN clash": rc._edp_bearer_vlan_status(edp_rows, edp_check_node_ids),
-        "IPv6 bearer addressing": rc._edp_group_status(edp_rows, edp_check_node_ids, rc.IPV6_BEARER_FIELDS, "IPv6 bearer"),
-        "IPv6 OAM addressing": rc._edp_group_status(edp_rows, edp_check_node_ids, rc.IPV6_OAM_FIELDS, "IPv6 OAM"),
-        "Controller (ANCEQ)": rc._edp_controller_status(edp_rows, controller_ids),
-        "PTP configuration": rc._edp_ptp_status(edp_rows, edp_check_node_ids),
-    }
-    n_pass = sum(1 for s, _ in checks.values() if s == "match")
-    n_fail = sum(1 for s, _ in checks.values() if s == "mismatch")
-    n_unk = sum(1 for s, _ in checks.values() if s not in ("match", "mismatch"))
-
-    s1, s2, s3, s4 = st.columns(4)
-    s1.markdown(f'<div class="qkx-stat"><b>{len(edp_check_node_ids)}</b><br>Expected Nodes</div>', unsafe_allow_html=True)
-    s2.markdown(f'<div class="qkx-stat"><b>{n_pass}</b><br>Pass</div>', unsafe_allow_html=True)
-    s3.markdown(f'<div class="qkx-stat"><b>{n_fail}</b><br>Fail</div>', unsafe_allow_html=True)
-    s4.markdown(f'<div class="qkx-stat"><b>{n_unk}</b><br>No data</div>', unsafe_allow_html=True)
-
-    section_title("EDP field checks")
-    st.markdown(render_table([{"check": k, "status": s, "detail": d} for k, (s, d) in checks.items()],
-                              columns=[("check", "Check"), ("status", "Status"), ("detail", "Detail")]),
-                unsafe_allow_html=True)
 
     section_title("EDP Field Values — Primary & Secondary Nodes")
     edp_field_rows = rc.build_edp_field_table(edp_rows, node_role_list)
@@ -1203,26 +1195,11 @@ with tab_edp:
     if not node_logs_text:
         st.caption("Upload Pre kget-all logs to compare these fields against EDP.")
     else:
-        pre_edp_rows = rc.build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows)
-        if not pre_edp_rows:
+        pivot_rows = rc.build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows)
+        if not pivot_rows:
             st.caption("No Pre log matched any Primary/Secondary node for this run.")
         else:
-            st.markdown(render_table(pre_edp_rows, status_key="status", columns=[
-                ("node", "Node"), ("role", "Role"), ("field", "Field"),
-                ("pre_value", "Pre Value"), ("edp_value", "EDP Value"),
-            ]), unsafe_allow_html=True)
-
-    section_title("Board Type (CIQ vs EDP vs RFDS)")
-    st.markdown(render_table(results.get("board_type", []), columns=[
-        ("node", "Node"), ("ciq_du_type", "CIQ DU Type"), ("edp_model", "EDP Model"),
-        ("rfds_agrees", "RFDS Agrees"), ("status", "Status"), ("note", "Note")]),
-                unsafe_allow_html=True)
-
-    section_title("XMU Port Overlap (RIport uniqueness)")
-    st.markdown(render_table(results.get("xmu_port_overlap", []), columns=[
-        ("node", "Node"), ("cell", "Cell"), ("du_type", "DU Type"), ("xmu", "XMU"),
-        ("xmu_ports", "XMU Ports"), ("status", "Status"), ("note", "Note")]),
-                unsafe_allow_html=True)
+            st.markdown(render_pre_vs_edp_pivot_table(pivot_rows), unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 4 — RET Antenna Checklist — ON HOLD. Placeholder only, no logic.
