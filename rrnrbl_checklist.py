@@ -731,3 +731,140 @@ def build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows):
             row[f"{out_key}_edp"] = _norm(edp_rec.get(edp_key)) if edp_rec else "—"
         out.append(row)
     return out
+
+
+# ── Unified Pre/CIQ vs Post(EDP) checklist — the 12-field spec confirmed
+# against the screenshot table. Two fields (the Default Router pair) are
+# intentionally excluded from mismatch-highlighting per that spec (still
+# shown, status forced to 'info' so they never render red/green) — routers
+# are shared infra, not something a build error would typically shift.
+#
+# Per-field source of the "Pre/CIQ" side:
+#   - the 6 Bearer/OAM network fields  -> Pre kget-all log (extract_bearer_oam_ipv6)
+#   - node_model                        -> CIQ, via the SAME results['board_type']
+#                                          check already computed elsewhere (CIQ DU
+#                                          Type vs EDP Model) — not Pre-log based,
+#                                          matching "Node model should match the CIQ"
+#   - cabinet                           -> derived, not read from any log: a
+#                                          Secondary's cabinet is checked against
+#                                          its OWN paired Primary's cabinet + 'V'
+#                                          (e.g. Primary BBU01 -> Secondary BBU01V),
+#                                          not just format-checked independently
+#                                          (the older _edp_cabinet_status above only
+#                                          checks the regex/'V' suffix in isolation,
+#                                          never that the NUMBER actually matches its
+#                                          own Primary — two unrelated nodes named
+#                                          BBU01/BBU02V would previously pass)
+#   - site_name/bbu_type/siad_port_size_bbu/siad_port_facing_bbu -> EDP value only,
+#                                          no Pre/CIQ counterpart in this pipeline
+#
+# A node with NO uploaded Pre log (new node — same convention run_validation.py
+# already uses for is_new_node=not has_pre) gets 'unknown' (grey, no highlight)
+# on every Pre-sourced field instead of 'mismatch': this is what makes an
+# SMBB(Pre)->MMBB(Post) transition safe — the newly-appearing Secondary has no
+# Pre history by definition, and that absence must not be flagged. The Primary's
+# own row is built and compared exactly as it always is, unaffected by whether
+# a Secondary exists at all.
+CHECKLIST_FIELD_SPEC = [
+    ("SITE_NAME", "site_name", True),
+    ("CABINET", "cabinet", True),
+    ("BBU_TYPE", "bbu_type", True),
+    ("NODE_MODEL", "node_model", True),
+    ("SIAD_PORT_SIZE_BBU", "siad_port_size_bbu", True),
+    ("SIAD_PORT_FACING_BBU", "siad_port_facing_bbu", True),
+    ("BEARER_ENODEB_SB_VLAN_ID", "bearer_enodeb_sb_vlan_id", True),
+    ("IPV6_SIAD_BEARER_IP_DEF_ROUTER", "ipv6_siad_bearer_ip_def_router", False),
+    ("IPV6_ENODEB_BEARER_IP", "ipv6_enodeb_bearer_ip", True),
+    ("OAM_ENODEB_SIAD_OAM_VLAN", "oam_enodeb_siad_oam_vlan", True),
+    ("IPV6_SIAD_OAM_IP_DEF_ROUTER", "ipv6_siad_oam_ip_def_router", False),
+    ("IPV6_ENODEB_OAM_IP", "ipv6_enodeb_oam_ip", True),
+]
+
+_PRE_NETWORK_FIELD_MAP = {
+    "BEARER_ENODEB_SB_VLAN_ID": "bearer_vlan",
+    "IPV6_ENODEB_BEARER_IP": "bearer_ip",
+    "IPV6_SIAD_BEARER_IP_DEF_ROUTER": "bearer_router_ip",
+    "OAM_ENODEB_SIAD_OAM_VLAN": "oam_vlan",
+    "IPV6_ENODEB_OAM_IP": "oam_ip",
+    "IPV6_SIAD_OAM_IP_DEF_ROUTER": "oam_router_ip",
+}
+
+
+def _cabinet_pairing_map(ciq_wb, edp_rows):
+    """{secondary_node_id: expected_cabinet} from the SAME Mixed Mode Info
+    pairing build_primary_secondary_node_list() uses — recomputed here
+    (rather than reverse-engineered from its flat output) so a Secondary
+    is always checked against its OWN Primary, never just row order."""
+    expected = {}
+    for m in cer.mixed_mode_rows(ciq_wb):
+        build_as = _norm(m.get("Node to be built as")).upper()
+        e_name, g_name = _norm(m.get("eNodeB Name")), _norm(m.get("gNodeB Name"))
+        bbu_mode = _norm(m.get("BBU Mode")).upper()
+        if e_name and e_name.upper() == build_as:
+            primary, secondary = e_name, g_name
+        elif g_name and g_name.upper() == build_as:
+            primary, secondary = g_name, e_name
+        else:
+            primary, secondary = (e_name or g_name), (g_name if e_name else "")
+        if not (secondary and primary and bbu_mode != "SMBB"):
+            continue
+        prim_rows = cer.edp_rows_for_site(edp_rows, primary)
+        prim_cab = _norm(prim_rows[0].get("CABINET")) if prim_rows else ""
+        expected[secondary] = f"{prim_cab}V" if prim_cab else None
+    return expected
+
+
+def build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb, results):
+    """One row per (node, role, field) across all 12 fields in
+    CHECKLIST_FIELD_SPEC — 'pre_value' is Pre-log/CIQ/derived depending on
+    the field (see module comment above), 'edp_value' is always the EDP
+    (Post/target) value. status is 'unknown' (no highlight) whenever
+    there's nothing on the Pre/CIQ side to compare, INCLUDING every node
+    with no uploaded Pre log at all — this is what keeps a newly-added
+    Secondary (SMBB->MMBB) from being flagged just for lacking history."""
+    import pre_extract as pe
+
+    board_type_by_node = {r.get("node"): r for r in results.get("board_type", [])}
+    cabinet_expected = _cabinet_pairing_map(ciq_wb, edp_rows)
+
+    out = []
+    for entry in node_role_list:
+        nid, role = entry["node"], entry["role"]
+        log_text = (node_logs_text or {}).get(nid)
+        pre_net_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+
+        for edp_col, label, highlight in CHECKLIST_FIELD_SPEC:
+            edp_v = _norm(edp_rec.get(edp_col)) if edp_rec else ""
+
+            if edp_col == "NODE_MODEL":
+                bt = board_type_by_node.get(nid)
+                pre_v = _norm(bt.get("ciq_du_type")) if bt else ""
+                edp_v = _norm(bt.get("edp_model")) if bt else edp_v
+                status = str(bt.get("status", "unknown")).lower() if bt else "unknown"
+            elif edp_col == "CABINET":
+                if role == "Secondary" and nid in cabinet_expected:
+                    pre_v = cabinet_expected[nid] or ""
+                    status = "unknown" if not pre_v or not edp_v else (
+                        "match" if pre_v.upper() == edp_v.upper() else "mismatch")
+                else:
+                    pre_v = ""
+                    status = "unknown"
+            elif edp_col in _PRE_NETWORK_FIELD_MAP:
+                pre_v = pre_net_vals.get(_PRE_NETWORK_FIELD_MAP[edp_col]) or ""
+                status = "unknown" if not pre_v or not edp_v else (
+                    "match" if pre_v == edp_v else "mismatch")
+            else:
+                pre_v = ""
+                status = "unknown"
+
+            if not highlight and status == "mismatch":
+                status = "info"  # unchecked fields: shown, never highlighted red
+
+            out.append({
+                "node": nid, "role": role, "field": label,
+                "pre_value": pre_v or "—", "edp_value": edp_v or "—",
+                "status": status,
+            })
+    return out
