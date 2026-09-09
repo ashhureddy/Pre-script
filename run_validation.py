@@ -17,7 +17,7 @@ import pdf_report as pr
 import warnings_text as wt
 
 
-def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
+def run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf):
     ciq_wb = cer.load_ciq(ciq_path)
     edp_ws = cer.load_edp(edp_path)
     _, edp_rows = cer.build_edp_index(edp_ws)
@@ -26,7 +26,7 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
     rfds_pages = rf.load_rfds_pages(rfds_bytes) if rfds_bytes else None
     site_details = cn.build_site_details(ciq_wb, rfds_pages)
 
-    node_logs = {nid: (open(p).read() if p else None) for nid, p in node_log_paths.items()}
+    node_logs = dict(node_logs_text)
 
     mm_rows = cer.mixed_mode_rows(ciq_wb)
     ciq_nodes = [str(r.get('Node to be built as')).strip() for r in mm_rows if r.get('Node to be built as')]
