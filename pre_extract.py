@@ -835,7 +835,7 @@ def extract_bearer_oam_ipv6(text):
         return {}
 
     router_iface_to_vlan = {}
-    vlan_block = get_command_block(text, 'Transport=1,VlanPort=') or ''
+    vlan_block = get_command_block(text, 'vlanport') or ''
     for rec in re.split(r'\n(?=\d+ +Transport=1,VlanPort=)', vlan_block):
         header_m = re.match(r'^\d+ +Transport=1,VlanPort=\S+', rec)
         if not header_m:
