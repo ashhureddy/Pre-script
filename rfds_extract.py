@@ -404,7 +404,89 @@ def _is_rf_inv_header_line(line):
     return len(toks) >= 2 or toks[0].lower().strip(':') in _RF_INV_HEADER_SOLO
 
 
-def extract_rf_inventory_antennas(pages):
+def _extract_rf_inventory_antennas_from_tables(rfds_bytes):
+    """Genuine-PDF path for extract_rf_inventory_antennas().
+
+    The text layer of a genuine-PDF RFDS interleaves each row's fields
+    across the lines above AND below its anchor line (confirmed on a real
+    user file — 'MA-2L4M-65F8 HXL01791_7A_1 -/-' / 'A-1 ANTENNA ACE
+    5G,LTE - - UPDATE' / '-A12P-HG HXL01791_9A_1 -/-'), so no
+    flatten-then-split-on-status scheme can recover it: the model comes out
+    truncated with stray '-/-' glued on, and every linked cell listed
+    BELOW the anchor is swallowed into the NEXT record, vanishing from
+    this one (which is what made real antennas report NOT FOUND).
+
+    pdfplumber's table extraction recovers the true cell boundaries, with
+    the full LinkedCells list and both model fragments inside single cells.
+    Returns None if this isn't a genuine PDF or no usable table is found,
+    so the caller can fall back to the zip-bundle text parser."""
+    if not rfds_bytes or rfds_bytes[:5] != b"%PDF-":
+        return None
+    pages_text = load_rfds_pages(rfds_bytes)
+    heading = 'RF Inventory Details (Final)'
+    target = {n for n, t in pages_text.items() if heading.lower() in t.lower()}
+    if not target:
+        return None
+
+    import pdfplumber
+    result, found_any = {}, False
+    with pdfplumber.open(io.BytesIO(rfds_bytes)) as pdf:
+        for page_num in sorted(target):
+            for table in pdf.pages[page_num - 1].extract_tables():
+                hdr_idx = None
+                for i, row in enumerate(table):
+                    norm = [re.sub(r'\s+', '', str(c or '')) for c in row]
+                    if 'EquipmentType' in norm and 'LinkedCells' in norm:
+                        hdr_idx = i
+                        header = norm
+                        break
+                if hdr_idx is None:
+                    continue
+                col = {name: header.index(name) for name in
+                       ('Sec-Pos', 'EquipmentType', 'Vendor', 'Model', 'LinkedCells')
+                       if name in header}
+                if 'EquipmentType' not in col or 'LinkedCells' not in col:
+                    continue
+                for row in table[hdr_idx + 1:]:
+                    if len(row) <= max(col.values()):
+                        continue
+                    etype = re.sub(r'\s+', '', str(row[col['EquipmentType']] or '')).upper()
+                    # 'INTEGRATED ANTENNA RADIO' (AIR-series: antenna built
+                    # into the radio) carries a real antenna Model and
+                    # LinkedCells, and the zip-bundle text path already
+                    # matches these via its ANTENNA substring anchor — so
+                    # excluding them here would make the two RFDS formats
+                    # disagree, and would report NOT FOUND for every AIR
+                    # cell whose model the RFDS plainly states.
+                    if etype not in ('ANTENNA', 'INTEGRATEDANTENNARADIO'):
+                        continue
+                    found_any = True
+                    # Model fragments wrap inside the cell as separate lines;
+                    # a fragment starting with '-' is a mid-word continuation
+                    # ('MA-2L4M-65F8' + '-A12P-HG'), anything else is a real
+                    # space-separated token.
+                    model = ''
+                    for frag in str(row[col['Model']] or '').split('\n'):
+                        frag = frag.strip()
+                        if not frag:
+                            continue
+                        model = frag if not model else (
+                            model + frag if frag.startswith('-') else model + ' ' + frag)
+                    cells = [c.strip() for c in str(row[col['LinkedCells']] or '').split('\n') if c.strip()]
+                    cells = [c for c in cells if _CELL_TOKEN_RE.fullmatch(c)]
+                    if not cells:
+                        continue
+                    vendor = re.sub(r'\s+', ' ', str(row[col.get('Vendor', 0)] or '')).strip() if 'Vendor' in col else ''
+                    sec_pos = re.sub(r'\s+', '', str(row[col.get('Sec-Pos', 0)] or '')) if 'Sec-Pos' in col else ''
+                    shared = sorted(cells)
+                    for c in cells:
+                        if c not in result:
+                            result[c] = {'model': model, 'vendor': vendor,
+                                          'sec_pos': sec_pos, 'shared_cells': shared}
+    return result if found_any else None
+
+
+def extract_rf_inventory_antennas(pages, rfds_bytes=None):
     """Antenna Model + linked cells, from 'RF Inventory Details (Final)',
     filtered to EquipmentType == 'ANTENNA'. This is the authoritative
     per-antenna record — a fix over the previous approach of reading
@@ -430,6 +512,10 @@ def extract_rf_inventory_antennas(pages):
     Returns {cell_name: {'model':, 'vendor':, 'sec_pos':, 'shared_cells':}}
     where shared_cells lists every cell fed by that same physical antenna.
     """
+    if rfds_bytes is not None:
+        via_tables = _extract_rf_inventory_antennas_from_tables(rfds_bytes)
+        if via_tables:
+            return via_tables
     text = find_pages_by_heading(pages, 'RF Inventory Details (Final)')
     if not text:
         return {}
