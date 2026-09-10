@@ -462,7 +462,7 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (40, "CIQ tabs checks", "5g info", "nRTAC/cellLocalId ENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
         (41, "CIQ tabs checks", "5g info", "arfcnDL/arfcnUL/bSChannelBwDL ENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
         (42, "CIQ tabs checks", "5g info", "RBB Type vs no.ofrx/tx from ENM", "Radio", lambda: _agg(results.get("params_5g", []))),
-        (43, "CIQ tabs checks", "5g info", "DSS check", "NR/Radio", None),
+        (43, "CIQ tabs checks", "5g info", "DSS check", "NR/Radio", lambda: _agg(results.get("dss", []))),
         (44, "CIQ tabs checks", "5g info", "ssbFrequency/ssbOffset/ssbDuration", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
         (45, "CIQ tabs checks", "5g info", "NSA/SA", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
         (46, "CIQ tabs checks", "5g info", "BBU Type should match with RFDS and CIQ", "NR/Radio", lambda: _agg(board_type)),
@@ -482,7 +482,7 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (57, "CIQ tabs checks", "eUtran Parameters Tab", "earfcnDl/dlChannelBandwidth ENM vs CIQ", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
         (58, "CIQ tabs checks", "eUtran Parameters Tab", "RBB type/noOfTx/noOfRx - ISDLONLY", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
         (59, "CIQ tabs checks", "eUtran Parameters Tab", "cellId ENM vs CIQ (SOW)", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
-        (60, "CIQ tabs checks", "eUtran Parameters Tab", "EutranCellFDDId/beamDirection vs RFDS", "Radio", None),
+        (60, "CIQ tabs checks", "eUtran Parameters Tab", "EutranCellFDDId/beamDirection vs RFDS", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
         (61, "CIQ tabs checks", "eUtran Parameters Tab", "electricalAntennaTilt integer", "Radio", lambda: _agg(results.get("params_4g", []))),
         (62, "CIQ tabs checks", "eUtran Parameters Tab", "configuredOutputPower depends on RRU type", "Radio", None),
         (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx/RBB Type vs Single/Double RILink", "Radio", lambda: _agg(results.get("params_4g", []))),
@@ -495,7 +495,7 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (70, "CIQ tabs checks", "eUtran Parameters Tab", "XMU Validation vs RFDS", "Radio", lambda: _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages)),
         (71, "CIQ tabs checks", "eUtran Parameters Tab", "ENM Validation - site locator (B2E)", "Radio", None),
 
-        (72, "CIQ tabs checks", "Losses and delay", "Losses/delay matches FDD and TxRx", "Radio", None),
+        (72, "CIQ tabs checks", "Losses and delay", "Losses/delay matches FDD and TxRx", "Radio", lambda: _agg(results.get("losses_vs_antenna", []))),
         (73, "CIQ tabs checks", "Antenna Information", "AntennaUnit/AntennaSubunit unique band-wise", "Radio", lambda: _agg(results.get("antenna", []))),
         (74, "CIQ tabs checks", "Sector Movement / Deletion sheet", "Source/target cells match ENM/eUtran", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
 
