@@ -126,19 +126,77 @@ def extract_cell_details(pages):
     #   '-11,A-1-12'  — starts with hyphen-digit
     #   '11,B-1-12'   — starts with digit-comma
     #   ',B-1-4'      — starts with comma-letter (sector-position list wrap)
+    #
+    # Guard against a real second bug (confirmed on RFDS14808/HXL00147): the
+    # digit-comma pattern above also matches the START OF A GENUINE NEW ROW
+    # whose RRH model number happens to be 2+ digits (e.g. '8843 B2/B66A |
+    # RRUS-32 B2 | 4890') - '88' reads as 'digit,digit'. Blindly joining that
+    # onto the PRECEDING line corrupted an already-complete row (one that
+    # already ends in NEW/EXISTING/UPDATE/AF MIGRATED) and orphaned the
+    # displaced row, losing it entirely. A line is only a real continuation
+    # if the row being built onto is still incomplete (no status keyword at
+    # its end yet).
+    _ROW_TERMINATED_RE = re.compile(r'(NEW|EXISTING|UPDATE|AF MIGRATED)\s*$')
+    # Second confirmed pattern (same real RFDS): the RRH value itself can
+    # wrap onto its own line BEFORE the row's Cell ID/BBU, e.g.:
+    #   '8843 B2/B66A | RRUS-32 B2 | 4890'
+    #   'B25/B66 HXL04147_9A_1 HXL04147 A-1-9,A-4(D)-10 1900 8 ... EXISTING'
+    # Here the wrapped RRH fragment's tail ('8843 ... 4890') sits on its own
+    # line, and its head continuation ('B25/B66') lands as the FIRST token
+    # of the FOLLOWING line, pushing that row's own Cell ID/BBU to 2nd/3rd
+    # position. This is a reorder, not a simple append: rebuild the line as
+    # '<cell> <bbu> <rrh tail> <rrh head> <rest of row>'.
+    _CELL_TOKEN_RE = re.compile(r'^[A-Za-z0-9]+(?:_\d+)?_(?:N\d{3}|\d)[A-F](?:_\d+)?(?:_[EF])?$')
+    raw_lines = [rl.rstrip('\r') for rl in clean.split('\n')]
     joined_lines = []
-    for raw_line in clean.split('\n'):
-        line = raw_line.rstrip('\r')
+    i = 0
+    while i < len(raw_lines):
+        line = raw_lines[i]
         stripped = line.lstrip()
-        is_continuation = bool(joined_lines) and (
-            re.match(r'^-\d', stripped) or          # -11,A-1-12
-            re.match(r'^\d[\d,]', stripped) or      # 11,B-1-12
-            re.match(r'^,[A-Za-z]', stripped)       # ,B-1-4
+        if (stripped and not _CELL_TOKEN_RE.match(stripped.split(' ', 1)[0])
+                and i + 1 < len(raw_lines)):
+            nxt_toks = raw_lines[i + 1].lstrip().split()
+            if len(nxt_toks) >= 3 and _CELL_TOKEN_RE.match(nxt_toks[1]) and _RRH_BAND_SUFFIX_RE.match(nxt_toks[0]):
+                rebuilt = ' '.join([nxt_toks[1], nxt_toks[2], stripped, nxt_toks[0]] + nxt_toks[3:])
+                joined_lines.append(rebuilt)
+                i += 2
+                continue
+        is_new_token = bool(re.match(r'^[A-Za-z]-\d', stripped))
+        is_digit_lead = bool(re.match(r'^\d', stripped))
+        is_hyphen_lead = bool(re.match(r'^-\d', stripped))
+        is_comma_lead = bool(re.match(r'^,[A-Za-z]', stripped))
+        is_paren_lead = bool(re.match(r'^\)-\d', stripped))    # A-2(D\n)-3,A-2(D)-4 (wrap inside '(D)')
+        is_continuation = bool(joined_lines) and not _ROW_TERMINATED_RE.search(joined_lines[-1]) and (
+            is_hyphen_lead or                       # -11,A-1-12
+            is_digit_lead or                        # 11,B-1-12  OR  '23 64921...' (ambiguous, resolved below)
+            is_comma_lead or                        # ,B-1-4
+            is_paren_lead or                        # )-3,A-2(D)-4
+            is_new_token                             # B-1-5,B-1-6,B-1-7 (wrap lands exactly on a token boundary)
         )
         if is_continuation:
-            joined_lines[-1] = joined_lines[-1].rstrip('\r') + stripped
+            # A hyphen-lead or comma-lead fragment supplies its own
+            # connector character, so it always glues on directly (no
+            # space) regardless of what precedes it. The other two forms
+            # are genuinely ambiguous — 'A-2(D)-' + '2,...' (mid-token
+            # completion) and 'B-1-12' + '23 64921...' (start of the next
+            # FIELD) both begin with a digit, and 'A-2(D)-3,' + 'A-2(D)-4,'
+            # (next comma-separated list item) and '1900' + 'A-1-5,...'
+            # (start of the sector-position list after a different field)
+            # both begin with a letter-hyphen-digit token — resolved by
+            # whether the line being built onto already ends with its own
+            # connector ('-' or ','): if so, this fragment continues that
+            # same construct with no added space; otherwise a field/token
+            # boundary is being crossed and a space is required, or e.g.
+            # '...B-1-12' + '23 64921...' silently fuses into '...B-1-1223
+            # 64921...' (confirmed real corruption).
+            if is_hyphen_lead or is_comma_lead or is_paren_lead:
+                needs_space = False
+            else:
+                needs_space = not joined_lines[-1].endswith(('-', ','))
+            joined_lines[-1] = joined_lines[-1] + (' ' if needs_space else '') + stripped
         else:
             joined_lines.append(line)
+        i += 1
     clean = '\n'.join(joined_lines)
 
     _CELL_DETAILS_ROW_RE = re.compile(
