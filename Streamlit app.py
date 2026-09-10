@@ -864,6 +864,7 @@ if not st.session_state["has_run"]:
                 st.error(f"Validation failed: {e}")
                 st.stop()
         st.session_state["state"] = state
+        st.session_state["_memo"] = {}   # new run ⇒ drop all derived caches
         st.session_state["has_run"] = True
         st.rerun()
     elif not ready:
@@ -874,6 +875,32 @@ if not st.session_state["has_run"]:
 # RESULTS — one validation run, five tabs, all reading the same state.
 # ══════════════════════════════════════════════════════════════════════
 state = st.session_state["state"]
+
+
+# ── Per-validation-run memo ────────────────────────────────────────────
+# Streamlit re-executes the WHOLE script on every widget interaction, and
+# st.tabs renders every tab's body regardless of which one is on screen.
+# So ticking one checkbox in the RRNRBL checklist re-ran all the derived
+# work for all five tabs before the next tick could register.
+# build_rfds_grouped_rows() was the worst of it: it calls
+# extract_rf_inventory_antennas(), whose genuine-PDF path runs pdfplumber
+# table extraction (~2.7s on a real RFDS), and it was being called TWICE
+# per rerun — once for the RFDS tab and again for the consolidated report
+# — so roughly 5s of pure recompute per keystroke/tick.
+# None of these inputs change between reruns; they only change when
+# 'Run Validation' produces a new state. Memoising against that run
+# (cache is reset in the run handler) makes the second and later reruns
+# effectively free.
+def _memo(key, fn, sig=()):
+    # One slot per key: a new sig replaces the old entry rather than adding
+    # to it, so the checklist workbook cache can't grow a copy per tick.
+    cache = st.session_state.setdefault("_memo", {})
+    hit = cache.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    val = fn()
+    cache[key] = (sig, val)
+    return val
 results = state["results"]
 ciq_wb = state["ciq_wb"]
 site_details = state["site_details"]
@@ -1038,7 +1065,8 @@ with tab_rfds:
         st.caption("RFDS doesn't expose an XMU count (only presence) — RFDS XMU shows Found/Not Found, not a count.")
 
     with st.container(border=True):
-        grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages, state.get("rfds_bytes"))
+        grouped_rows = _memo("grouped_rows", lambda: build_rfds_grouped_rows(
+            results, ciq_wb, rfds_pages, state.get("rfds_bytes")))
         n_fail = sum(1 for r in grouped_rows if r["overall"] == "FAIL")
         n_pass = len(grouped_rows) - n_fail
         st.markdown(
@@ -1313,7 +1341,9 @@ with tab_consolidated:
         render_rrnrbl_checklist(checklist)
 
     with st.expander("Warnings & Comments", expanded=False):
-        rfds_verification_rows = build_rfds_verification_summary(build_rfds_grouped_rows(results, ciq_wb, rfds_pages, state.get("rfds_bytes")))
+        rfds_verification_rows = build_rfds_verification_summary(
+            _memo("grouped_rows", lambda: build_rfds_grouped_rows(
+                results, ciq_wb, rfds_pages, state.get("rfds_bytes"))))
         if rfds_verification_rows:
             st.markdown("**RFDS Verification:**")
             st.markdown(render_table(rfds_verification_rows,
@@ -1375,7 +1405,15 @@ with tab_consolidated:
 
     st.divider()
     manual_overrides = collect_manual_overrides(state["checklist"])
-    checklist_xlsx = rc.fill_checklist_xlsx(state["checklist"], state["site_id_fa"], manual_overrides=manual_overrides)
+    # Keyed on the overrides themselves: reruns that don't touch a tick or
+    # a remark reuse the built workbook instead of rebuilding it (this ran
+    # unconditionally on every rerun, including every checklist tick).
+    _ov_sig = tuple(sorted((r, bool(v.get("checked")), str(v.get("comment") or ""))
+                            for r, v in manual_overrides.items()))
+    checklist_xlsx = _memo("checklist_xlsx",
+                           lambda: rc.fill_checklist_xlsx(state["checklist"], state["site_id_fa"],
+                                                          manual_overrides=manual_overrides),
+                           _ov_sig)
     d1, d2 = st.columns(2)
     with d1:
         st.download_button("⬇️ Download PDF", data=state["pdf_bytes"], file_name="validation_report.pdf",
