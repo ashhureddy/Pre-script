@@ -370,6 +370,39 @@ _RF_INV_ANCHOR_RE = re.compile(
 _RF_INV_STATUS_RE = re.compile(r'\b(EXISTING|NEW|UPDATE|REMOVE|AF MIGRATED)\b')
 _RF_INV_TECH_RE = re.compile(r'^(5G|LTE|4G)(,(5G|LTE|4G))*$')
 
+# Column-header vocabulary for 'RF Inventory Details (Final)'. The header
+# row wraps across a VARYING number of lines with a VARYING column order
+# between RFDS exports (confirmed: every sample in one batch wrapped as
+# 'Model Cascaded' + 'From/Cpri Info Sec- Pos Equipment Type Vendor Linked
+# Cells ...', while a real user's export wrapped as '... Cascaded Sec- Pos
+# Equipment Type Vendor Model Linked Cells ...' — Model in a different
+# position entirely). Matching fixed header strings therefore silently
+# fails on any export that wraps differently, and the unstripped header
+# line is then consumed as a data record: its text becomes the 'model'
+# for the first antenna row and the row-splitting shifts, so later cells
+# lose their antenna entirely and report NOT FOUND. Detecting a header
+# line by its VOCABULARY instead is order- and wrap-independent.
+_RF_INV_HEADER_WORDS = {
+    'model', 'cascaded', 'from/cpri', 'from', 'cpri', 'info', 'sec-', 'sec',
+    'pos', 'sec-pos', 'equipment', 'type', 'equipmenttype', 'vendor', 'linked',
+    'cells', 'linkedcells', 'technology', 'rrh', 'position', 'common', 'name',
+    'commonname', 'status',
+}
+# Single-token header lines: only strip words that can never be a data
+# value in this table (a Model is never literally 'Model', a Vendor never
+# literally 'Vendor'). 'rrh'/'pos'/'type'/'name' are deliberately NOT here
+# — 'RRH' is a real EquipmentType value in data rows.
+_RF_INV_HEADER_SOLO = {'model', 'cascaded', 'technology', 'vendor', 'status', 'from/cpri'}
+
+
+def _is_rf_inv_header_line(line):
+    toks = line.split()
+    if not toks:
+        return False
+    if not all(t.lower().strip(':') in _RF_INV_HEADER_WORDS for t in toks):
+        return False
+    return len(toks) >= 2 or toks[0].lower().strip(':') in _RF_INV_HEADER_SOLO
+
 
 def extract_rf_inventory_antennas(pages):
     """Antenna Model + linked cells, from 'RF Inventory Details (Final)',
@@ -402,9 +435,10 @@ def extract_rf_inventory_antennas(pages):
         return {}
     text = text.replace('\x02', '-').replace('\u0002', '-')
     text = re.sub(r'^RF Inventory Details \(Final\).*$', '', text, flags=re.M)
-    text = re.sub(r'^Model Cascaded.*$', '', text, flags=re.M)
-    text = re.sub(r'^From/Cpri.*$', '', text, flags=re.M)
     text = re.sub(r'^Page \d+ of \d+\s*$', '', text, flags=re.M)
+    # Vocabulary-based header removal — see _is_rf_inv_header_line.
+    text = '\n'.join('' if _is_rf_inv_header_line(ln.rstrip('\r').strip()) else ln
+                     for ln in text.split('\n'))
 
     # Smart line-join: a continuation line starting with '-' is always a
     # mid-word wrap (join with no space); anything else is a normal
