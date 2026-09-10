@@ -401,12 +401,23 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
     # get no RFDS antenna entry, which is correct, not a gap.
     rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages) if rfds_pages is not None else {}
     ant_by_cell = {}
-    if "eUtran Parameters" in ciq_wb.sheetnames:
-        for r in cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]):
-            cell = r.get("EutranCellFDDId")
-            if not cell:
+    # LTE cells: 'eUtran Parameters' / 'antenna model'. 5G cells: '5G Info' /
+    # 'Antenna Type' — the same field under a different column name on a
+    # different sheet. Without the 5G leg, every NR cell fell through to the
+    # 'no antenna row' branch and rendered as '—' in BOTH the RFDS and CIQ
+    # antenna columns, even though extract_rf_inventory_antennas() had
+    # already found their antenna (confirmed: HXON001791_N002A_1 etc. are
+    # present in the RF Inventory 'Linked Cells' list, and were being
+    # discarded here rather than never extracted).
+    for sheet, cell_col, ant_col in (("eUtran Parameters", "EutranCellFDDId", "antenna model"),
+                                      ("5G Info", "NRCellDU", "Antenna Type")):
+        if sheet not in ciq_wb.sheetnames:
+            continue
+        for r in cer.sheet_rows_as_dicts(ciq_wb[sheet]):
+            cell = r.get(cell_col)
+            if not cell or cell in ant_by_cell:
                 continue
-            ciq_ant = r.get("antenna model")
+            ciq_ant = r.get(ant_col)
             ant_row = rf_antennas.get(cell)
             tier, detail = ar.resolve_antenna(ciq_ant, ant_row["model"] if ant_row else None)
             ant_by_cell[cell] = {"ciq": ciq_ant or "—", "rfds": (ant_row or {}).get("model", "NOT FOUND"),
