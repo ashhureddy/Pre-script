@@ -1207,6 +1207,42 @@ def check_sector_id_4890(node_id, ciq_wb, e_name=None):
     return out
 
 
+def check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name=None):
+    """'Checks if the sectors present in the Antenna info & Losses and
+    delays tab' — both CIQ sheets are keyed by EutranCellFDDId (confirmed
+    real CIQ), and every LTE sector should appear in both; a sector present
+    in one but missing from the other is a flag."""
+    if "Antenna Information" not in ciq_wb.sheetnames or "Losses and Delays" not in ciq_wb.sheetnames:
+        return [{'rule': None, 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
+                 'note': 'Antenna Information or Losses and Delays sheet missing from this CIQ.'}]
+    prefix = str(e_name or node_id).strip().upper()
+
+    def _cells(sheet):
+        out = set()
+        for r in _rows(ciq_wb, sheet):
+            cell = r.get('EutranCellFDDId')
+            if cell and str(cell).split('_')[0].strip().upper() == prefix:
+                out.add(str(cell).strip())
+        return out
+
+    antenna_cells = _cells("Antenna Information")
+    losses_cells = _cells("Losses and Delays")
+    if not antenna_cells and not losses_cells:
+        return [{'rule': None, 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
+                 'note': 'No LTE sectors found for this node on either sheet.'}]
+    out = []
+    for cell in sorted(antenna_cells - losses_cells):
+        out.append({'rule': None, 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
+                    'note': 'In Antenna Information but missing from Losses and Delays.'})
+    for cell in sorted(losses_cells - antenna_cells):
+        out.append({'rule': None, 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
+                    'note': 'In Losses and Delays but missing from Antenna Information.'})
+    if not out:
+        out.append({'rule': None, 'node': node_id, 'cell': '-', 'status': 'MATCH',
+                    'note': f'{len(antenna_cells)} sector(s) present on both sheets.'})
+    return out
+
+
 def check_rfbranch_per_aug(node_id, log_text):
     """Blueprint #34 'The RF branch number should not exceed 24 for each
     AUG'. Counts DISTINCT RfBranch numbers per AntennaUnitGroup across every
