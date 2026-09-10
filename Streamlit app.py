@@ -429,7 +429,22 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages, rfds_bytes=None):
         an = ant_by_cell.get(cell, {})
         cell_status = cv.get("status", "SKIPPED")
         rru_status = rt.get("status", "SKIPPED")
-        cellid_status = ci.get("status", "SKIPPED")
+        # Cell id here is CIQ vs RFDS ONLY. check_cell_id_vs_rfds's own
+        # status is a THREE-way verdict —
+        #     match = (ciq == rfds) and (pre == 'NA' or pre == ciq)
+        # — so reusing it dragged the Pre-vs-CIQ comparison into this tab
+        # and flagged rows red while showing two IDENTICAL numbers
+        # (confirmed: FCON094120_N005B_1/N005C_1, RFDS 52 / CIQ 52, red).
+        # Pre vs CIQ is the Audit tab's job; recompute from the two values
+        # this table actually displays so the verdict matches what's shown.
+        _ciq_id = str(ci.get("ciq") or "").strip()
+        _rfds_id = str(ci.get("rfds_rcn") or "").strip()
+        if not ci or not _rfds_id or _rfds_id == "NOT CHECKED":
+            cellid_status = "SKIPPED"
+        elif _rfds_id == "NOT FOUND":
+            cellid_status = "MISMATCH"
+        else:
+            cellid_status = "MATCH" if _ciq_id == _rfds_id else "MISMATCH"
         ant_tier = an.get("tier")
         if not an:
             ant_status = "SKIPPED"
@@ -455,7 +470,7 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages, rfds_bytes=None):
         if ant_status == "MISMATCH":
             warnings.append("Antenna mismatch")
         if cellid_status == "MISMATCH":
-            warnings.append("Cell ID mismatch")
+            warnings.append("Cell ID mismatch (CIQ vs RFDS)")
         if not ant_info_found:
             warnings.append("Antenna Info missing")
         if loss_mandatory and not loss_found:
