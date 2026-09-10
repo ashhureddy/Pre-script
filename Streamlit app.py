@@ -376,7 +376,7 @@ def _sheet_mentions_cell(ciq_wb, sheet_name, cell_id):
     return False
 
 
-def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
+def build_rfds_grouped_rows(results, ciq_wb, rfds_pages, rfds_bytes=None):
     """One row per cell, merging Cell verification / RRU verification /
     Antenna verification / Cell id / Antenna info / Losses & Delays /
     Warning — matches the confirmed HTML grouped-header table, including
@@ -399,7 +399,7 @@ def build_rfds_grouped_rows(results, ciq_wb, rfds_pages):
     # in 'Port Level Details'. AIR-series radios have no separate antenna
     # row here (antenna is integrated into the radio) — those cells simply
     # get no RFDS antenna entry, which is correct, not a gap.
-    rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages) if rfds_pages is not None else {}
+    rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages, rfds_bytes) if rfds_pages is not None else {}
     ant_by_cell = {}
     # LTE cells: 'eUtran Parameters' / 'antenna model'. 5G cells: '5G Info' /
     # 'Antenna Type' — the same field under a different column name on a
@@ -807,7 +807,8 @@ def run_full_validation(ciq_bytes, edp_bytes, edp_ext, rfds_bytes, node_logs_tex
 
     return dict(
         results=results, site_details=site_details, ciq_wb=ciq_wb, edp_rows=edp_rows,
-        checked_nodes=checked_nodes, rfds_pages=rfds_pages, pre_text=pre_text, post_text=post_text,
+        checked_nodes=checked_nodes, rfds_pages=rfds_pages, rfds_bytes=rfds_bytes,
+        pre_text=pre_text, post_text=post_text,
         scope_lines=scope_lines, sow=sow, checklist=checklist, site_id_fa=site_id_fa,
         pdf_bytes=pdf_bytes, node_logs_text=node_logs_text,
         node_role_list=node_role_list, edp_field_rows=edp_field_rows,
@@ -1022,7 +1023,7 @@ with tab_rfds:
         st.caption("RFDS doesn't expose an XMU count (only presence) — RFDS XMU shows Found/Not Found, not a count.")
 
     with st.container(border=True):
-        grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages)
+        grouped_rows = build_rfds_grouped_rows(results, ciq_wb, rfds_pages, state.get("rfds_bytes"))
         n_fail = sum(1 for r in grouped_rows if r["overall"] == "FAIL")
         n_pass = len(grouped_rows) - n_fail
         st.markdown(
@@ -1297,7 +1298,7 @@ with tab_consolidated:
         render_rrnrbl_checklist(checklist)
 
     with st.expander("Warnings & Comments", expanded=False):
-        rfds_verification_rows = build_rfds_verification_summary(build_rfds_grouped_rows(results, ciq_wb, rfds_pages))
+        rfds_verification_rows = build_rfds_verification_summary(build_rfds_grouped_rows(results, ciq_wb, rfds_pages, state.get("rfds_bytes")))
         if rfds_verification_rows:
             st.markdown("**RFDS Verification:**")
             st.markdown(render_table(rfds_verification_rows,
