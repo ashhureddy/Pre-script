@@ -59,7 +59,7 @@ def run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf):
         'cells_vs_rfds', 'cell_id_vs_rfds', 'params_4g', 'params_5g',
         'pci_4g', 'pci_5g', 'radio_type', 'sector_swap', 'radio_sharing',
         'port_uniqueness', 'xmu_port_overlap', 'antenna', 'nbiot', 'nr_tac', 'tac', 'sef_fru',
-        'dss', 'sector_id_4890', 'rfbranch_per_aug', 'ptp_matrix',
+        'dss', 'sector_id_4890', 'rfbranch_per_aug', 'ptp_matrix', 'losses_vs_antenna',
     )}
     sa_note_nodes = []
     unavailable_notes = [
@@ -109,6 +109,7 @@ def run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf):
         results['dss'] += cs.check_dss_pre_existing(node_id, log_text, ciq_wb)
         results['sector_id_4890'] += cs.check_sector_id_4890(node_id, ciq_wb, e_name)
         results['rfbranch_per_aug'] += cs.check_rfbranch_per_aug(node_id, log_text)
+        results['losses_vs_antenna'] += cs.check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name)
         results['ptp_matrix'] += cn.check_ptp_matrix(node_id, log_text, edp_rows, is_new_node=not has_pre)
 
         gnb_row = None
