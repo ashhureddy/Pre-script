@@ -13,6 +13,7 @@ MME Region, NR_SA tab, FA Code CIQ-vs-RFDS), or left 'manual' when no
 reliable signal exists. Nothing here fabricates a pass.
 """
 import datetime
+import io
 import os
 import re
 
@@ -58,6 +59,78 @@ def _agg(results_list, note_fields=("node", "cell", "note")):
     return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
 
 
+def _worst_status(statuses):
+    """Roll several (status, note) verdicts into one, worst-first:
+    mismatch > manual > unknown > match. Notes from every contributing
+    verdict at that severity are joined, so the row says which field(s)
+    actually failed rather than just that something did."""
+    order = ["mismatch", "manual", "unknown", "match"]
+    pairs = [s for s in statuses if s]
+    if not pairs:
+        return "unknown", "No data (check did not run for this site)."
+    for level in order:
+        hits = [n for s, n in pairs if s == level]
+        if hits:
+            seen, notes = set(), []
+            for n in hits:
+                if n and n not in seen:
+                    seen.add(n)
+                    notes.append(n)
+            return level, "; ".join(notes)
+    return "unknown", "No data (check did not run for this site)."
+
+
+def _pre_detected_status(node_logs_text, what):
+    """'Detected in the Pre kget log' checks (Radio Ports / RfBranch /
+    Sharing Radio).
+
+    These three are presence checks, not comparisons: the Pre log either
+    exposes the data or it doesn't. Detected on at least one node -> match.
+    Logs uploaded but the data is absent everywhere -> mismatch (the Pre
+    capture is incomplete, which is the thing worth flagging). No logs at
+    all -> unknown, never a pass."""
+    import pre_extract as pe
+    if not node_logs_text:
+        return "unknown", "No Pre kget logs uploaded — nothing to detect."
+
+    found, missing, any_radio_data = [], [], False
+    for nid, text in node_logs_text.items():
+        if not text:
+            continue
+        if what == "ports":
+            fru = pe.extract_cell_to_fru(text)
+            n = len(pe.extract_cell_to_rilink_detail(text, fru))
+            label = "RiLink/RiPort entries"
+        elif what == "rfbranch":
+            refs = pe.extract_rf_branch_refs(text)
+            n = sum(1 for v in refs.values() if v.get("sef_branches") or v.get("tx_ref"))
+            label = "cells with RfBranch refs"
+        elif what == "sharing":
+            fru = pe.extract_cell_to_fru(text)
+            counts = {}
+            for cell, f in fru.items():
+                if f and f != "-":
+                    counts[f] = counts.get(f, 0) + 1
+            n = sum(1 for c in counts.values() if c > 1)
+            label = "radios shared by >1 cell"
+            # A site with no shared radio is a legitimate design, but that
+            # is only knowable if radio data was actually read. Track
+            # whether ANY radio was seen so 'no sharing' can be told apart
+            # from 'nothing parsed'.
+            if counts:
+                any_radio_data = True
+        else:
+            return "unknown", f"Unknown detection target '{what}'."
+        (found if n else missing).append(f"{nid}: {n} {label}")
+
+    if found:
+        return "match", "; ".join(found)
+    if what == "sharing" and any_radio_data:
+        # Radios WERE read and none is shared — a legitimate site design.
+        return "match", "No shared radios on this site (each cell on its own radio)."
+    return "mismatch", "Not detected in any Pre log — " + ("; ".join(missing) or "no usable log text.")
+
+
 def _filter(results_list, rule_prefix):
     return [r for r in results_list if str(r.get("rule", "")).strip() == rule_prefix]
 
@@ -94,7 +167,7 @@ def _edp_found_status(edp_rows, node_ids):
     if not node_ids:
         return "unknown", "No nodes to check."
     if missing:
-        return "mismatch", f"Not published in EDP: {', '.join(missing)}"
+        return "mismatch", "; ".join(f"{n} is missing in EDP" for n in missing)
     return "match", f"{len(node_ids)} node(s) all found in EDP."
 
 
@@ -214,18 +287,52 @@ def _sw_consistency_status(sw_version_results):
     return "match", f"All Pre nodes on {versions.pop()}."
 
 
+def _sw_status_v2(sw_version_results):
+    """Confirmed to do BOTH signals, not just one: (1) every node that has a
+    Pre log actually shows a detected SW version, AND (2) every detected
+    version agrees across nodes. Either failing is a mismatch."""
+    if not sw_version_results:
+        return "unknown", "No Pre kget-all logs loaded."
+    missing = [r.get("node") for r in sw_version_results if r.get("sw_version") in (None, "NOT FOUND")]
+    versions = {r.get("sw_version") for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND")}
+    bad = []
+    if missing:
+        bad.append(f"No SW version detected for: {', '.join(missing)}")
+    if len(versions) > 1:
+        detail = "; ".join(f"{r.get('node')}={r.get('sw_version')}" for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND"))
+        bad.append(f"Mixed SW versions across Pre nodes: {detail}")
+    if bad:
+        return "mismatch", " | ".join(bad)
+    if versions:
+        return "match", f"All Pre nodes show a SW version, all on {versions.pop()}."
+    return "unknown", "No SW version captured from any Pre kget-all log."
+
+
 def _mme_region_status(ciq_wb):
+    """N2E-ness is a SITE-level fact, not per-node: presence of any real cell
+    row in the CIQ's Nokia_Info tab (the source-Nokia cell being migrated
+    off) means this is an N2E site — confirmed real CIQ structure has a
+    'Nokia Cell Id' column there, non-empty only for actual N2E migrations
+    (every non-N2E CIQ checked has Nokia_Info present but entirely empty).
+    For an N2E site, EVERY node's MME Region (Mixed Mode Info tab) must be
+    N-RAN; E-RAN is flagged so it can be raised as a PI to the design team."""
     if "Mixed Mode Info" not in ciq_wb.sheetnames:
         return "unknown", "No Mixed Mode Info sheet."
+    is_n2e = False
+    if "Nokia_Info" in ciq_wb.sheetnames:
+        nokia_rows = cer.sheet_rows_as_dicts(ciq_wb["Nokia_Info"])
+        is_n2e = any(_norm(r.get("Nokia Cell Id")) for r in nokia_rows)
+    if not is_n2e:
+        return "match", "No cells in Nokia_Info — not an N2E site, MME Region rule does not apply."
     rows = cer.sheet_rows_as_dicts(ciq_wb["Mixed Mode Info"])
-    n2e = [r for r in rows if _norm(r.get("Nokia Site")).lower().startswith("y")]
-    if not n2e:
-        return "match", "Nokia Site = No for every node — N2E MME Region rule does not apply."
-    bad = [r for r in n2e if re.search(r"E-?RAN", _norm(r.get("MME Region")), re.I)
+    bad = [r for r in rows if re.search(r"E-?RAN", _norm(r.get("MME Region")), re.I)
            and not re.search(r"N-?RAN", _norm(r.get("MME Region")), re.I)]
     if bad:
-        return "mismatch", "; ".join(f"{_norm(r.get('eNodeB Name'))}: MME Region '{_norm(r.get('MME Region'))}' — should be N-RAN" for r in bad)
-    return "match", f"{len(n2e)} N2E node(s), MME Region correctly N-RAN."
+        return "mismatch", "; ".join(
+            f"{_norm(r.get('eNodeB Name'))}: MME Region '{_norm(r.get('MME Region'))}' — should be N-RAN, raise PI to design team"
+            for r in bad
+        )
+    return "match", f"N2E site — {len(rows)} node(s), MME Region correctly N-RAN."
 
 
 def _nr_sa_tac_status(ciq_wb):
@@ -258,13 +365,21 @@ def _nr_sa_tac_status(ciq_wb):
 
 
 def _fa_code_status(site_details, ciq_wb):
-    rfds_fa = _norm(site_details.get("fa_code"))
+    """Compares the CIQ's own FA Code (site_details['fa_code'], always
+    CIQ-sourced per build_site_details()) against the RFDS-sourced value
+    (site_details['rfds_fa_code']) - NOT against itself. An earlier version
+    of this function read site_details.get('fa_code') and called it
+    'rfds_fa', but that key has never held the RFDS value (RFDS's own value
+    is never merged into 'fa_code' - see build_site_details()), so this was
+    silently comparing the CIQ FA Code against itself and never actually
+    checked RFDS at all."""
+    rfds_fa = _norm(site_details.get("rfds_fa_code"))
     if "5G Info" not in ciq_wb.sheetnames:
         return "unknown", "No 5G Info sheet (LTE-only build) to compare."
     rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"])
     ciq_fas = sorted({_norm(r.get("FA Code")) for r in rows if _norm(r.get("FA Code"))})
     if not rfds_fa:
-        return "mismatch", "FA Code not found on the RFDS Site Details / 5G Info page."
+        return "unknown", "No FA Code found on the RFDS Site Details page - not checked."
     if not ciq_fas:
         return "unknown", "No FA Code on the CIQ 5G Info sheet."
     bad = [f for f in ciq_fas if f != rfds_fa]
@@ -299,7 +414,63 @@ def _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages):
 # for a manual item.
 # ══════════════════════════════════════════════════════════════════════
 
-def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_pages=None):
+def _edp_controller_status(edp_rows, controller_ids):
+    """NEW - Controller/ANCEQ checks (cabinet naming/port-size/etc. above are
+    Primary/Secondary-only). controller_ids: list of EDP SITE_NAME values for
+    Controller rows (= the CIQ's Controller Info 'Controller ID').
+    IPv6 ANCEQ fields are checked as informational only - a real, valid EDP
+    row was found with every IPv6 ANCEQ_* field genuinely blank, so treating
+    it as a required field would be a false mismatch."""
+    if not controller_ids:
+        return "na", "No Controller node in this CIQ's Controller Info sheet."
+    bad, checked = [], 0
+    ipv6_present = 0
+    for cid in controller_ids:
+        rows = cer.edp_rows_for_site(edp_rows, cid)
+        if not rows:
+            bad.append(f"{cid}: not published in EDP")
+            continue
+        r = rows[0]
+        checked += 1
+        missing = [f for f in ("ANCEQ_TYPE", "ANCEQ_NAME", "ANCEQ_SIAD_IP_HOST_1", "ANCEQ_SIAD_IP_HOST_2") if not _norm(r.get(f))]
+        if missing:
+            bad.append(f"{cid}: missing {', '.join(missing)}")
+        if _norm(r.get("ANCEQ_SIAD_IPV6_HOST_1")):
+            ipv6_present += 1
+    if not checked:
+        return "unknown", "; ".join(bad) if bad else "No EDP rows to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} controller(s) checked (IPv4 required fields all present; {ipv6_present} also have IPv6)."
+
+
+def _edp_ptp_status(edp_rows, node_ids):
+    """NEW - EDP's own PTP fields (SIAD_PTP_VLAN_ID + the PTP_VLAN_SUBNET_30 /
+    PTP_SIAD_INTERFACE_IP / PTP_CAB_INTERFACE_IP group), confirmed present on
+    a real published EDP row. Separate from the kget-log-side PTP guess in
+    pre_extract.extract_ptp_status() - this one reads data this backend
+    definitely has."""
+    rows = _edp_node_rows(edp_rows, node_ids)
+    bad, checked, no_ptp = [], 0, 0
+    for nid, r in rows.items():
+        if r is None:
+            continue
+        vlan = _norm(r.get("SIAD_PTP_VLAN_ID"))
+        if not vlan:
+            no_ptp += 1
+            continue
+        checked += 1
+        missing = [f for f in ("PTP_VLAN_SUBNET_30", "PTP_SIAD_INTERFACE_IP", "PTP_CAB_INTERFACE_IP") if not _norm(r.get(f))]
+        if missing:
+            bad.append(f"{nid}: PTP VLAN {vlan} set but missing {', '.join(missing)}")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        return "match", f"{checked} node(s) with PTP configured, all required fields present."
+    return "info", f"No node declares a PTP VLAN in EDP ({no_ptp} checked) — PTP may not be in scope for this build."
+
+
+def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_pages=None, node_logs_text=None):
     mm_rows = cer.mixed_mode_rows(ciq_wb) if ciq_wb else []
     mm_by_node = {}
     for r in mm_rows:
@@ -311,83 +482,128 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
     board_type = results.get("board_type", [])
     identity = results.get("identity", [])
 
+    # Primary AND Secondary node ids — node_ids (checked_nodes) only ever
+    # holds the Primary name, so site_name/cabinet/bbu_type/node_model and
+    # the 6 bearer/OAM rows below (which all need to see a Secondary that
+    # EDP is missing, or a Secondary added by an SMBB->MMBB transition)
+    # need this instead. Computed here rather than passed in, matching the
+    # EDP Validator tab's own fix for the same gap.
+    node_role_list = build_primary_secondary_node_list(ciq_wb) if ciq_wb else []
+    edp_node_ids = [n["node"] for n in node_role_list] or node_ids
+
     def edp_field(fields, label):
         return lambda: _edp_group_status(edp_rows, node_ids, fields, label)
 
     rows = [
         (13, "Major showstopper check", None, "SW should be match with ENM", "NR/Radio",
-         lambda: _sw_consistency_status(results.get("sw_version", []))),
+         lambda: _sw_status_v2(results.get("sw_version", []))),
 
-        (15, "EDP check", "EDP vs Site", "site_name", "NR/Radio", lambda: _edp_found_status(edp_rows, node_ids)),
-        (16, "EDP check", "EDP vs Site", "cabinet", "Radio", lambda: _edp_cabinet_status(edp_rows, node_ids)),
-        (17, "EDP check", "EDP vs Site", "bbu_type", "Radio", lambda: _agg(board_type)),
-        (18, "EDP check", "EDP vs Site", "node_model", "Radio", lambda: _agg(board_type)),
-        (19, "EDP check", "EDP vs Site", "siad_port_size_bbu", "Radio", lambda: _edp_port_size_status(edp_rows, node_ids, mm_by_node)),
-        (20, "EDP check", "EDP vs Site", "siad_port_facing_bbu", "Radio", lambda: _edp_port_facing_status(edp_rows, node_ids)),
-        (21, "EDP check", "EDP vs Site", "bearer_enodeb_sb_vlan_id", "Radio", lambda: _edp_bearer_vlan_status(edp_rows, node_ids)),
-        (22, "EDP check", "EDP vs Site", "ipv6_siad_bearer_ip_def_router", "Radio", edp_field(IPV6_BEARER_FIELDS, "IPv6 bearer")),
-        (23, "EDP check", "EDP vs Site", "ipv6_enodeb_bearer_ip", "Radio", edp_field(IPV6_BEARER_FIELDS, "IPv6 bearer")),
-        (24, "EDP check", "EDP vs Site", "oam_enodeb_siad_oam_vlan", "Radio", edp_field(IPV6_OAM_FIELDS, "IPv6 OAM")),
-        (25, "EDP check", "EDP vs Site", "ipv6_siad_oam_ip_def_router", "Radio", edp_field(IPV6_OAM_FIELDS, "IPv6 OAM")),
-        (26, "EDP check", "EDP vs Site", "ipv6_enodeb_oam_ip", "Radio", edp_field(IPV6_OAM_FIELDS, "IPv6 OAM")),
+        (15, "EDP check", "EDP vs Site", "site_name", "NR/Radio", lambda: _edp_found_status(edp_rows, edp_node_ids)),
+        (16, "EDP check", "EDP vs Site", "cabinet", "Radio", lambda: _cabinet_pairing_status(ciq_wb, edp_rows, edp_node_ids)),
+        (17, "EDP check", "EDP vs Site", "bbu_type", "Radio", lambda: _bbu_type_vs_node_model_status(ciq_wb, edp_rows, edp_node_ids)),
+        (18, "EDP check", "EDP vs Site", "node_model", "Radio", lambda: _node_model_vs_bbu_type_status(ciq_wb, edp_rows, edp_node_ids)),
+        (19, "EDP check", "EDP vs Site", "siad_port_size_bbu", "Radio", lambda: _siad_port_size_pre_status(node_logs_text, ciq_wb, edp_rows, edp_node_ids)),
+        (20, "EDP check", "EDP vs Site", "siad_port_facing_bbu", "Radio", lambda: _edp_port_facing_status(edp_rows, edp_node_ids)),
+        (21, "EDP check", "EDP vs Site", "bearer_enodeb_sb_vlan_id", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID")),
+        (22, "EDP check", "EDP vs Site", "ipv6_siad_bearer_ip_def_router", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True)),
+        (23, "EDP check", "EDP vs Site", "ipv6_enodeb_bearer_ip", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True)),
+        (24, "EDP check", "EDP vs Site", "oam_enodeb_siad_oam_vlan", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN")),
+        (25, "EDP check", "EDP vs Site", "ipv6_siad_oam_ip_def_router", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", is_ipv6=True)),
+        (26, "EDP check", "EDP vs Site", "ipv6_enodeb_oam_ip", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_ip", "IPV6_ENODEB_OAM_IP", is_ipv6=True)),
 
         (28, "RFDS Checks", "Pre Vs RFDS Sheet in QWEST", "FACode", "Radio", lambda: _fa_code_status(site_details, ciq_wb)),
         (29, "RFDS Checks", None, "JobDetail", "Radio", None),
-        (30, "RFDS Checks", None, "NonRFInventoryDetails(Final)", "Radio", lambda: _agg(board_type)),
-        (31, "RFDS Checks", None, "CellDetails(Final) -- CellID / RCN /RRH", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (32, "RFDS Checks", None, "AntennaPositionDetails", "Radio", None),
-        (33, "RFDS Checks", None, "Plumbing Diagram (TMA)", "Radio", None),
+        (30, "RFDS Checks", None, "NonRFInventoryDetails(Final)", "Radio", None),
+        (31, "RFDS Checks", None, "CellDetails(Final) -- CellID / RCN /RRH", "Radio",
+         lambda: _agg(results.get("cells_vs_rfds", []) + results.get("radio_type", []))),
+        (32, "RFDS Checks", None, "AntennaPositionDetails -- Model / LinkedCells / Azimuth(Design)  / Total Postions", "Radio", None),
+        (33, "RFDS Checks", None, "Plumbing Diagram -- TxRx / TMA / Radio - RET Controller / Total Postions", "Radio", None),
 
         (35, "CIQ tabs checks", "Revision History", "All Confirmation checks", "NR/Radio", None),
         (36, "CIQ tabs checks", "Mixed Mode Info Tab", "eNBId and gNBId ENM vs CIQ", "NR/Radio", lambda: _agg(identity)),
-        (37, "CIQ tabs checks", "Mixed Mode Info Tab", "MME Region", "NR/Radio", lambda: _mme_region_status(ciq_wb)),
-        (38, "CIQ tabs checks", "Mixed Mode Info Tab", "Primary & secondary node matches RFDS", "Radio", lambda: _agg(results.get("primary_secondary", []))),
+        (37, "CIQ tabs checks", "Mixed Mode Info Tab", "MME Region [N2E site MME Regionn should be with N-RAN,if its E-RAN,raise PI to design team]", "NR/Radio", lambda: _mme_region_status(ciq_wb)),
+        (38, "CIQ tabs checks", "Mixed Mode Info Tab", "Make sure Primary & secondary node is matching with RFDS-Non RF Inventory Details (Final)", "Radio", lambda: _agg(results.get("primary_secondary", []))),
 
-        (39, "CIQ tabs checks", "5g info", "NRCellDU/NRCellCU ENM vs CIQ", "NR/Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (40, "CIQ tabs checks", "5g info", "nRTAC/cellLocalId ENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
-        (41, "CIQ tabs checks", "5g info", "arfcnDL/arfcnUL/bSChannelBwDL ENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
-        (42, "CIQ tabs checks", "5g info", "RBB Type vs no.ofrx/tx from ENM", "Radio", lambda: _agg(results.get("params_5g", []))),
-        (43, "CIQ tabs checks", "5g info", "DSS check", "NR/Radio", None),
-        (44, "CIQ tabs checks", "5g info", "ssbFrequency/ssbOffset/ssbDuration", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
+        (39, "CIQ tabs checks", "5g info", "NRCellDU/ NRCellCU  ENM vs CIQ ", "NR/Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
+        (40, "CIQ tabs checks", "5g info", "nRTAC/ cellLocalId ENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (41, "CIQ tabs checks", "5g info", "arfcnDL/ arfcnUL and bSChannelBwDL/ bSChannelBwDL\nENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
+        (42, "CIQ tabs checks", "5g info", "RBB Type vs no.ofrx and tx from ENM", "Radio", lambda: _agg(results.get("params_5g", []))),
+        (43, "CIQ tabs checks", "5g info", "DSS check", "NR/Radio", lambda: _agg(results.get("dss", []))),
+        (44, "CIQ tabs checks", "5g info", "ssbFrequency /ssbOffset/ ssbDuration ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
         (45, "CIQ tabs checks", "5g info", "NSA/SA", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
-        (46, "CIQ tabs checks", "5g info", "BBU Type should match with RFDS and CIQ", "NR/Radio", lambda: _agg(board_type)),
-        (47, "CIQ tabs checks", "5g info", "Cell/RRU/Beam/Antenna/Tilt must same as RFDS", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (48, "CIQ tabs checks", "5g info", "NR TAC - Existing sectors", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
-        (49, "CIQ tabs checks", "5g info", "NR TAC - newly added Carriers - NSA=0 & SA=7 digit", "NR/Radio", lambda: _nr_sa_tac_status(ciq_wb)),
-        (50, "CIQ tabs checks", "5g info", "6472/AIR-6449/AIR6419 - SEF/FRU", "Radio", lambda: _agg(results.get("sef_fru", []))),
-        (51, "CIQ tabs checks", "5g info", "Unique Port for 5G/LTE separate radio", "Radio", lambda: _agg(results.get("port_uniqueness", []))),
+        (46, "CIQ tabs checks", "5g info", "Make sure  BBU Type should match with RFDS and CIQ - BBU Type", "NR/Radio", lambda: _agg(board_type)),
+        (47, "CIQ tabs checks", "5g info", "NRCellDU/NRCellCU/cellLocalId/RRU Type/ BeamDirection (Azimuth) /Antenna Type /Electrical Tilt must same as RFDS ", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
+        (48, "CIQ tabs checks", "5g info", "NR TAC - Existing sectors - ENM", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
+        (49, "CIQ tabs checks", "5g info", " NR TAC   - For newly added Carriers-  NSA= 0 & SA =7 digit value", "NR/Radio", lambda: _nr_sa_tac_status(ciq_wb)),
+        (50, "CIQ tabs checks", "5g info", "6472 / AIR-6449 - C Band / AIR6419 - DOD - Check for the SEF/FRU -- Check for the SEF/FRU", "Radio", lambda: _agg(results.get("sef_fru", []))),
+        (51, "CIQ tabs checks", "5g info", "Unique Port for 5G and LTE incase of Separate Radio - Ports and data ports ", "Radio", lambda: _agg(results.get("port_uniqueness", []))),
 
-        (52, "CIQ tabs checks", "gNB Info", "gNBId/gNodeB Name matches Mixed Mode Info", "NR/Radio", lambda: _agg(identity)),
-        (53, "CIQ tabs checks", "gNB Info", "DU type same as 5G Info tab", "NR/Radio", lambda: _agg(board_type)),
+        (52, "CIQ tabs checks", "gNB Info", "gNBId/gNodeB Name must should with  Mixed Mode Info tab ", "NR/Radio", lambda: _agg(identity)),
+        (53, "CIQ tabs checks", "gNB Info", "DU type should be same as 5G Info tab - BBU Type", "NR/Radio", lambda: _agg(board_type)),
 
-        (54, "CIQ tabs checks", "eNB Info", "eNBId/eNodeB Name matches Mixed Mode Info", "NR/Radio", lambda: _agg(identity)),
-        (55, "CIQ tabs checks", "eNB Info", "BBU Type should match with RFDS", "Radio", lambda: _agg(board_type)),
+        (54, "CIQ tabs checks", "eNB Info", "eNBId/eNodeB Name should match with Mixed Mode Info tab - eNBId/eNodeB", "NR/Radio", lambda: _agg(identity)),
+        (55, "CIQ tabs checks", "eNB Info", "BBU Type should match with RFDS - BBU Type", "Radio", lambda: _agg(board_type)),
         (56, "CIQ tabs checks", "eNB Info", "TAC Value", "NR/Radio", lambda: _agg(results.get("tac", []))),
 
-        (57, "CIQ tabs checks", "eUtran Parameters Tab", "earfcnDl/dlChannelBandwidth ENM vs CIQ", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
-        (58, "CIQ tabs checks", "eUtran Parameters Tab", "RBB type/noOfTx/noOfRx - ISDLONLY", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
-        (59, "CIQ tabs checks", "eUtran Parameters Tab", "cellId ENM vs CIQ (SOW)", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
-        (60, "CIQ tabs checks", "eUtran Parameters Tab", "EutranCellFDDId/beamDirection vs RFDS", "Radio", None),
-        (61, "CIQ tabs checks", "eUtran Parameters Tab", "electricalAntennaTilt integer", "Radio", lambda: _agg(results.get("params_4g", []))),
-        (62, "CIQ tabs checks", "eUtran Parameters Tab", "configuredOutputPower depends on RRU type", "Radio", None),
-        (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx/RBB Type vs Single/Double RILink", "Radio", lambda: _agg(results.get("params_4g", []))),
-        (64, "CIQ tabs checks", "eUtran Parameters Tab", "Compare Sectorid With Carrier Progression", "Radio", None),
-        (65, "CIQ tabs checks", "eUtran Parameters Tab", "PCI uniqueness", "Radio", lambda: _agg(results.get("pci_4g", []) + results.get("pci_5g", []))),
-        (66, "CIQ tabs checks", "eUtran Parameters Tab", "Pre-existing node cellId vs ENM & RFDS", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (57, "CIQ tabs checks", "eUtran Parameters Tab", "earfcnDl/ dlChannelBandwidth ENM vs CIQ", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
+        (58, "CIQ tabs checks", "eUtran Parameters Tab", "RBB type/ noOfTx/noOfRx\nIdentify  ISDLONLY carrier", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
+        (59, "CIQ tabs checks", "eUtran Parameters Tab", "cellId ENM vs CIQ \nIdentify cellid change SOW", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (60, "CIQ tabs checks", "eUtran Parameters Tab", "EutranCellFDDId/beamDirection should match with RFDS - EutranCell", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
+        (61, "CIQ tabs checks", "eUtran Parameters Tab", "electricalAntennaTilt should be integer value not character - Tilt", "Radio", lambda: _agg(results.get("params_4g", []))),
+        (62, "CIQ tabs checks", "eUtran Parameters Tab", "configuredOutputPower depends on RRU type (Ericsson 4490, 4890, or 4472 radios (e.g., NSB or Allagi projects, New Carrier Adds, Radio Swaps) will be Configured with maximum allowed power of 160W.) - configuredOutputPower", "Radio", None),
+        (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx / RBB Type Need to be checked with - Single / Double RILink - RRU type & RBB type", "Radio", lambda: _agg(results.get("params_4g", []))),
+        (64, "CIQ tabs checks", "eUtran Parameters Tab", "1)Compare Sectorid With Carrier Progression - sectorId / Carrier", "Radio", lambda: _agg(results.get("carrier_progression", []))),
+        (65, "CIQ tabs checks", "eUtran Parameters Tab", "PhysicalLayerCellIdGroup and physicalLayerSubCellId should be unique - PCI", "Radio", lambda: _agg(results.get("pci_4g", []) + results.get("pci_5g", []))),
+        (66, "CIQ tabs checks", "eUtran Parameters Tab", "Pre-existing node cellId must be same as ENM & N2E/NSB site CellId should be match with RFDS - Cellid", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
         (67, "CIQ tabs checks", "eUtran Parameters Tab", "Riport should be unique", "Radio", lambda: _agg(results.get("xmu_port_overlap", []))),
-        (68, "CIQ tabs checks", "eUtran Parameters Tab", "tmaType/tmaConfiguration", "Radio", None),
+        (68, "CIQ tabs checks", "eUtran Parameters Tab", "tmaType / tmaConfiguration", "Radio", None),
         (69, "CIQ tabs checks", "eUtran Parameters Tab", "antenna model", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (70, "CIQ tabs checks", "eUtran Parameters Tab", "XMU Validation vs RFDS", "Radio", lambda: _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages)),
-        (71, "CIQ tabs checks", "eUtran Parameters Tab", "ENM Validation - site locator (B2E)", "Radio", None),
+        (70, "CIQ tabs checks", "eUtran Parameters Tab", " XMU Validation - Need to check with RFDS - XMU", "Radio", lambda: _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages)),
+        (71, "CIQ tabs checks", "eUtran Parameters Tab", "ENM Validation - Need to check with site locator or ENM sheet (B2E) - ENM", "Radio", None),
 
-        (72, "CIQ tabs checks", "Losses and delay", "Losses/delay matches FDD and TxRx", "Radio", None),
-        (73, "CIQ tabs checks", "Antenna Information", "AntennaUnit/AntennaSubunit unique band-wise", "Radio", lambda: _agg(results.get("antenna", []))),
-        (74, "CIQ tabs checks", "Sector Movement / Deletion sheet", "Source/target cells match ENM/eUtran", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (72, "CIQ tabs checks", "Losses and delay", "Check for Losses delay matches to FDD and TxRx", "Radio", lambda: _agg(results.get("losses_vs_antenna", []))),
+        (73, "CIQ tabs checks", "Antenna Information", "AntennaUnit/AntennaSubunit should unique for the band wise", "Radio", lambda: _agg(results.get("antenna", []))),
+        (74, "CIQ tabs checks", "Sector Movement / Deletion sheet", "All source cells cellid/SSB/ BW matching with ENM and all target cells with eUtan tab", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
 
-        (76, "Pre checks", "ENM Pre-checks", "Radio Ports", "Radio", lambda: _agg(results.get("radio_type", []))),
-        (77, "Pre checks", "ENM Pre-checks", "RfBranch", "Radio", None),
-        (78, "Pre checks", "ENM Pre-checks", "Sharing Radio", "Radio", lambda: _agg(results.get("radio_sharing", []))),
-        (79, "Pre checks", "ENM Pre-checks", "SSNALIST", "Radio", None),
+        # Rows 75-76 are new in the updated template (they pushed the old
+        # "Pre checks" block from 75-79 down to 77-81). Both are EDP/ENM IP
+        # comparisons this project has no automated check for, so they're
+        # manual rather than silently reusing an unrelated check's result.
+        (75, "IP Validation Pre Vs EDP", None, "Please verify the NodeB bearer IP, VLAN ID, and router default IP with EDP. If there is any mismatch, need to flag.(for board swap node)", "Radio",
+         lambda: _worst_status([
+             # Same Pre-vs-EDP comparison rows 21-23 already perform, rolled
+             # up into one verdict for the board-swap row. Not a new check:
+             # the bearer VLAN / IPv6 / default-router fields are compared
+             # Pre(kget) vs the site's own EDP row, IPv6 normalised before
+             # comparing.
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True),
+         ])),
+        (76, "Rehoming sites ( IP Verification )", None, "For Daffi node rehoming, we need to check the existing IP/VLAN details of all nodes. If there is any mismatch between EDP and ENM, need to flag", "Radio",
+         lambda: _worst_status([
+             # Rehoming verifies the EXISTING IP/VLAN of every node, so this
+             # rolls up all six bearer+OAM fields (rows 21-26) rather than
+             # the bearer-only three used by the board-swap row above.
+             # Same underlying Pre(kget)-vs-EDP comparison; no new logic.
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_ip", "IPV6_ENODEB_OAM_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", is_ipv6=True),
+         ])),
+
+        (78, "Pre checks", "ENM Pre-checks", "Radio Ports", "Radio", lambda: _pre_detected_status(node_logs_text, "ports")),
+        (79, "Pre checks", "ENM Pre-checks", "RfBranch", "Radio", lambda: _pre_detected_status(node_logs_text, "rfbranch")),
+        (80, "Pre checks", "ENM Pre-checks", "Sharing Radio", "Radio", lambda: _pre_detected_status(node_logs_text, "sharing")),
+        (81, "Pre checks", "ENM Pre-checks", "SSNALIST", "Radio", None),
     ]
 
     out = []
@@ -408,8 +624,65 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
 # Fill the real template.
 # ══════════════════════════════════════════════════════════════════════
 
+_FPB_PART = "xl/featurePropertyBag/featurePropertyBag.xml"
+_FPB_CONTENT_TYPE = "application/vnd.ms-excel.featurepropertybag+xml"
+_FPB_REL_TYPE = "http://schemas.microsoft.com/office/2022/11/relationships/FeaturePropertyBag"
+
+
+def _restore_native_checkboxes(filled_bytes, template_path):
+    """openpyxl's save() silently drops xl/featurePropertyBag/featurePropertyBag.xml
+    - the part that marks C-column cells as Excel's native interactive
+    Checkbox control (confirmed by a real load->set value->save round-trip:
+    the part vanishes even though the underlying boolean cell value is
+    preserved). Without it, Excel still shows the right TRUE/FALSE value but
+    the checkbox widget itself is gone. This copies that part (and its two
+    small registration entries) from the original template's zip into the
+    filled workbook's zip after openpyxl is done, so the checkboxes stay
+    exactly as clickable as they were in the template you uploaded."""
+    import zipfile
+
+    with zipfile.ZipFile(template_path) as tz:
+        if _FPB_PART not in tz.namelist():
+            return filled_bytes  # template has no native checkboxes to restore
+        fpb_xml = tz.read(_FPB_PART)
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(filled_bytes)) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                text = data.decode("utf-8")
+                if _FPB_PART.split("xl/")[1] not in text and "featurePropertyBag" not in text:
+                    text = text.replace(
+                        "</Types>",
+                        f'<Override PartName="/{_FPB_PART}" ContentType="{_FPB_CONTENT_TYPE}"/></Types>',
+                    )
+                data = text.encode("utf-8")
+            elif item.filename == "xl/_rels/workbook.xml.rels":
+                text = data.decode("utf-8")
+                if _FPB_REL_TYPE not in text:
+                    existing_ids = [int(rid) for rid in re.findall(r'Id="rId(\d+)"', text)]
+                    new_id = f"rId{max(existing_ids, default=0) + 1}"
+                    text = text.replace(
+                        "</Relationships>",
+                        f'<Relationship Id="{new_id}" Type="{_FPB_REL_TYPE}" '
+                        f'Target="featurePropertyBag/featurePropertyBag.xml"/></Relationships>',
+                    )
+                data = text.encode("utf-8")
+            dst.writestr(item, data)
+        if _FPB_PART not in src.namelist():
+            dst.writestr(_FPB_PART, fpb_xml)
+    out.seek(0)
+    return out.read()
+
+
 def fill_checklist_xlsx(checklist, site_id_fa, engineer_name=None, sow=None, date_str=None,
-                         template_path=TEMPLATE_PATH):
+                         template_path=TEMPLATE_PATH, manual_overrides=None):
+    """manual_overrides: optional {row_number: {'done': bool, 'comment': str}}
+    for rows whose status is 'manual' - lets a person's own checkbox/comment
+    (entered in the Streamlit UI) override the generic 'no automated check'
+    placeholder text before this gets written out."""
+    manual_overrides = manual_overrides or {}
     wb = openpyxl.load_workbook(template_path)
     ws = wb["Legacy - N2e Engineer Checklist"]
 
@@ -422,13 +695,509 @@ def fill_checklist_xlsx(checklist, site_id_fa, engineer_name=None, sow=None, dat
 
     for entry in checklist:
         r = entry["row"]
+        override = manual_overrides.get(r)
+        if entry["status"] == "manual" and override is not None:
+            ws[f"C{r}"] = bool(override.get("done"))
+            comment = (override.get("comment") or "").strip()
+            ws[f"E{r}"] = f"[MANUAL — user-confirmed] {comment}" if comment else "[MANUAL — marked done, no comment]" if override.get("done") else "[MANUAL] Not yet reviewed."
+            continue
         ws[f"C{r}"] = (entry["status"] == "match")
         label, _ = STATUS_META.get(entry["status"], ("", False))
         comment = entry["detail"] or ""
         ws[f"E{r}"] = f"[{label}] {comment}" if label else comment
 
-    import io
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    return buf.read()
+    return _restore_native_checkboxes(buf.read(), template_path)
+
+
+EDP_FIELD_TABLE_COLUMNS = [
+    "SITE_NAME", "CABINET", "BBU_TYPE", "NODE_MODEL", "SIAD_PORT_SIZE_BBU",
+    "SIAD_PORT_FACING_BBU", "BEARER_ENODEB_SB_VLAN_ID", "IPV6_SIAD_BEARER_IP_DEF_ROUTER",
+    "IPV6_ENODEB_BEARER_IP", "OAM_ENODEB_SIAD_OAM_VLAN", "IPV6_SIAD_OAM_IP_DEF_ROUTER",
+    "IPV6_ENODEB_OAM_IP",
+]
+
+
+def build_primary_secondary_node_list(ciq_wb):
+    """One {node, role} entry per PHYSICAL node declared in Mixed Mode
+    Info — both the Primary (whichever of eNodeB/gNodeB Name matches 'Node
+    to be built as') and the Secondary (the other one), when both exist.
+
+    This does NOT reuse checked_nodes (run_validation.py's own node list):
+    checked_nodes only ever holds the PRIMARY name ('Node to be built as'),
+    so every existing EDP check in this module (_edp_found_status etc.,
+    all called with checked_nodes) has only ever looked up the primary
+    node's own EDP row — a real gap confirmed on a real dual-tech site:
+    HXL04147 (primary) and HXIN010147 (secondary) are two separate EDP
+    rows under different SITE_NAME values, and HXIN010147's row was never
+    looked up anywhere. This function is additive: it does not change
+    checked_nodes or any existing check, it only supplies both node names
+    for the field-value display table below."""
+    out = []
+    for m in cer.mixed_mode_rows(ciq_wb):
+        build_as = _norm(m.get("Node to be built as")).upper()
+        e_name = _norm(m.get("eNodeB Name"))
+        g_name = _norm(m.get("gNodeB Name"))
+        bbu_mode = _norm(m.get("BBU Mode")).upper()
+        if e_name and e_name.upper() == build_as:
+            primary, secondary = e_name, g_name
+        elif g_name and g_name.upper() == build_as:
+            primary, secondary = g_name, e_name
+        else:
+            primary, secondary = (e_name or g_name), (g_name if e_name else "")
+        if primary:
+            out.append({"node": primary, "role": "Primary"})
+        if secondary and bbu_mode != "SMBB":
+            out.append({"node": secondary, "role": "Secondary"})
+    return out
+
+
+def build_edp_field_table(edp_rows, node_role_list):
+    """One row per (node, role) in node_role_list, with the raw EDP field
+    values requested for a side-by-side view: SITE_NAME/CABINET/BBU_TYPE/
+    NODE_MODEL/SIAD_PORT_SIZE_BBU/SIAD_PORT_FACING_BBU/
+    BEARER_ENODEB_SB_VLAN_ID/IPV6_SIAD_BEARER_IP_DEF_ROUTER/
+    IPV6_ENODEB_BEARER_IP/OAM_ENODEB_SIAD_OAM_VLAN/
+    IPV6_SIAD_OAM_IP_DEF_ROUTER/IPV6_ENODEB_OAM_IP.
+
+    Uses the same per-node EDP row lookup (cer.edp_rows_for_site) every
+    other EDP check in this module uses, via node_role_list from
+    build_primary_secondary_node_list() so both Primary and Secondary
+    physical nodes get their OWN row looked up (see that function's
+    docstring for why this differs from every existing check's node list).
+    This is a raw-value DISPLAY table, not a new check."""
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        rec = rows[0] if rows else None
+        row = {"node": nid, "role": entry["role"]}
+        for col in EDP_FIELD_TABLE_COLUMNS:
+            row[col] = _norm(rec.get(col)) if rec else "NOT FOUND"
+        out.append(row)
+    return out
+
+
+def build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows):
+    """Pre (from Pre kget-all logs, pre_extract.extract_bearer_oam_ipv6())
+    vs EDP (the same field, read directly off the site's own EDP row) for
+    the 6 bearer/OAM fields — one row per node in node_role_list that has
+    a Pre log available. A node with no uploaded Pre log is skipped (there
+    is nothing to compare, not a MISMATCH)."""
+    import ipaddress
+    import pre_extract as pe
+
+    def _ipv6_equal(a, b):
+        """Two IPv6 address strings are the SAME address even when written
+        differently — confirmed real case: Pre reports '...6:954:2' and EDP
+        reports '...6:0954:2' for the identical address (a zero-padded
+        hextet). A plain string compare after stripping '/64' called that a
+        mismatch; this parses both through ipaddress.IPv6Address so
+        zero-padding, letter case, and '::' compression differences are all
+        normalised before comparing. Falls back to the stripped-string
+        compare if either side fails to parse (e.g. a genuinely malformed
+        value), so a parse failure surfaces as its own mismatch rather than
+        silently passing."""
+        try:
+            return ipaddress.IPv6Address(a.split("/")[0]) == ipaddress.IPv6Address(b.split("/")[0])
+        except ValueError:
+            return a.split("/")[0] == b.split("/")[0]
+
+    field_map = [
+        ("bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID", "Bearer VLAN", False),
+        ("bearer_ip", "IPV6_ENODEB_BEARER_IP", "Bearer IPv6", True),
+        ("bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "Bearer Default Router", True),
+        ("oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN", "OAM VLAN", False),
+        ("oam_ip", "IPV6_ENODEB_OAM_IP", "OAM IPv6", True),
+        ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "OAM Default Router", True),
+    ]
+
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        log_text = (node_logs_text or {}).get(nid)
+        if not log_text:
+            continue
+        pre_vals = pe.extract_bearer_oam_ipv6(log_text)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+        for pre_key, edp_key, label, is_ipv6 in field_map:
+            pre_v = pre_vals.get(pre_key)
+            edp_v = _norm(edp_rec.get(edp_key)) if edp_rec else None
+            if pre_v is None and not edp_v:
+                continue  # neither side has data - nothing to show
+            if not pre_v or not edp_v:
+                status = "unknown"
+            elif is_ipv6:
+                status = "match" if _ipv6_equal(pre_v, edp_v) else "mismatch"
+            else:
+                status = "match" if pre_v == edp_v else "mismatch"
+            out.append({
+                "node": nid, "role": entry["role"], "field": label,
+                "pre_value": pre_v or "Not found in Pre log",
+                "edp_value": edp_v or "Not found in EDP",
+                "status": status,
+            })
+    return out
+
+
+def build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows):
+    """One row per (node, role): Bearer/OAM VLAN, IPv6, Default Router,
+    pre + EDP side by side — wide layout (Node ID + 2-col-per-field),
+    replacing the long one-row-per-field format from
+    build_pre_vs_edp_ipv6_table() above. A node with no uploaded Pre log
+    still gets a row (pre columns show '—'), so the Node ID list is
+    complete regardless of which logs were uploaded this run."""
+    import pre_extract as pe
+
+    field_map = [
+        ("bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID", "bearer_vlan"),
+        ("bearer_ip", "IPV6_ENODEB_BEARER_IP", "bearer_ipv6"),
+        ("bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "bearer_router"),
+        ("oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN", "oam_vlan"),
+        ("oam_ip", "IPV6_ENODEB_OAM_IP", "oam_ipv6"),
+        ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "oam_router"),
+    ]
+    role_short = {"Primary": "P", "Secondary": "S"}
+
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        log_text = (node_logs_text or {}).get(nid)
+        pre_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+        row = {"label": f"{nid} ({role_short.get(entry['role'], entry['role'][:1])})"}
+        for pre_key, edp_key, out_key in field_map:
+            row[f"{out_key}_pre"] = pre_vals.get(pre_key) or "—"
+            row[f"{out_key}_edp"] = _norm(edp_rec.get(edp_key)) if edp_rec else "—"
+        out.append(row)
+    return out
+
+
+# ── Unified Pre/CIQ vs Post(EDP) checklist — the 12-field spec confirmed
+# against the screenshot table. Two fields (the Default Router pair) are
+# intentionally excluded from mismatch-highlighting per that spec (still
+# shown, status forced to 'info' so they never render red/green) — routers
+# are shared infra, not something a build error would typically shift.
+#
+# Per-field source of the "Pre/CIQ" side:
+#   - the 6 Bearer/OAM network fields  -> Pre kget-all log (extract_bearer_oam_ipv6)
+#   - node_model                        -> CIQ, via the SAME results['board_type']
+#                                          check already computed elsewhere (CIQ DU
+#                                          Type vs EDP Model) — not Pre-log based,
+#                                          matching "Node model should match the CIQ"
+#   - cabinet                           -> derived, not read from any log: a
+#                                          Secondary's cabinet is checked against
+#                                          its OWN paired Primary's cabinet + 'V'
+#                                          (e.g. Primary BBU01 -> Secondary BBU01V),
+#                                          not just format-checked independently
+#                                          (the older _edp_cabinet_status above only
+#                                          checks the regex/'V' suffix in isolation,
+#                                          never that the NUMBER actually matches its
+#                                          own Primary — two unrelated nodes named
+#                                          BBU01/BBU02V would previously pass)
+#   - site_name/bbu_type/siad_port_size_bbu/siad_port_facing_bbu -> EDP value only,
+#                                          no Pre/CIQ counterpart in this pipeline
+#
+# A node with NO uploaded Pre log (new node — same convention run_validation.py
+# already uses for is_new_node=not has_pre) gets 'unknown' (grey, no highlight)
+# on every Pre-sourced field instead of 'mismatch': this is what makes an
+# SMBB(Pre)->MMBB(Post) transition safe — the newly-appearing Secondary has no
+# Pre history by definition, and that absence must not be flagged. The Primary's
+# own row is built and compared exactly as it always is, unaffected by whether
+# a Secondary exists at all.
+CHECKLIST_FIELD_SPEC = [
+    ("SITE_NAME", "site_name", True),
+    ("CABINET", "cabinet", True),
+    ("BBU_TYPE", "bbu_type", True),
+    ("NODE_MODEL", "node_model", True),
+    ("SIAD_PORT_SIZE_BBU", "siad_port_size_bbu", True),
+    ("SIAD_PORT_FACING_BBU", "siad_port_facing_bbu", True),
+    ("BEARER_ENODEB_SB_VLAN_ID", "bearer_enodeb_sb_vlan_id", True),
+    ("IPV6_SIAD_BEARER_IP_DEF_ROUTER", "ipv6_siad_bearer_ip_def_router", False),
+    ("IPV6_ENODEB_BEARER_IP", "ipv6_enodeb_bearer_ip", True),
+    ("OAM_ENODEB_SIAD_OAM_VLAN", "oam_enodeb_siad_oam_vlan", True),
+    ("IPV6_SIAD_OAM_IP_DEF_ROUTER", "ipv6_siad_oam_ip_def_router", False),
+    ("IPV6_ENODEB_OAM_IP", "ipv6_enodeb_oam_ip", True),
+]
+
+_PRE_NETWORK_FIELD_MAP = {
+    "BEARER_ENODEB_SB_VLAN_ID": "bearer_vlan",
+    "IPV6_ENODEB_BEARER_IP": "bearer_ip",
+    "IPV6_SIAD_BEARER_IP_DEF_ROUTER": "bearer_router_ip",
+    "OAM_ENODEB_SIAD_OAM_VLAN": "oam_vlan",
+    "IPV6_ENODEB_OAM_IP": "oam_ip",
+    "IPV6_SIAD_OAM_IP_DEF_ROUTER": "oam_router_ip",
+}
+
+
+def _cabinet_pairing_map(ciq_wb, edp_rows):
+    """{secondary_node_id: expected_cabinet} from the SAME Mixed Mode Info
+    pairing build_primary_secondary_node_list() uses — recomputed here
+    (rather than reverse-engineered from its flat output) so a Secondary
+    is always checked against its OWN Primary, never just row order."""
+    expected = {}
+    for m in cer.mixed_mode_rows(ciq_wb):
+        build_as = _norm(m.get("Node to be built as")).upper()
+        e_name, g_name = _norm(m.get("eNodeB Name")), _norm(m.get("gNodeB Name"))
+        bbu_mode = _norm(m.get("BBU Mode")).upper()
+        if e_name and e_name.upper() == build_as:
+            primary, secondary = e_name, g_name
+        elif g_name and g_name.upper() == build_as:
+            primary, secondary = g_name, e_name
+        else:
+            primary, secondary = (e_name or g_name), (g_name if e_name else "")
+        if not (secondary and primary and bbu_mode != "SMBB"):
+            continue
+        prim_rows = cer.edp_rows_for_site(edp_rows, primary)
+        prim_cab = _norm(prim_rows[0].get("CABINET")) if prim_rows else ""
+        expected[secondary] = f"{prim_cab}V" if prim_cab else None
+    return expected
+
+
+def _cabinet_pairing_status(ciq_wb, edp_rows, node_ids):
+    """Combines the existing format-only check (well-formed 'BBUxx'/'BBUxxV')
+    with the real cross-node pairing check confirmed in this conversation:
+    a Secondary's cabinet number must match its OWN Primary's, not just
+    look like a valid cabinet string in isolation."""
+    fmt_status, fmt_detail = _edp_cabinet_status(edp_rows, node_ids)
+    expected = _cabinet_pairing_map(ciq_wb, edp_rows)
+    bad, checked = [], 0
+    for nid, exp in expected.items():
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        actual = _norm(rows[0].get("CABINET")) if rows else ""
+        if not exp or not actual:
+            continue
+        checked += 1
+        if actual.upper() != exp.upper():
+            bad.append(f"{nid}: expected cabinet '{exp}' (from its own Primary), EDP shows '{actual}'")
+    if bad or fmt_status == "mismatch":
+        parts = ([fmt_detail] if fmt_status == "mismatch" else []) + bad
+        return "mismatch", "; ".join(parts[:6])
+    if checked:
+        return "match", f"{fmt_detail} {checked} Secondary/Primary pair(s) also checked, all pass."
+    return fmt_status, fmt_detail
+
+
+def _du_type_by_node(ciq_wb):
+    """{node_id: hardware model number} from eNB/gNB Info 'DU type' — the
+    CIQ-side counterpart to EDP's NODE_MODEL string (e.g. 'RAN PROCESSOR
+    6672' contains this same '6672')."""
+    out = {}
+    for r in (cer.enb_info_rows(ciq_wb) if ciq_wb else []):
+        n = _norm(r.get("eNodeB Name"))
+        if n:
+            out[n] = _norm(r.get("DU type"))
+    if ciq_wb and "gNB Info" in ciq_wb.sheetnames:
+        for r in cer.sheet_rows_as_dicts(ciq_wb["gNB Info"]):
+            n = _norm(r.get("gNodeB Name"))
+            if n and n not in out:
+                out[n] = _norm(r.get("DU type"))
+    return out
+
+
+def _bbu_type_vs_node_model_status(ciq_wb, edp_rows, node_ids):
+    """CIQ hardware board number (5G Info/eNB/gNB Info 'DU type'/'BBU Type')
+    vs EDP NODE_MODEL. Confirmed against real EDP data in this conversation:
+    the EDP column named BBU_TYPE actually holds the mode string
+    ('MIXED MODE'/'TRIPLE MODE'), and NODE_MODEL holds the hardware string
+    ('RAN PROCESSOR 6672', 'BASEBAND 6630') — the reverse of what the
+    column names suggest. This check is deliberately wired to NODE_MODEL,
+    not BBU_TYPE, for that reason."""
+    du_type = _du_type_by_node(ciq_wb)
+    bad, checked = [], 0
+    for nid in node_ids:
+        board = du_type.get(nid)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_model = _norm(rows[0].get("NODE_MODEL")) if rows else ""
+        if not board or not edp_model:
+            continue
+        checked += 1
+        if board not in edp_model:
+            bad.append(f"{nid}: CIQ board '{board}' not found in EDP NODE_MODEL '{edp_model}'")
+    if not checked:
+        return "unknown", "No CIQ board type / EDP NODE_MODEL data to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} node(s) checked, all pass."
+
+
+# MMBB/TMBB map to a fixed EDP BBU_TYPE string, confirmed against real data.
+# SMBB does NOT — confirmed real value for an SMBB (LTE-only) node was
+# '4G LTE Macro', not 'SINGLE MODE' as originally assumed — so SMBB is
+# flagged 'manual' rather than compared against a guessed string.
+_BBU_MODE_TO_EDP_TYPE = {"MMBB": "MIXED MODE", "TMBB": "TRIPLE MODE"}
+
+
+def _node_model_vs_bbu_type_status(ciq_wb, edp_rows, node_ids):
+    """CIQ Mixed Mode Info 'BBU Mode' (MMBB/SMBB/TMBB) vs EDP BBU_TYPE."""
+    mm_rows = cer.mixed_mode_rows(ciq_wb) if ciq_wb else []
+    mode_by_node = {}
+    for r in mm_rows:
+        n = _norm(r.get("Node to be built as")) or _norm(r.get("eNodeB Name")) or _norm(r.get("gNodeB Name"))
+        if n:
+            mode_by_node[n] = _norm(r.get("BBU Mode")).upper()
+
+    bad, checked, manual = [], 0, []
+    for nid in node_ids:
+        mode = mode_by_node.get(nid)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_type = _norm(rows[0].get("BBU_TYPE")) if rows else ""
+        if not mode or not edp_type:
+            continue
+        expected = _BBU_MODE_TO_EDP_TYPE.get(mode)
+        if expected is None:
+            manual.append(f"{nid}: SMBB — EDP BBU_TYPE is '{edp_type}', no fixed expected string confirmed for SMBB yet")
+            continue
+        checked += 1
+        if edp_type.upper() != expected:
+            bad.append(f"{nid}: CIQ {mode} expects EDP BBU_TYPE '{expected}', got '{edp_type}'")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        note = f"{checked} node(s) checked, all pass."
+        if manual:
+            note += f" ({len(manual)} SMBB node(s) need manual check — see note)"
+        return "match", note
+    if manual:
+        return "manual", "; ".join(manual[:6])
+    return "unknown", "No CIQ BBU Mode / EDP BBU_TYPE data to check."
+
+
+def _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, pre_key, edp_col, is_ipv6=False):
+    """One EDP field, Pre vs EDP, per (node, role) in node_role_list. A node
+    with no uploaded Pre log at all is treated as 'no history to compare'
+    (unknown, not mismatch) — this is what makes an SMBB(Pre)->MMBB(Post)
+    transition safe: the newly-appearing Secondary has no Pre log by
+    definition, and that must not be flagged. Confirmed: highlight ALL 6
+    bearer/OAM fields equally, including both Default Router fields."""
+    import pre_extract as pe
+    import ipaddress
+
+    def _ipv6_eq(a, b):
+        try:
+            return ipaddress.IPv6Address(a.split("/")[0]) == ipaddress.IPv6Address(b.split("/")[0])
+        except ValueError:
+            return a.split("/")[0] == b.split("/")[0]
+
+    bad, checked, no_pre = [], 0, []
+    for entry in node_role_list:
+        nid = entry["node"]
+        log_text = (node_logs_text or {}).get(nid)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_v = _norm(rows[0].get(edp_col)) if rows else ""
+        if not log_text:
+            no_pre.append(nid)
+            continue
+        pre_v = pe.extract_bearer_oam_ipv6(log_text).get(pre_key) or ""
+        if not pre_v or not edp_v:
+            continue
+        checked += 1
+        same = _ipv6_eq(pre_v, edp_v) if is_ipv6 else (pre_v == edp_v)
+        if not same:
+            bad.append(f"{nid} ({entry['role']}): Pre={pre_v}, EDP={edp_v}")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        note = f"{checked} node(s) checked, all pass."
+        if no_pre:
+            note += f" ({len(no_pre)} node(s) with no Pre log, not checked: {', '.join(no_pre[:4])})"
+        return "match", note
+    if no_pre:
+        return "unknown", f"No Pre log for: {', '.join(no_pre[:6])}"
+    return "unknown", "No Pre/EDP data to compare."
+
+
+def _siad_port_size_pre_status(node_logs_text, ciq_wb, edp_rows, node_ids):
+    """Pre (admOperatingMode on the board-generation-specific transport
+    port — see pre_extract.extract_transport_port_mode) vs EDP
+    SIAD_PORT_SIZE_BBU."""
+    import pre_extract as pe
+    du_type = _du_type_by_node(ciq_wb)
+
+    bad, checked, no_port = [], 0, []
+    for nid in node_ids:
+        board = du_type.get(nid)
+        log_text = (node_logs_text or {}).get(nid)
+        if not board or not log_text:
+            continue
+        port, pre_size = pe.extract_transport_port_mode(log_text, board)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_size = _norm(rows[0].get("SIAD_PORT_SIZE_BBU")) if rows else ""
+        if not pre_size:
+            no_port.append(f"{nid}: no known transport port found in Pre log for board '{board}'")
+            continue
+        if not edp_size:
+            continue
+        checked += 1
+        if pre_size.upper() != edp_size.upper():
+            bad.append(f"{nid}: Pre {port}={pre_size}, EDP={edp_size}")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        note = f"{checked} node(s) checked, all pass."
+        if no_port:
+            note += f" ({len(no_port)} skipped: {'; '.join(no_port[:3])})"
+        return "match", note
+    if no_port:
+        return "unknown", "; ".join(no_port[:6])
+    return "unknown", "No Pre log / board type data to check."
+
+
+def build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb, results):
+    """One row per (node, role, field) across all 12 fields in
+    CHECKLIST_FIELD_SPEC — 'pre_value' is Pre-log/CIQ/derived depending on
+    the field (see module comment above), 'edp_value' is always the EDP
+    (Post/target) value. status is 'unknown' (no highlight) whenever
+    there's nothing on the Pre/CIQ side to compare, INCLUDING every node
+    with no uploaded Pre log at all — this is what keeps a newly-added
+    Secondary (SMBB->MMBB) from being flagged just for lacking history."""
+    import pre_extract as pe
+
+    board_type_by_node = {r.get("node"): r for r in results.get("board_type", [])}
+    cabinet_expected = _cabinet_pairing_map(ciq_wb, edp_rows)
+
+    out = []
+    for entry in node_role_list:
+        nid, role = entry["node"], entry["role"]
+        log_text = (node_logs_text or {}).get(nid)
+        pre_net_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+
+        for edp_col, label, highlight in CHECKLIST_FIELD_SPEC:
+            edp_v = _norm(edp_rec.get(edp_col)) if edp_rec else ""
+
+            if edp_col == "NODE_MODEL":
+                bt = board_type_by_node.get(nid)
+                pre_v = _norm(bt.get("ciq_du_type")) if bt else ""
+                edp_v = _norm(bt.get("edp_model")) if bt else edp_v
+                status = str(bt.get("status", "unknown")).lower() if bt else "unknown"
+            elif edp_col == "CABINET":
+                if role == "Secondary" and nid in cabinet_expected:
+                    pre_v = cabinet_expected[nid] or ""
+                    status = "unknown" if not pre_v or not edp_v else (
+                        "match" if pre_v.upper() == edp_v.upper() else "mismatch")
+                else:
+                    pre_v = ""
+                    status = "unknown"
+            elif edp_col in _PRE_NETWORK_FIELD_MAP:
+                pre_v = pre_net_vals.get(_PRE_NETWORK_FIELD_MAP[edp_col]) or ""
+                status = "unknown" if not pre_v or not edp_v else (
+                    "match" if pre_v == edp_v else "mismatch")
+            else:
+                pre_v = ""
+                status = "unknown"
+
+            if not highlight and status == "mismatch":
+                status = "info"  # unchecked fields: shown, never highlighted red
+
+            out.append({
+                "node": nid, "role": role, "field": label,
+                "pre_value": pre_v or "—", "edp_value": edp_v or "—",
+                "status": status,
+            })
+    return out
