@@ -1486,12 +1486,13 @@ with tab_consolidated:
         render_rrnrbl_checklist(checklist)
 
     with st.expander("Mismatches \u2014 RFDS vs CIQ & KGET vs CIQ", expanded=False):
+        # EDP is deliberately NOT passed here: this expander covers the two
+        # CIQ-facing families only (its title says so), and KGET vs EDP has
+        # its own section below.
         mm_rows = _memo("mm_rows", lambda: build_consolidated_mismatches(
             _memo("grouped_rows", lambda: build_rfds_grouped_rows(
                 results, ciq_wb, rfds_pages, state.get("rfds_bytes"))),
-            results,
-            rc.build_pre_vs_edp_ipv6_table(node_logs_text, state["node_role_list"], edp_rows)
-            if node_logs_text else []))
+            results))
 
         if not mm_rows:
             st.caption("No mismatches found.")
