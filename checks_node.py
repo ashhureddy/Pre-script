@@ -219,7 +219,15 @@ def check_board_type(node_id, mm_row, enb_row, ciq_wb, edp_rows, rfds_pages=None
 
 
 def check_tac(node_id, log_text, enb_row, has_pre_log):
-    """Rule #16 - LTE TAC, Pre kget-all vs CIQ eNB Info tac column."""
+    """Rule #16 - LTE TAC, Pre kget-all vs CIQ eNB Info tac column.
+
+    LTE-only: a node with no eNB Info row has no LTE eNodeB at all (e.g. a
+    pure-5G/AAS node like an N077-only build) - there is no LTE TAC to
+    check, so this must be SKIPPED, not flagged as 'not found'. 5G TAC is
+    a separate field (nRTAC) checked by check_nr_tac, not this rule."""
+    if not enb_row:
+        return {'rule': '#16', 'node': node_id, 'status': 'SKIPPED',
+                'note': 'No eNB Info row for this node — not an LTE node, LTE TAC does not apply.'}
     if not has_pre_log:
         return {'rule': '#16', 'node': node_id, 'status': 'SKIPPED',
                 'note': 'No Pre kget-all log — new build (RMAP not available; not checked).'}
