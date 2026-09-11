@@ -882,61 +882,105 @@ state = st.session_state["state"]
 # out to the individual PARAMETER that disagrees, rather than dumping every
 # checked row (passes included) as a wide table.
 _MM_NA = {"", "NA", "NOT AVAILABLE", "NOT FOUND", "NOT CHECKED", "-", "\u2014", "NONE"}
-_MM_META = {"rule", "node", "cell", "status", "note", "field", "pre", "ciq", "rfds_rcn"}
+
+# Internal field name -> the label an engineer reads on the report.
+_MM_PARAM_LABEL = {
+    "earfcndl": "EARFCN", "earfcnul": "EARFCN",
+    "arfcnDL": "ARFCN", "arfcnUL": "ARFCN",
+    "dlChannelBandwidth": "Channel BW", "ulChannelBandwidth": "Channel BW",
+    "bSChannelBwDL": "Channel BW", "bSChannelBwUL": "Channel BW",
+    "ssbfrequency": "SSB Frequency",
+    "sec_id": "Sector ID", "txrx": "TX/RX", "power": "Power",
+}
 
 
 def _mm_is_na(v):
     return str(v).strip().upper() in _MM_NA
 
 
-def explode_param_mismatches(row, source, check):
-    """One output line per mismatched PARAMETER within a result row.
-
-    Handles the three row conventions this codebase produces:
-      a) compact 'Pre | CIQ' fields   (check_rf_params_4g / _5g)
-      b) pre_X / ciq_X value pairs    (check_sector_swap_config)
-      c) plain status+note rows       (cells_vs_rfds, radio_type, ...)
-    A field whose Pre side is NA/NOT AVAILABLE is NOT a mismatch (there is
-    nothing to compare against), which mirrors how the underlying checks
-    decide their own status."""
-    out = []
-    base = {"source": source, "check": check, "rule": row.get("rule", ""),
-            "node": row.get("node", ""), "cell": row.get("cell", "")}
-    for k, v in row.items():
-        if k in _MM_META or not isinstance(v, str) or " | " not in v:
-            continue
-        pre, _, ciq = v.partition(" | ")
-        pre, ciq = pre.strip(), ciq.strip()
-        if not _mm_is_na(pre) and pre != ciq:
-            out.append({**base, "param": k, "expected": pre, "actual": ciq, "note": row.get("note", "")})
-    for k in list(row):
-        if not k.startswith("pre_"):
-            continue
-        b = k[4:]
-        ciq_key = "ciq_" + b if "ciq_" + b in row else (b if b in row else None)
-        if not ciq_key:
-            continue
-        pre, ciq = str(row[k]).strip(), str(row[ciq_key]).strip()
-        if not _mm_is_na(pre) and pre != ciq:
-            out.append({**base, "param": b, "expected": pre, "actual": ciq, "note": row.get("note", "")})
-    if not out:
-        out.append({**base, "param": row.get("field") or "\u2014",
-                    "expected": "\u2014", "actual": "\u2014", "note": row.get("note", "")})
-    return out
+def _mm_row(cell, source, param, left_label, left, right):
+    return {"cell": cell, "source": source, "param": param,
+            "comments": f"{left_label} - {left} | CIQ - {right}"}
 
 
-def build_consolidated_mismatches(results, groups):
-    """groups: [(source_label, check_label, results_key), ...] -> flat
-    parameter-level mismatch rows, plus how many rows were checked in total
-    so the UI can state what was filtered out."""
-    rows, checked = [], 0
-    for source, check, key in groups:
+def build_consolidated_mismatches(grouped_rows, results):
+    """Flat, parameter-level mismatch list for the consolidated report.
+
+    Two comparison families, both reduced to the same four columns
+    (Cell name / Mismatch on / Parameter / Comments):
+
+      'RFDS vs CIQ'  - taken from the RFDS verification rows, which already
+                       resolve cell presence, RRU, antenna and cell id per
+                       cell against the RFDS.
+      'KGET vs CIQ'  - taken from the Pre(kget)-based checks. Handles the
+                       two row conventions those produce: compact
+                       'Pre | CIQ' fields (params 4G/5G) and pre_X/ciq_X
+                       pairs (sector/TX-RX/power), plus the explicit
+                       pre/ciq keys on cell-id and radio-type rows.
+
+    A field whose Pre/KGET side is NA or NOT AVAILABLE is not a mismatch -
+    there is nothing to compare it against - which mirrors how the
+    underlying checks decide their own status."""
+    rows = []
+
+    for r in grouped_rows or []:
+        # Prefer whichever side actually carries the cell identifier: on a
+        # "not found" row one side holds the literal 'NOT FOUND', and that
+        # must not become the Cell name.
+        cell = next((v for v in (r.get("cell_ciq"), r.get("cell_rfds"))
+                     if v and not _mm_is_na(v)), "\u2014")
+        if r.get("cell_status") == "MISMATCH":
+            rows.append(_mm_row(cell, "RFDS vs CIQ", "Cell Not Found", "RFDS",
+                                r.get("cell_rfds", "\u2014"), r.get("cell_ciq", "\u2014")))
+        if r.get("rru_status") == "MISMATCH":
+            rows.append(_mm_row(cell, "RFDS vs CIQ", "RRU", "RFDS",
+                                r.get("rru_rfds", "\u2014"), r.get("rru_ciq", "\u2014")))
+        if r.get("ant_status") == "MISMATCH":
+            rows.append(_mm_row(cell, "RFDS vs CIQ", "Antenna", "RFDS",
+                                r.get("ant_rfds", "\u2014"), r.get("ant_ciq", "\u2014")))
+        if r.get("cellid_status") == "MISMATCH":
+            rows.append(_mm_row(cell, "RFDS vs CIQ", "CellID", "RFDS",
+                                r.get("cellid_rfds", "\u2014"), r.get("cellid_ciq", "\u2014")))
+
+    for key in ("params_4g", "params_5g", "sector_swap"):
         for r in results.get(key, []):
-            checked += 1
             if str(r.get("status", "")).upper() != "MISMATCH":
                 continue
-            rows += explode_param_mismatches(r, source, check)
-    return rows, checked
+            cell = r.get("cell") or "\u2014"
+            for k, v in r.items():
+                if k in ("rule", "node", "cell", "status", "note") or not isinstance(v, str) or " | " not in v:
+                    continue
+                pre, _, ciq = v.partition(" | ")
+                pre, ciq = pre.strip(), ciq.strip()
+                if not _mm_is_na(pre) and pre != ciq:
+                    rows.append(_mm_row(cell, "KGET vs CIQ", _MM_PARAM_LABEL.get(k, k), "KGET", pre, ciq))
+            for k in list(r):
+                if not k.startswith("pre_"):
+                    continue
+                b = k[4:]
+                ciq_key = "ciq_" + b if "ciq_" + b in r else (b if b in r else None)
+                if not ciq_key:
+                    continue
+                pre, ciq = str(r[k]).strip(), str(r[ciq_key]).strip()
+                if not _mm_is_na(pre) and pre != ciq:
+                    rows.append(_mm_row(cell, "KGET vs CIQ", _MM_PARAM_LABEL.get(b, b), "KGET", pre, ciq))
+
+    for key, label in (("cell_id_vs_rfds", "CellID"), ("radio_type", "RRU")):
+        for r in results.get(key, []):
+            if str(r.get("status", "")).upper() != "MISMATCH":
+                continue
+            pre, ciq = str(r.get("pre", "")).strip(), str(r.get("ciq", "")).strip()
+            if not _mm_is_na(pre) and pre != ciq:
+                rows.append(_mm_row(r.get("cell") or "\u2014", "KGET vs CIQ", label, "KGET", pre, ciq))
+
+    seen, unique = set(), []
+    for r in rows:
+        sig = (r["cell"], r["source"], r["param"], r["comments"])
+        if sig not in seen:
+            seen.add(sig)
+            unique.append(r)
+    unique.sort(key=lambda r: (r["source"], r["cell"], r["param"]))
+    return unique
 
 
 # ── Per-validation-run memo ────────────────────────────────────────────
@@ -1402,29 +1446,36 @@ with tab_consolidated:
         checklist = state["checklist"]
         render_rrnrbl_checklist(checklist)
 
-    with st.expander("RFDS vs CIQ & Pre vs CIQ", expanded=False):
-        def _vs_payload():
-            rows, checked = build_consolidated_mismatches(results, [
-                ("RFDS vs CIQ", "Cells vs RFDS", "cells_vs_rfds"),
-                ("RFDS vs CIQ", "Cell ID vs RFDS", "cell_id_vs_rfds"),
-                ("RFDS vs CIQ", "Radio Type vs RFDS", "radio_type"),
-                ("Pre vs CIQ", "Parameters \u2014 4G", "params_4g"),
-                ("Pre vs CIQ", "Parameters \u2014 5G", "params_5g"),
-                ("Pre vs CIQ", "Sector / TX-RX / Power", "sector_swap"),
-            ])
-            html = render_table(rows, status_key=None, columns=[
-                ("source", "Comparison"), ("check", "Check"), ("node", "Node"), ("cell", "Cell"),
-                ("param", "Parameter"), ("expected", "Expected (Pre / RFDS)"), ("actual", "Found (CIQ)"),
-                ("note", "Note"),
-            ]) if rows else ""
-            return rows, checked, html
+    with st.expander("Mismatches \u2014 RFDS vs CIQ & KGET vs CIQ", expanded=False):
+        mm_rows = _memo("mm_rows", lambda: build_consolidated_mismatches(
+            _memo("grouped_rows", lambda: build_rfds_grouped_rows(
+                results, ciq_wb, rfds_pages, state.get("rfds_bytes"))),
+            results))
 
-        vs_rows, vs_checked, vs_html = _memo("vs_payload", _vs_payload)
-        if vs_rows:
-            st.caption(f"{len(vs_rows)} parameter-level mismatch(es) across {vs_checked} checked row(s). Matching rows are not listed.")
-            st.markdown(vs_html, unsafe_allow_html=True)
+        if not mm_rows:
+            st.caption("No mismatches found.")
         else:
-            st.caption(f"No mismatches \u2014 all {vs_checked} checked row(s) agree.")
+            # Per-column filters, mirroring the reference report's header
+            # dropdowns. These are cheap: the row set itself is memoised, so
+            # changing a filter only re-filters an in-memory list.
+            def _opts(k):
+                return ["All"] + sorted({r[k] for r in mm_rows})
+
+            f1, f2, f3 = st.columns(3)
+            sel_cell = f1.selectbox("Cell name", _opts("cell"), key="mm_f_cell")
+            sel_src = f2.selectbox("Mismatch on", _opts("source"), key="mm_f_src")
+            sel_par = f3.selectbox("Parameter", _opts("param"), key="mm_f_param")
+
+            shown = [r for r in mm_rows
+                     if (sel_cell == "All" or r["cell"] == sel_cell)
+                     and (sel_src == "All" or r["source"] == sel_src)
+                     and (sel_par == "All" or r["param"] == sel_par)]
+
+            st.markdown(render_table(shown, status_key=None, columns=[
+                ("cell", "Cell name"), ("source", "Mismatch on"),
+                ("param", "Parameter"), ("comments", "Comments"),
+            ]), unsafe_allow_html=True)
+            st.caption(f"Showing **{len(shown)}** of **{len(mm_rows)}** rows")
 
     with st.expander("CIQ Sanity Check", expanded=False):
         def _sanity_payload():
