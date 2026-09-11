@@ -877,6 +877,68 @@ if not st.session_state["has_run"]:
 state = st.session_state["state"]
 
 
+# ── Consolidated mismatch views ────────────────────────────────────────
+# The consolidated report shows only what needs ACTION: mismatches, broken
+# out to the individual PARAMETER that disagrees, rather than dumping every
+# checked row (passes included) as a wide table.
+_MM_NA = {"", "NA", "NOT AVAILABLE", "NOT FOUND", "NOT CHECKED", "-", "\u2014", "NONE"}
+_MM_META = {"rule", "node", "cell", "status", "note", "field", "pre", "ciq", "rfds_rcn"}
+
+
+def _mm_is_na(v):
+    return str(v).strip().upper() in _MM_NA
+
+
+def explode_param_mismatches(row, source, check):
+    """One output line per mismatched PARAMETER within a result row.
+
+    Handles the three row conventions this codebase produces:
+      a) compact 'Pre | CIQ' fields   (check_rf_params_4g / _5g)
+      b) pre_X / ciq_X value pairs    (check_sector_swap_config)
+      c) plain status+note rows       (cells_vs_rfds, radio_type, ...)
+    A field whose Pre side is NA/NOT AVAILABLE is NOT a mismatch (there is
+    nothing to compare against), which mirrors how the underlying checks
+    decide their own status."""
+    out = []
+    base = {"source": source, "check": check, "rule": row.get("rule", ""),
+            "node": row.get("node", ""), "cell": row.get("cell", "")}
+    for k, v in row.items():
+        if k in _MM_META or not isinstance(v, str) or " | " not in v:
+            continue
+        pre, _, ciq = v.partition(" | ")
+        pre, ciq = pre.strip(), ciq.strip()
+        if not _mm_is_na(pre) and pre != ciq:
+            out.append({**base, "param": k, "expected": pre, "actual": ciq, "note": row.get("note", "")})
+    for k in list(row):
+        if not k.startswith("pre_"):
+            continue
+        b = k[4:]
+        ciq_key = "ciq_" + b if "ciq_" + b in row else (b if b in row else None)
+        if not ciq_key:
+            continue
+        pre, ciq = str(row[k]).strip(), str(row[ciq_key]).strip()
+        if not _mm_is_na(pre) and pre != ciq:
+            out.append({**base, "param": b, "expected": pre, "actual": ciq, "note": row.get("note", "")})
+    if not out:
+        out.append({**base, "param": row.get("field") or "\u2014",
+                    "expected": "\u2014", "actual": "\u2014", "note": row.get("note", "")})
+    return out
+
+
+def build_consolidated_mismatches(results, groups):
+    """groups: [(source_label, check_label, results_key), ...] -> flat
+    parameter-level mismatch rows, plus how many rows were checked in total
+    so the UI can state what was filtered out."""
+    rows, checked = [], 0
+    for source, check, key in groups:
+        for r in results.get(key, []):
+            checked += 1
+            if str(r.get("status", "")).upper() != "MISMATCH":
+                continue
+            rows += explode_param_mismatches(r, source, check)
+    return rows, checked
+
+
 # ── Per-validation-run memo ────────────────────────────────────────────
 # Streamlit re-executes the WHOLE script on every widget interaction, and
 # st.tabs renders every tab's body regardless of which one is on screen.
@@ -1340,68 +1402,85 @@ with tab_consolidated:
         checklist = state["checklist"]
         render_rrnrbl_checklist(checklist)
 
-    with st.expander("Warnings & Comments", expanded=False):
-        rfds_verification_rows = build_rfds_verification_summary(
-            _memo("grouped_rows", lambda: build_rfds_grouped_rows(
-                results, ciq_wb, rfds_pages, state.get("rfds_bytes"))))
-        if rfds_verification_rows:
-            st.markdown("**RFDS Verification:**")
-            st.markdown(render_table(rfds_verification_rows,
-                                      columns=[("Finding", "Finding"), ("Corrective Action", "Corrective Action")],
-                                      status_key=None),
-                        unsafe_allow_html=True)
-
-        warn_keys = ["warn_primary_secondary", "warn_board_type", "warn_xmu", "warn_params_4g", "warn_params_5g",
-                     "warn_pci", "warn_radio_type", "warn_sector_swap", "warn_nr_tac", "warn_air_radio", "warn_antenna"]
-        all_warnings = []
-        for k in warn_keys:
-            all_warnings += results.get(k, [])
-        all_warnings += results.get("unavailable_notes", [])
-        if all_warnings:
-            for w in all_warnings:
-                st.markdown(f'<div class="qkx-warn-line">{esc(w)}</div>', unsafe_allow_html=True)
-        elif not rfds_verification_rows:
-            st.caption("No warnings.")
-
     with st.expander("RFDS vs CIQ & Pre vs CIQ", expanded=False):
-        for label, key in [("Cells vs RFDS", "cells_vs_rfds"), ("Cell ID vs RFDS", "cell_id_vs_rfds"),
-                            ("Radio Type vs RFDS", "radio_type"), ("Parameters — 4G (Pre vs CIQ)", "params_4g"),
-                            ("Parameters — 5G (Pre vs CIQ)", "params_5g"), ("Sector/TX-RX/Power (Pre vs CIQ)", "sector_swap")]:
-            st.markdown(f"**{label}**")
-            st.markdown(render_table(results.get(key, [])), unsafe_allow_html=True)
+        def _vs_payload():
+            rows, checked = build_consolidated_mismatches(results, [
+                ("RFDS vs CIQ", "Cells vs RFDS", "cells_vs_rfds"),
+                ("RFDS vs CIQ", "Cell ID vs RFDS", "cell_id_vs_rfds"),
+                ("RFDS vs CIQ", "Radio Type vs RFDS", "radio_type"),
+                ("Pre vs CIQ", "Parameters \u2014 4G", "params_4g"),
+                ("Pre vs CIQ", "Parameters \u2014 5G", "params_5g"),
+                ("Pre vs CIQ", "Sector / TX-RX / Power", "sector_swap"),
+            ])
+            html = render_table(rows, status_key=None, columns=[
+                ("source", "Comparison"), ("check", "Check"), ("node", "Node"), ("cell", "Cell"),
+                ("param", "Parameter"), ("expected", "Expected (Pre / RFDS)"), ("actual", "Found (CIQ)"),
+                ("note", "Note"),
+            ]) if rows else ""
+            return rows, checked, html
+
+        vs_rows, vs_checked, vs_html = _memo("vs_payload", _vs_payload)
+        if vs_rows:
+            st.caption(f"{len(vs_rows)} parameter-level mismatch(es) across {vs_checked} checked row(s). Matching rows are not listed.")
+            st.markdown(vs_html, unsafe_allow_html=True)
+        else:
+            st.caption(f"No mismatches \u2014 all {vs_checked} checked row(s) agree.")
 
     with st.expander("CIQ Sanity Check", expanded=False):
-        sanity_rows = (results.get("pci_4g", []) + results.get("pci_5g", []) + results.get("antenna", [])
-                       + results.get("port_uniqueness", []) + results.get("sef_fru", [])
-                       + results.get("radio_sharing", []) + results.get("nbiot", [])
-                       + results.get("sector_id_4890", []) + results.get("rfbranch_per_aug", [])
-                       + results.get("dss", []) + results.get("ptp_matrix", []))
-        st.markdown(render_table(sanity_rows, columns=[("rule", "Rule"), ("node", "Node"), ("cell", "Cell"),
-                                                          ("status", "Status"), ("note", "Note")]),
-                    unsafe_allow_html=True)
+        def _sanity_payload():
+            all_rows = (results.get("pci_4g", []) + results.get("pci_5g", []) + results.get("antenna", [])
+                        + results.get("port_uniqueness", []) + results.get("sef_fru", [])
+                        + results.get("radio_sharing", []) + results.get("nbiot", [])
+                        + results.get("sector_id_4890", []) + results.get("rfbranch_per_aug", [])
+                        + results.get("dss", []) + results.get("ptp_matrix", []))
+            # Only rows needing action. MATCH/SKIPPED are passes or
+            # not-applicable; INFO is advisory (e.g. pre-existing DSS) and is
+            # not a CIQ error, so it is not listed as a mismatch here.
+            bad = [r for r in all_rows if str(r.get("status", "")).upper() in ("MISMATCH", "FAIL", "WARN")]
+            html = render_table(bad, columns=[("rule", "Rule"), ("node", "Node"), ("cell", "Cell"),
+                                              ("status", "Status"), ("note", "Note")]) if bad else ""
+            return bad, len(all_rows), html
+
+        ciq_bad, ciq_total, ciq_html = _memo("sanity_payload", _sanity_payload)
+        if ciq_bad:
+            st.caption(f"{len(ciq_bad)} mismatch(es) out of {ciq_total} CIQ validation row(s).")
+            st.markdown(ciq_html, unsafe_allow_html=True)
+        else:
+            st.caption(f"No mismatches \u2014 all {ciq_total} CIQ validation row(s) passed.")
 
     with st.expander("EDP Checks", expanded=False):
-        mm_by_node2 = {}
-        for m in cer.mixed_mode_rows(ciq_wb):
-            n = str(m.get("Node to be built as") or m.get("eNodeB Name") or "").strip()
-            if n:
-                mm_by_node2[n] = m
-        controller_ids2 = [r.get("Controller ID") for r in cer.sheet_rows_as_dicts(ciq_wb["Controller Info"])
-                            if r.get("Controller ID")] if "Controller Info" in ciq_wb.sheetnames else []
-        edp_checks2 = {
-            "Found in EDP": rc._edp_found_status(edp_rows, checked_nodes),
-            "Cabinet naming": rc._edp_cabinet_status(edp_rows, checked_nodes),
-            "Port size (BBU mode)": rc._edp_port_size_status(edp_rows, checked_nodes, mm_by_node2),
-            "Port facing (Primary/Secondary)": rc._edp_port_facing_status(edp_rows, checked_nodes),
-            "Bearer VLAN clash": rc._edp_bearer_vlan_status(edp_rows, checked_nodes),
-            "IPv6 bearer addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_BEARER_FIELDS, "IPv6 bearer"),
-            "IPv6 OAM addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_OAM_FIELDS, "IPv6 OAM"),
-            "Controller (ANCEQ)": rc._edp_controller_status(edp_rows, controller_ids2),
-            "PTP configuration": rc._edp_ptp_status(edp_rows, checked_nodes),
-        }
-        st.markdown(render_table([{"check": k, "status": s, "detail": d} for k, (s, d) in edp_checks2.items()],
-                                  columns=[("check", "Check"), ("status", "Status"), ("detail", "Detail")]),
-                    unsafe_allow_html=True)
+        def _edp_payload():
+            mm_by_node2 = {}
+            for m in cer.mixed_mode_rows(ciq_wb):
+                n = str(m.get("Node to be built as") or m.get("eNodeB Name") or "").strip()
+                if n:
+                    mm_by_node2[n] = m
+            controller_ids2 = [r.get("Controller ID") for r in cer.sheet_rows_as_dicts(ciq_wb["Controller Info"])
+                                if r.get("Controller ID")] if "Controller Info" in ciq_wb.sheetnames else []
+            edp_checks2 = {
+                "Found in EDP": rc._edp_found_status(edp_rows, checked_nodes),
+                "Cabinet naming": rc._edp_cabinet_status(edp_rows, checked_nodes),
+                "Port size (BBU mode)": rc._edp_port_size_status(edp_rows, checked_nodes, mm_by_node2),
+                "Port facing (Primary/Secondary)": rc._edp_port_facing_status(edp_rows, checked_nodes),
+                "Bearer VLAN clash": rc._edp_bearer_vlan_status(edp_rows, checked_nodes),
+                "IPv6 bearer addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_BEARER_FIELDS, "IPv6 bearer"),
+                "IPv6 OAM addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_OAM_FIELDS, "IPv6 OAM"),
+                "Controller (ANCEQ)": rc._edp_controller_status(edp_rows, controller_ids2),
+                "PTP configuration": rc._edp_ptp_status(edp_rows, checked_nodes),
+            }
+            # Only what disagrees between the Pre/CIQ expectation and the EDP.
+            bad = [{"check": k, "status": st_, "detail": d} for k, (st_, d) in edp_checks2.items()
+                   if str(st_).upper() not in ("MATCH", "NA", "SKIPPED")]
+            html = render_table(bad, columns=[("check", "Check"), ("status", "Status"),
+                                              ("detail", "Detail")]) if bad else ""
+            return bad, len(edp_checks2), html
+
+        edp_bad, edp_total, edp_html = _memo("edp_payload", _edp_payload)
+        if edp_bad:
+            st.caption(f"{len(edp_bad)} mismatch(es) out of {edp_total} EDP check(s).")
+            st.markdown(edp_html, unsafe_allow_html=True)
+        else:
+            st.caption(f"No mismatches \u2014 all {edp_total} EDP check(s) passed.")
 
     st.divider()
     manual_overrides = collect_manual_overrides(state["checklist"])
