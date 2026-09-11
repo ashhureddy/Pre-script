@@ -4,7 +4,7 @@ Streamlit app.py — QUICKIX Pre-Script Validation (Streamlit port)
 Single input page (CIQ + EDP required, RFDS PDF + Pre kget-all logs
 optional) -> "Run Validation" runs the full pipeline ONCE and stores it in
 session_state -> tabbed results view (RFDS Validation / Audit / EDP
-Validator / RET Antenna Checklist / Consolidated Report), every tab reads
+Validator / Consolidated Report), every tab reads
 from that one stored run. "New Validation Run" clears state and returns to
 the input page. This matches QUICKIX_Pre-Script_Validation.html's own
 flow: inputs are on the first page only, "Run Validation" swaps to the
@@ -22,8 +22,8 @@ the prior version of this file:
     and Checklist buttons the moment they were used).
   - RET Antenna Checklist and the RRNRBL Checklist were conflated onto one
     tab. RRNRBL now lives only inside Consolidated Report (matching the
-    HTML tool's layout); RET Antenna Checklist is its own tab and stays an
-    empty placeholder while that feature is on hold.
+    HTML tool's layout); the RET Antenna Checklist tab has since been
+    removed entirely.
   - ciq_view.py and amos_view.py (present in the repo, never imported
     anywhere) now drive the CIQ Checks / Pre checks (AMOS) tables — they
     are the purpose-built table builders for exactly this, replacing
@@ -885,12 +885,12 @@ _MM_NA = {"", "NA", "NOT AVAILABLE", "NOT FOUND", "NOT CHECKED", "-", "\u2014", 
 
 # Internal field name -> the label an engineer reads on the report.
 _MM_PARAM_LABEL = {
-    "earfcndl": "EARFCN", "earfcnul": "EARFCN",
-    "arfcnDL": "ARFCN", "arfcnUL": "ARFCN",
-    "dlChannelBandwidth": "Channel BW", "ulChannelBandwidth": "Channel BW",
-    "bSChannelBwDL": "Channel BW", "bSChannelBwUL": "Channel BW",
+    "earfcndl": "EARFCNDL", "earfcnul": "EARFCNUL",
+    "arfcnDL": "ARFCNDL", "arfcnUL": "ARFCNUL",
+    "dlChannelBandwidth": "BW DL", "ulChannelBandwidth": "BW UL",
+    "bSChannelBwDL": "BW DL", "bSChannelBwUL": "BW UL",
     "ssbfrequency": "SSB Frequency",
-    "sec_id": "Sector ID", "txrx": "TX/RX", "power": "Power",
+    "sec_id": "Sector Carrier", "power": "Power",
 }
 
 
@@ -900,29 +900,30 @@ def _mm_is_na(v):
 
 def _mm_row(cell, source, param, left_label, left, right):
     return {"cell": cell, "source": source, "param": param,
-            "comments": f"{left_label} - {left} | CIQ - {right}"}
+            "comments": f"{left_label} - {left} | {'EDP' if source.endswith('EDP') else 'CIQ'} - {right}"}
 
 
-def build_consolidated_mismatches(grouped_rows, results):
+def build_consolidated_mismatches(grouped_rows, results, pre_edp_rows=None):
     """Flat, parameter-level mismatch list for the consolidated report.
 
-    Two comparison families, both reduced to the same four columns
+    Three comparison families, all reduced to the same four columns
     (Cell name / Mismatch on / Parameter / Comments):
 
-      'RFDS vs CIQ'  - taken from the RFDS verification rows, which already
-                       resolve cell presence, RRU, antenna and cell id per
-                       cell against the RFDS.
-      'KGET vs CIQ'  - taken from the Pre(kget)-based checks. Handles the
-                       two row conventions those produce: compact
-                       'Pre | CIQ' fields (params 4G/5G) and pre_X/ciq_X
-                       pairs (sector/TX-RX/power), plus the explicit
-                       pre/ciq keys on cell-id and radio-type rows.
+      'RFDS vs CIQ'  - RRU, Antenna, Cell ID, cell missing from RFDS, and
+                       cells missing from the CIQ's Antenna Information /
+                       Losses and Delays sheets.
+      'KGET vs CIQ'  - Sector Carrier, Cell ID, TAC, EARFCNDL/UL,
+                       ARFCNDL/UL, BW, Power, TX, RX, RRU and RILink
+                       (single/double).
+      'KGET vs EDP'  - Bearer VLAN / IPv6 / Default Router and the OAM
+                       equivalents.
 
     A field whose Pre/KGET side is NA or NOT AVAILABLE is not a mismatch -
     there is nothing to compare it against - which mirrors how the
     underlying checks decide their own status."""
     rows = []
 
+    # ── RFDS vs CIQ ────────────────────────────────────────────────────
     for r in grouped_rows or []:
         # Prefer whichever side actually carries the cell identifier: on a
         # "not found" row one side holds the literal 'NOT FOUND', and that
@@ -941,7 +942,16 @@ def build_consolidated_mismatches(grouped_rows, results):
         if r.get("cellid_status") == "MISMATCH":
             rows.append(_mm_row(cell, "RFDS vs CIQ", "CellID", "RFDS",
                                 r.get("cellid_rfds", "\u2014"), r.get("cellid_ciq", "\u2014")))
+        # Presence on the two CIQ sheets — a cell the RFDS designs but the
+        # CIQ never lists is a real gap, reported per sheet.
+        if r.get("ant_info_status") == "MISMATCH":
+            rows.append({"cell": cell, "source": "RFDS vs CIQ", "param": "Missing in Antenna Info",
+                         "comments": "Cell not listed on the CIQ 'Antenna Information' sheet"})
+        if r.get("losses_status") == "MISMATCH":
+            rows.append({"cell": cell, "source": "RFDS vs CIQ", "param": "Missing in Losses and Delays",
+                         "comments": "Cell not listed on the CIQ 'Losses and Delays' sheet"})
 
+    # ── KGET vs CIQ ────────────────────────────────────────────────────
     for key in ("params_4g", "params_5g", "sector_swap"):
         for r in results.get(key, []):
             if str(r.get("status", "")).upper() != "MISMATCH":
@@ -954,6 +964,10 @@ def build_consolidated_mismatches(grouped_rows, results):
                 pre, ciq = pre.strip(), ciq.strip()
                 if not _mm_is_na(pre) and pre != ciq:
                     rows.append(_mm_row(cell, "KGET vs CIQ", _MM_PARAM_LABEL.get(k, k), "KGET", pre, ciq))
+            # sector_swap: pre_X / ciq_X pairs. TX/RX is stored as one
+            # 'AxB' string but reads better split into its own TX and RX
+            # rows; RILink (Single/Double) rides in the same field on
+            # standalone-5G rows, where it is a link-type not an AxB count.
             for k in list(r):
                 if not k.startswith("pre_"):
                     continue
@@ -962,8 +976,21 @@ def build_consolidated_mismatches(grouped_rows, results):
                 if not ciq_key:
                     continue
                 pre, ciq = str(r[k]).strip(), str(r[ciq_key]).strip()
-                if not _mm_is_na(pre) and pre != ciq:
-                    rows.append(_mm_row(cell, "KGET vs CIQ", _MM_PARAM_LABEL.get(b, b), "KGET", pre, ciq))
+                if _mm_is_na(pre) or pre == ciq:
+                    continue
+                if b == "txrx":
+                    pre_m = re.fullmatch(r"(\d+)x(\d+)", pre)
+                    ciq_m = re.fullmatch(r"(\d+)x(\d+)", ciq)
+                    if pre_m and ciq_m:
+                        for idx, lbl in ((1, "TX"), (2, "RX")):
+                            if pre_m.group(idx) != ciq_m.group(idx):
+                                rows.append(_mm_row(cell, "KGET vs CIQ", lbl, "KGET",
+                                                    pre_m.group(idx), ciq_m.group(idx)))
+                        continue
+                    if pre in ("Single", "Double") or "Single" in ciq or "Double" in ciq:
+                        rows.append(_mm_row(cell, "KGET vs CIQ", "Link", "KGET", pre, ciq))
+                        continue
+                rows.append(_mm_row(cell, "KGET vs CIQ", _MM_PARAM_LABEL.get(b, b), "KGET", pre, ciq))
 
     for key, label in (("cell_id_vs_rfds", "CellID"), ("radio_type", "RRU")):
         for r in results.get(key, []):
@@ -972,6 +999,27 @@ def build_consolidated_mismatches(grouped_rows, results):
             pre, ciq = str(r.get("pre", "")).strip(), str(r.get("ciq", "")).strip()
             if not _mm_is_na(pre) and pre != ciq:
                 rows.append(_mm_row(r.get("cell") or "\u2014", "KGET vs CIQ", label, "KGET", pre, ciq))
+
+    # TAC: NR is per-cell (pre_nrtac/ciq_nrtac); LTE is one node-level row
+    # whose values live only in its note, so the note is carried as-is.
+    for r in results.get("nr_tac", []):
+        if str(r.get("status", "")).upper() != "MISMATCH":
+            continue
+        pre, ciq = str(r.get("pre_nrtac") or "").strip(), str(r.get("ciq_nrtac") or "").strip()
+        if not _mm_is_na(pre) and pre != ciq:
+            rows.append(_mm_row(r.get("cell") or "\u2014", "KGET vs CIQ", "TAC", "KGET", pre, ciq))
+    for r in results.get("tac", []):
+        if str(r.get("status", "")).upper() == "MISMATCH":
+            rows.append({"cell": r.get("node") or "\u2014", "source": "KGET vs CIQ",
+                         "param": "TAC", "comments": r.get("note", "")})
+
+    # ── KGET vs EDP ────────────────────────────────────────────────────
+    for r in pre_edp_rows or []:
+        if str(r.get("status", "")).lower() != "mismatch":
+            continue
+        rows.append({"cell": r.get("node") or "\u2014", "source": "KGET vs EDP",
+                     "param": r.get("field", "\u2014"),
+                     "comments": f"KGET - {r.get('pre_value', '\u2014')} | EDP - {r.get('edp_value', '\u2014')}"})
 
     seen, unique = set(), []
     for r in rows:
@@ -1072,8 +1120,8 @@ with top_r:
             f"USID: `{site_details.get('usid') or '—'}`", f"Nodes: `{', '.join(checked_nodes) or '—'}`"]
     st.caption(" &nbsp;·&nbsp; ".join(bits), unsafe_allow_html=True)
 
-tab_rfds, tab_audit, tab_edp, tab_checklist, tab_consolidated = st.tabs(
-    ["RFDS Validation", "Audit", "EDP Validator", "RET Antenna Checklist", "Consolidated Report"]
+tab_rfds, tab_audit, tab_edp, tab_consolidated = st.tabs(
+    ["RFDS Validation", "Audit", "EDP Validator", "Consolidated Report"]
 )
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1414,16 +1462,7 @@ with tab_edp:
             st.markdown(render_pre_vs_edp_pivot_table(pivot_rows), unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════
-# TAB 4 — RET Antenna Checklist — ON HOLD. Placeholder only, no logic.
-# The RRNRBL Checklist is a different feature and lives inside
-# Consolidated Report, not here — see that tab.
-# ══════════════════════════════════════════════════════════════════════
-with tab_checklist:
-    st.subheader("RET Antenna Checklist")
-    st.info("This feature is on hold. Nothing is computed here yet.")
-
-# ══════════════════════════════════════════════════════════════════════
-# TAB 5 — Consolidated Report: Pre/Post Config → SOW Summary → Warnings &
+# TAB 4 — Consolidated Report: Pre/Post Config → SOW Summary → Warnings &
 # Comments (always visible) → RRNRBL Checklist → RFDS vs CIQ & Pre vs CIQ
 # → CIQ Sanity Check → EDP Checks (each collapsible) → PDF/xlsx downloads.
 # ══════════════════════════════════════════════════════════════════════
@@ -1450,7 +1489,9 @@ with tab_consolidated:
         mm_rows = _memo("mm_rows", lambda: build_consolidated_mismatches(
             _memo("grouped_rows", lambda: build_rfds_grouped_rows(
                 results, ciq_wb, rfds_pages, state.get("rfds_bytes"))),
-            results))
+            results,
+            rc.build_pre_vs_edp_ipv6_table(node_logs_text, state["node_role_list"], edp_rows)
+            if node_logs_text else []))
 
         if not mm_rows:
             st.caption("No mismatches found.")
@@ -1499,39 +1540,28 @@ with tab_consolidated:
         else:
             st.caption(f"No mismatches \u2014 all {ciq_total} CIQ validation row(s) passed.")
 
-    with st.expander("EDP Checks", expanded=False):
+    with st.expander("EDP Checks \u2014 KGET vs EDP", expanded=False):
         def _edp_payload():
-            mm_by_node2 = {}
-            for m in cer.mixed_mode_rows(ciq_wb):
-                n = str(m.get("Node to be built as") or m.get("eNodeB Name") or "").strip()
-                if n:
-                    mm_by_node2[n] = m
-            controller_ids2 = [r.get("Controller ID") for r in cer.sheet_rows_as_dicts(ciq_wb["Controller Info"])
-                                if r.get("Controller ID")] if "Controller Info" in ciq_wb.sheetnames else []
-            edp_checks2 = {
-                "Found in EDP": rc._edp_found_status(edp_rows, checked_nodes),
-                "Cabinet naming": rc._edp_cabinet_status(edp_rows, checked_nodes),
-                "Port size (BBU mode)": rc._edp_port_size_status(edp_rows, checked_nodes, mm_by_node2),
-                "Port facing (Primary/Secondary)": rc._edp_port_facing_status(edp_rows, checked_nodes),
-                "Bearer VLAN clash": rc._edp_bearer_vlan_status(edp_rows, checked_nodes),
-                "IPv6 bearer addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_BEARER_FIELDS, "IPv6 bearer"),
-                "IPv6 OAM addressing": rc._edp_group_status(edp_rows, checked_nodes, rc.IPV6_OAM_FIELDS, "IPv6 OAM"),
-                "Controller (ANCEQ)": rc._edp_controller_status(edp_rows, controller_ids2),
-                "PTP configuration": rc._edp_ptp_status(edp_rows, checked_nodes),
-            }
-            # Only what disagrees between the Pre/CIQ expectation and the EDP.
-            bad = [{"check": k, "status": st_, "detail": d} for k, (st_, d) in edp_checks2.items()
-                   if str(st_).upper() not in ("MATCH", "NA", "SKIPPED")]
-            html = render_table(bad, columns=[("check", "Check"), ("status", "Status"),
-                                              ("detail", "Detail")]) if bad else ""
-            return bad, len(edp_checks2), html
+            # The 6 bearer/OAM network fields, Pre(kget) vs the site's own
+            # EDP row. build_pre_vs_edp_ipv6_table already normalises IPv6
+            # (zero-padding / '::' compression) before comparing, so a
+            # cosmetic formatting difference is not reported as a mismatch.
+            all_rows = (rc.build_pre_vs_edp_ipv6_table(node_logs_text, state["node_role_list"], edp_rows)
+                        if node_logs_text else [])
+            bad = [r for r in all_rows if str(r.get("status", "")).lower() == "mismatch"]
+            html = render_table(bad, columns=[("node", "Node"), ("role", "Role"), ("field", "Field"),
+                                              ("pre_value", "KGET"), ("edp_value", "EDP"),
+                                              ("status", "Status")]) if bad else ""
+            return bad, len(all_rows), html
 
         edp_bad, edp_total, edp_html = _memo("edp_payload", _edp_payload)
-        if edp_bad:
-            st.caption(f"{len(edp_bad)} mismatch(es) out of {edp_total} EDP check(s).")
+        if not node_logs_text:
+            st.caption("No Pre kget logs uploaded \u2014 KGET vs EDP not checked.")
+        elif edp_bad:
+            st.caption(f"{len(edp_bad)} mismatch(es) out of {edp_total} compared field(s).")
             st.markdown(edp_html, unsafe_allow_html=True)
         else:
-            st.caption(f"No mismatches \u2014 all {edp_total} EDP check(s) passed.")
+            st.caption(f"No mismatches \u2014 all {edp_total} compared field(s) agree.")
 
     st.divider()
     manual_overrides = collect_manual_overrides(state["checklist"])
