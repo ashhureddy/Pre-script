@@ -138,8 +138,16 @@ div[data-testid="stExpander"] summary:hover { background:#f4f7fc; border-radius:
   white-space:nowrap; font-size:11.5px; letter-spacing:.03em; text-transform:uppercase;
   position:sticky; top:0;
 }
-.qkx-table td { padding:7px 11px; border-bottom:1px solid #eef1f6; vertical-align:top; }
+.qkx-table td { padding:7px 11px; border-bottom:1px solid #eef1f6; vertical-align:middle; }
 .qkx-table tbody tr:hover td { background:rgba(16,31,144,.04); }
+/* Mismatch rows are called out the same way in EVERY table/tab: red tint,
+   red text and a red left marker bar, so a failure reads identically
+   wherever it appears rather than depending on each table's own styling. */
+.qkx-table tbody tr.qkx-row-bad td { background:#fdeaea !important; color:#9f1d1d; font-weight:600; }
+.qkx-table tbody tr.qkx-row-bad td:first-child { box-shadow: inset 3px 0 0 #dc2626; }
+.qkx-table tbody tr.qkx-row-bad:hover td { background:#fbdcdc !important; }
+.qkx-table tbody tr.qkx-row-good td { background:#e8f7ef !important; }
+.qkx-table tbody tr.qkx-row-good:hover td { background:#dcf2e6 !important; }
 .qkx-table.qkx-zebra tbody tr:nth-child(even) td { background:#f8fafc; }
 .qkx-table.qkx-zebra tbody tr:hover td { background:rgba(16,31,144,.06); }
 .qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #94a3b8; }
@@ -258,6 +266,19 @@ def esc(v):
     return html.escape("" if v is None else str(v))
 
 
+def _row_cls(status_value):
+    """Uniform row emphasis across EVERY table in every tab: anything that
+    failed gets the same red treatment, anything that passed the same green,
+    regardless of which of the several status spellings a given check
+    happens to emit (MISMATCH/mismatch/FAIL, MATCH/match/PASS)."""
+    v = str(status_value or "").strip().upper()
+    if v in ("MISMATCH", "FAIL", "WARN"):
+        return "qkx-row-bad"
+    if v in ("MATCH", "PASS"):
+        return "qkx-row-good"
+    return ""
+
+
 def render_table(rows, columns=None, status_key="status", empty_msg="No data."):
     """rows: list[dict]. Bordered HTML table, each row's background/text
     colour driven by rows[i][status_key]. columns: optional [(key,label),
@@ -270,9 +291,10 @@ def render_table(rows, columns=None, status_key="status", empty_msg="No data."):
     head = "".join(f"<th>{esc(label)}</th>" for _, label in columns)
     body = []
     for r in rows:
-        color, bg = STATUS_COLORS.get(str(r.get(status_key, "")), DEFAULT_COLOR) if status_key else DEFAULT_COLOR
+        sv = str(r.get(status_key, "")) if status_key else ""
+        color, bg = STATUS_COLORS.get(sv, DEFAULT_COLOR) if status_key else DEFAULT_COLOR
         cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
-        body.append(f'<tr style="background:{bg};color:{color};">{cells}</tr>')
+        body.append(f'<tr class="{_row_cls(sv)}" style="background:{bg};color:{color};">{cells}</tr>')
     # Zebra striping only on uncoloured tables: a `td` background paints over
     # the row's inline `tr` background, so applying it globally would wash out
     # every status colour.
@@ -290,10 +312,11 @@ def render_table_with_comments(rows, columns, status_key="status", note_key="not
     head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + '<th style="min-width:170px;">Comments</th>'
     body = []
     for r in rows:
-        color, bg = STATUS_COLORS.get(str(r.get(status_key, "")), DEFAULT_COLOR)
+        sv = str(r.get(status_key, ""))
+        color, bg = STATUS_COLORS.get(sv, DEFAULT_COLOR)
         cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
         cells += f'<td style="min-width:170px;">{esc(r.get(note_key, ""))}</td>'
-        body.append(f'<tr style="background:{bg};color:{color};">{cells}</tr>')
+        body.append(f'<tr class="{_row_cls(sv)}" style="background:{bg};color:{color};">{cells}</tr>')
     return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
 
@@ -688,36 +711,90 @@ def render_rrnrbl_checklist(rows):
                  "unknown": "#f1f3f6", "info": "#eaf2fb", "na": "#f1f3f6"}
     COLS = [0.06, 0.36, 0.06, 0.08, 0.44]
 
-    st.markdown("""
+    # Row background is applied to the WHOLE row via a wrapper class on the
+    # horizontal block, not just the markdown cells — previously the tick
+    # (checkbox) and Remarks (text input) columns kept Streamlit's own white
+    # background, so a passing row showed green text cells with two white
+    # gaps punched through it. Every cell in a row now shares one colour and
+    # one fixed height, so rows line up cleanly and a pass reads as a single
+    # solid green band (mismatch = solid red).
+    ROW_H = "30px"
+    st.markdown(f"""
     <style>
-    .qkx-chk-wrap { max-width: 1180px; }
-    .qkx-chk-wrap [data-testid="stVerticalBlock"] { gap: 0rem !important; }
-    .qkx-chk-wrap [data-testid="stElementContainer"] { margin: 0 !important; }
-    .qkx-chk-wrap [data-testid="column"] { padding: 0 !important; }
-    .qkx-chk-wrap [data-testid="stHorizontalBlock"] { gap: 0rem !important; }
-    .qkx-chk-hdr { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.85em;
-                   padding:5px 8px; border:1px solid #14283f; text-align:center; line-height:1.4; }
-    .qkx-chk-hdr.left { text-align:left; }
-    .qkx-chk-cat2 { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.92em;
-                    padding:5px 10px; border:1px solid #14283f; line-height:1.5; }
-    .qkx-chk-cell { padding:2px 8px; border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
-                    height:26px; min-height:26px; display:flex; align-items:center; font-size:0.9em; }
-    .qkx-chk-wrap [data-testid="stCheckbox"], .qkx-chk-wrap [data-testid="stTextInput"] {
-        border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
-        height:26px; min-height:26px; display:flex; align-items:center; background:#fff;
-    }
-    .qkx-chk-wrap [data-testid="stCheckbox"] { justify-content:center; }
-    .qkx-chk-wrap [data-testid="stCheckbox"] label { padding:0 !important; margin:0 !important;
-                    transform:scale(1.25); }
-    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"] {
-                    width:20px !important; height:20px !important; border-radius:3px !important; }
-    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"][aria-checked="true"] {
-                    background:#059669 !important; border-color:#059669 !important; }
-    .qkx-chk-wrap [data-testid="stTextInput"] > div { border:none !important; background:transparent !important;
-                    height:26px !important; min-height:26px !important; }
-    .qkx-chk-wrap [data-testid="stTextInput"] input { height:24px !important; min-height:24px !important;
-                    padding:0 6px !important; font-size:0.9em !important; border-radius:0 !important;
-                    background:transparent !important; box-shadow:none !important; }
+    .qkx-chk-wrap {{ max-width: 1180px; border:1px solid #cbd5e1; border-radius:6px;
+                     overflow:hidden; margin-bottom:14px; }}
+    .qkx-chk-wrap [data-testid="stVerticalBlock"] {{ gap: 0rem !important; }}
+    .qkx-chk-wrap [data-testid="stElementContainer"] {{ margin: 0 !important; }}
+    .qkx-chk-wrap [data-testid="column"] {{ padding: 0 !important; }}
+    .qkx-chk-wrap [data-testid="stHorizontalBlock"] {{ gap: 0rem !important; align-items:stretch !important; }}
+
+    .qkx-chk-hdr {{ background:#1e3a5f; color:#fff; font-weight:700; font-size:0.82em;
+                   letter-spacing:.02em; text-transform:uppercase;
+                   padding:0 10px; height:34px; display:flex; align-items:center;
+                   justify-content:center; border-right:1px solid #33507a; }}
+    .qkx-chk-hdr.left {{ justify-content:flex-start; }}
+    .qkx-chk-cat2 {{ background:#22406b; color:#fff; font-weight:700; font-size:0.88em;
+                    padding:0 12px; height:32px; display:flex; align-items:center;
+                    letter-spacing:.01em; border-top:1px solid #14283f; }}
+
+    /* every cell in a row: same height, same border, colour inherited from the row */
+    .qkx-chk-cell {{ padding:0 10px; border-right:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0;
+                    height:{ROW_H}; display:flex; align-items:center; font-size:0.875em;
+                    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+
+    /* widgets: strip Streamlit's white chrome so the row colour shows through */
+    .qkx-chk-wrap [data-testid="stCheckbox"], .qkx-chk-wrap [data-testid="stTextInput"] {{
+        border-right:1px solid #e2e8f0; border-bottom:1px solid #e2e8f0;
+        height:{ROW_H}; min-height:{ROW_H}; display:flex; align-items:center;
+        background:transparent !important;
+    }}
+    .qkx-chk-wrap [data-testid="stCheckbox"] {{ justify-content:center; }}
+    .qkx-chk-wrap [data-testid="stCheckbox"] label {{ padding:0 !important; margin:0 !important; }}
+    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"] {{
+                    width:17px !important; height:17px !important; border-radius:3px !important; }}
+    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"][aria-checked="true"] {{
+                    background:#059669 !important; border-color:#059669 !important; }}
+    .qkx-chk-wrap [data-testid="stTextInput"] > div {{ border:none !important; background:transparent !important;
+                    height:{ROW_H} !important; min-height:{ROW_H} !important; }}
+    .qkx-chk-wrap [data-testid="stTextInput"] input {{ height:calc({ROW_H} - 2px) !important;
+                    min-height:0 !important; padding:0 8px !important; font-size:0.875em !important;
+                    border-radius:0 !important; background:transparent !important; box-shadow:none !important; }}
+
+    /* Row tint. The marker div lives in its own element-container; the
+       actual row (stHorizontalBlock) is the NEXT sibling container, so the
+       tint is applied via :has() on the marker + adjacent-sibling. Every
+       cell type is listed so the checkbox and text-input columns tint too
+       — those two kept Streamlit's white background before, which is what
+       punched the gaps through each coloured row. */
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-match) + [data-testid="stElementContainer"] .qkx-chk-cell,
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-match) + [data-testid="stElementContainer"] [data-testid="stCheckbox"],
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-match) + [data-testid="stElementContainer"] [data-testid="stTextInput"] {
+        background:#e8f7ef !important; }
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-mismatch) + [data-testid="stElementContainer"] .qkx-chk-cell,
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-mismatch) + [data-testid="stElementContainer"] [data-testid="stCheckbox"],
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-mismatch) + [data-testid="stElementContainer"] [data-testid="stTextInput"] {
+        background:#fdeaea !important; }
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-manual) + [data-testid="stElementContainer"] .qkx-chk-cell,
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-manual) + [data-testid="stElementContainer"] [data-testid="stCheckbox"],
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-manual) + [data-testid="stElementContainer"] [data-testid="stTextInput"] {
+        background:#fff8e6 !important; }
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-info) + [data-testid="stElementContainer"] .qkx-chk-cell,
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-info) + [data-testid="stElementContainer"] [data-testid="stCheckbox"],
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-info) + [data-testid="stElementContainer"] [data-testid="stTextInput"] {
+        background:#eaf2fb !important; }
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-unknown) + [data-testid="stElementContainer"] .qkx-chk-cell,
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-unknown) + [data-testid="stElementContainer"] [data-testid="stCheckbox"],
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-unknown) + [data-testid="stElementContainer"] [data-testid="stTextInput"] {
+        background:#f4f6f8 !important; }
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-na) + [data-testid="stElementContainer"] .qkx-chk-cell,
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-na) + [data-testid="stElementContainer"] [data-testid="stCheckbox"],
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-na) + [data-testid="stElementContainer"] [data-testid="stTextInput"] {
+        background:#f4f6f8 !important; }
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-mismatch) + [data-testid="stElementContainer"] .qkx-chk-cell {
+        color:#9f1d1d; font-weight:600; }
+    [data-testid="stElementContainer"]:has(> div > .qkx-row-mismatch) + [data-testid="stElementContainer"] [data-testid="stTextInput"] input {
+        color:#9f1d1d !important; font-weight:600; }
+    .qkx-row-marker { height:0; margin:0; padding:0; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -740,16 +817,23 @@ def render_rrnrbl_checklist(rows):
         tick, color = STATUS_TICK.get(r["status"], ("\u2013", "#94a3b8"))
         bg = STATUS_BG.get(r["status"], "#f1f3f6")
 
+        # st.columns can't take a CSS class, so the row is wrapped in a
+        # container marked by a sentinel span; the CSS above targets the
+        # container that immediately follows it via :has(). Tinting the
+        # whole row (not each markdown cell) is what closes the white gaps
+        # the checkbox and text-input columns used to leave.
+        row_cls = f"qkx-row-{r['status']}"
+        st.markdown(f'<div class="{row_cls} qkx-row-marker"></div>', unsafe_allow_html=True)
         c0, c1, c2, c3, c4 = st.columns(COLS, gap="small")
         with c0:
-            st.markdown(f'<div class="qkx-chk-cell" style="justify-content:center;border-left:none;'
-                        f'background:{bg};color:{color};font-weight:800;">{tick}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="qkx-chk-cell" style="justify-content:center;'
+                        f'color:{color};font-weight:800;font-size:1em;">{tick}</div>', unsafe_allow_html=True)
         with c1:
-            st.markdown(f'<div class="qkx-chk-cell" style="background:{bg};">{esc(r["item"])}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="qkx-chk-cell" title="{esc(r["item"])}">{esc(r["item"])}</div>', unsafe_allow_html=True)
         with c2:
             st.checkbox("", value=default_checked, key=f"{key}_checked", label_visibility="collapsed")
         with c3:
-            st.markdown(f'<div class="qkx-chk-cell" style="background:{bg};color:#475569;">{esc(r.get("tag",""))}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="qkx-chk-cell" style="color:#475569;">{esc(r.get("tag",""))}</div>', unsafe_allow_html=True)
         with c4:
             st.text_input("Remarks", value=default_comment, key=f"{key}_comment",
                           label_visibility="collapsed", placeholder="Remarks\u2026")
