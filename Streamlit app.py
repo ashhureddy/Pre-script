@@ -1,1581 +1,1203 @@
 """
-Streamlit app.py — QUICKIX Pre-Script Validation (Streamlit port)
+rrnrbl_checklist.py
 
-Single input page (CIQ + EDP required, RFDS PDF + Pre kget-all logs
-optional) -> "Run Validation" runs the full pipeline ONCE and stores it in
-session_state -> tabbed results view (RFDS Validation / Audit / EDP
-Validator / Consolidated Report), every tab reads
-from that one stored run. "New Validation Run" clears state and returns to
-the input page. This matches QUICKIX_Pre-Script_Validation.html's own
-flow: inputs are on the first page only, "Run Validation" swaps to the
-tabbed results, and there is no way back to the inputs except starting a
-new run.
+Maps the results dict produced by run_validation.run() onto the 63-item
+"Legacy - N2e Engineer Checklist" sheet (Checklist_RRNRBL.xlsx) and can
+write a filled copy of that exact template (Site ID/FA + Date filled in,
+each row's checkbox + Comments column set from the validation results).
 
-Nothing here invents new validation logic — every check is an existing,
-already-confirmed function from checks_node.py / checks_sector.py /
-rfds_extract.py / pre_extract.py / ciq_edp_reader.py / rrnrbl_checklist.py /
-ciq_view.py / amos_view.py / antenna_resolve.py. Fixes/integrations versus
-the prior version of this file:
-
-  - run_validation.run() returns 11 values; this file now unpacks all 11
-    (was silently truncated to 7, which crashed the Consolidated Report
-    and Checklist buttons the moment they were used).
-  - RET Antenna Checklist and the RRNRBL Checklist were conflated onto one
-    tab. RRNRBL now lives only inside Consolidated Report (matching the
-    HTML tool's layout); the RET Antenna Checklist tab has since been
-    removed entirely.
-  - ciq_view.py and amos_view.py (present in the repo, never imported
-    anywhere) now drive the CIQ Checks / Pre checks (AMOS) tables — they
-    are the purpose-built table builders for exactly this, replacing
-    cruder inline table assembly that duplicated their job.
-  - edp_checks.py is intentionally NOT used: it is an earlier, superseded
-    EDP Validator with cross-node/"unexpected nodes" sections that were
-    explicitly dropped from scope; rrnrbl_checklist.py's simpler per-check
-    functions are the current design and are what's wired in everywhere.
-  - Every comparison table is now rendered with a coloured, bordered HTML
-    table (MATCH/PASS green, MISMATCH/FAIL red, INFO blue, MANUAL amber,
-    SKIPPED/unknown grey) instead of a plain st.dataframe — same palette
-    the PDF report and the RRNRBL checklist already use, so the look is
-    consistent across every surface this tool produces.
+Design note on honesty: every row below is wired to a REAL existing check
+where one exists (by 'rule' tag - see checks_node.py / checks_sector.py),
+a newly-added check where the data was clearly available (EDP field rules,
+MME Region, NR_SA tab, FA Code CIQ-vs-RFDS), or left 'manual' when no
+reliable signal exists. Nothing here fabricates a pass.
 """
+import datetime
+import io
 import os
 import re
-import html
-import tempfile
 
-import streamlit as st
+import openpyxl
 
 import ciq_edp_reader as cer
-import checks_sector as cs
-import rfds_extract as rf
-import pre_extract as pe
-import run_validation as rv
-import rrnrbl_checklist as rc
-import antenna_resolve as ar
-import warnings_text as wt
-import ciq_view as cv
-import amos_view as av
-from rfds_verification_summary import build_rfds_verification_summary
-from engineer_comments import build_engineer_comments, extract_bands_from_comments, extract_nodes_from_audit
-from cr_description import build_cr_description, build_radio_ret_email
 
-st.set_page_config(page_title="QUICK IX", layout="wide", page_icon="📡")
+TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Checklist_RRNRBL.xlsx")
+
+STATUS_META = {
+    "match": ("PASS", True),
+    "mismatch": ("FAIL", False),
+    "manual": ("MANUAL", False),
+    "unknown": ("NO DATA", False),
+    "na": ("N/A", False),
+    "info": ("INFO", False),
+}
+
 
 # ══════════════════════════════════════════════════════════════════════
-# Styling — ported from the QUICKIX report-feature branch's own CSS
-# (sticky navy topbar with MAS/TEC logo + credit, gradient buttons, white
-# bordered cards for st.container(border=True)) so both features share one
-# visual language ahead of being combined, plus this file's own bordered/
-# colour-coded HTML table renderer for every comparison table. Table
-# colours match the RRNRBL checklist's palette and the PDF report's header
-# banner (navy #101F90 / #dde3f7), so a status reads the same everywhere.
+# Generic aggregation helpers over the existing checks_node/checks_sector
+# result lists (every item in those lists already carries a 'status' of
+# MATCH / MISMATCH / SKIPPED / INFO - see checks_sector.py).
 # ══════════════════════════════════════════════════════════════════════
-st.markdown("""
-<style>
-.stApp { background: linear-gradient(180deg, #eef3fa 0%, #f7f9fc 100%); }
-.block-container { padding-top: 1rem; padding-left: 2rem; padding-right: 2rem; max-width: 100%; }
-.qkx-topbar {
-  position: sticky; top: 0; z-index: 999;
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 0.9rem 1.75rem; margin: -1rem -1rem 1.5rem -1rem;
-  background: linear-gradient(90deg, #011b36 0%, #012a4e 100%);
-  border-bottom: 1px solid rgba(255,91,36,0.55);
-  box-shadow: 0 4px 18px rgba(0,0,0,0.2);
-}
-.qkx-topbar .qkx-logo { font-size: 1.3rem; font-weight: 900; color: #ffffff; letter-spacing: 1px; }
-.qkx-topbar .qkx-logo span { color: #ffffff; }
-.qkx-topbar .qkx-title { font-size: 0.95rem; color: #cfe0f5; margin-left: 14px; font-weight: 600; }
-.qkx-topbar .qkx-credit { font-size: 0.78rem; color: #cfe0f5; text-align: right; line-height: 1.3; }
-div[data-testid="stButton"] button {
-  border-radius: 10px; font-weight: 700; border: 1.5px solid #013a6b;
-  background: linear-gradient(135deg, #024ea4, #013a6b); color: #ffffff;
-  box-shadow: 0 3px 8px rgba(1,42,78,0.25);
-  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
-}
-div[data-testid="stButton"] button:hover {
-  border-color: #ff5b24; color: #ffffff; transform: translateY(-1px);
-  box-shadow: 0 6px 14px rgba(255,91,36,0.35);
-}
-div[data-testid="stButton"] button:active { transform: translateY(0); }
-div[data-testid="stVerticalBlockBorderWrapper"] {
-  background: #ffffff !important; border: 1px solid #dde5ef !important;
-  border-radius: 12px !important; box-shadow: 0 2px 10px rgba(1,42,78,0.06);
-  padding: 4px 2px;
-}
-.stTabs [data-baseweb="tab-list"] {
-  gap: 4px; border-bottom: 2px solid #dde5ef; padding-bottom: 0;
-}
-.stTabs [data-baseweb="tab"] {
-  font-weight: 700; font-size: 13.5px; color:#475569;
-  padding: 8px 16px; border-radius: 8px 8px 0 0;
-}
-.stTabs [aria-selected="true"] {
-  color:#101F90 !important; background:#eef1fb;
-  box-shadow: inset 0 -3px 0 #101F90;
-}
-div[data-testid="stExpander"] details {
-  border:1px solid #dde5ef !important; border-radius:10px !important;
-  background:#fff; box-shadow:0 2px 8px rgba(1,42,78,.05); margin-bottom:10px;
-}
-div[data-testid="stExpander"] summary {
-  font-weight:700 !important; font-size:13.5px !important; color:#101F90 !important;
-  padding:11px 14px !important;
-}
-div[data-testid="stExpander"] summary:hover { background:#f4f7fc; border-radius:10px; }
-.qkx-stat {
-  text-align:center; border:1px solid #dde5ef; border-radius:10px; padding:10px 8px;
-  background:#fff; box-shadow:0 2px 8px rgba(1,42,78,.05); font-size:12.5px;
-}
-.qkx-stat b { color:#64748b; font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; }
-.qkx-table-wrap {
-  overflow-x:auto; border:1px solid #dde5ef; border-radius:0 0 10px 10px;
-  margin: 0 0 22px 0; border-top:none; box-shadow:0 2px 8px rgba(1,42,78,.05);
-}
-.qkx-table { width:100%; border-collapse:collapse; font-size:12.8px; line-height:1.35; }
-.qkx-table th {
-  background:#101F90; color:#ffffff; font-weight:700; text-align:left;
-  padding:8px 11px; border:none; border-right:1px solid rgba(255,255,255,.14);
-  white-space:nowrap; font-size:11.5px; letter-spacing:.03em; text-transform:uppercase;
-  position:sticky; top:0;
-}
-.qkx-table td { padding:7px 11px; border-bottom:1px solid #eef1f6; vertical-align:top; }
-.qkx-table tbody tr:hover td { background:rgba(16,31,144,.04); }
-.qkx-table.qkx-zebra tbody tr:nth-child(even) td { background:#f8fafc; }
-.qkx-table.qkx-zebra tbody tr:hover td { background:rgba(16,31,144,.06); }
-.qkx-table td.qkx-group-start, .qkx-table th.qkx-group-start { border-left:2px solid #94a3b8; }
-.qkx-empty {
-  padding:16px; color:#64748b; font-style:italic; font-size:13px;
-  background:#fff; border:1px dashed #cbd5e1; border-radius:10px; text-align:center;
-}
-.qkx-section-title {
-  font-weight:700; font-size:13.5px; color:#fff; margin: 22px 0 0 0;
-  padding:10px 14px; border:none;
-  border-radius:10px 10px 0 0;
-  background: linear-gradient(90deg, #101F90 0%, #1e3a8a 100%);
-  box-shadow:0 2px 6px rgba(16,31,144,.16);
-}
-.qkx-warn-line {
-  padding:8px 12px; margin-bottom:6px; border-radius:8px;
-  background:#fff5f5; color:#991b1b; font-size:12.5px;
-  border:1px solid #fecaca; border-left:3px solid #dc2626;
-}
-.qkx-cat-banner {
-  background: linear-gradient(90deg, #101F90 0%, #1e3a8a 100%); color:#fff;
-  font-weight:700; font-size:13px; letter-spacing:.02em;
-  padding:9px 14px; border-radius:8px 8px 0 0; margin-top:22px;
-  display:flex; justify-content:space-between; align-items:center;
-  box-shadow:0 2px 6px rgba(16,31,144,.18);
-}
-.qkx-cat-counts { display:flex; gap:6px; align-items:center; }
-.qkx-cat-count {
-  font-size:10.5px; font-weight:700; padding:2px 8px; border-radius:999px;
-  background:rgba(255,255,255,.16); color:#fff; white-space:nowrap;
-}
-.qkx-cat-count.ok   { background:#059669; }
-.qkx-cat-count.bad  { background:#dc2626; }
-.qkx-cat-count.man  { background:#d97706; }
-.qkx-cat-count.na   { background:rgba(255,255,255,.22); }
 
-/* Status chip — every check row carries one, so a status is readable at a
-   glance instead of relying on a pale row background alone. */
-.qkx-chip {
-  display:inline-block; font-size:10px; font-weight:800; letter-spacing:.05em;
-  padding:3px 9px; border-radius:999px; text-transform:uppercase;
-  white-space:nowrap; border:1px solid transparent;
-}
-.qkx-chip.match    { background:#d1fae5; color:#065f46; border-color:#6ee7b7; }
-.qkx-chip.mismatch { background:#fee2e2; color:#991b1b; border-color:#fca5a5; }
-.qkx-chip.manual   { background:#fef3c7; color:#92400e; border-color:#fcd34d; }
-.qkx-chip.info     { background:#dbeafe; color:#1d4ed8; border-color:#93c5fd; }
-.qkx-chip.unknown  { background:#f1f5f9; color:#64748b; border-color:#cbd5e1; }
-
-.qkx-sec-sub {
-  font-size:13px; font-weight:700; color:#1e3a5f;
-  margin:16px 0 6px 0; padding-bottom:4px;
-  border-bottom:1px solid #dde5ef;
-}
-.qkx-count-pill {
-  font-size:11.5px; color:#334155; margin-right:6px;
-  background:#fff; border:1px solid #dde5ef; border-radius:999px;
-  padding:4px 11px; display:inline-block; margin-bottom:4px;
-}
-.qkx-title-badge {
-  background:#101F90; color:#fff; font-weight:700; font-size:11px;
-  padding:3px 10px; border-radius:999px; white-space:nowrap;
-}
-.qkx-manual-label {
-  font-size:13px; font-weight:600; color:#0f1720; margin-bottom:6px;
-  display:flex; align-items:center; gap:8px;
-}
-.qkx-manual-tag {
-  background:#fef3c7; color:#92400e; font-size:9.5px; font-weight:800;
-  padding:2px 8px; border-radius:999px; letter-spacing:.05em;
-  border:1px solid #fcd34d;
-}
-.qkx-manual-item {
-  font-size:12.8px; font-weight:600; color:#0f1720;
-  padding:2px 0 6px 0;
-}
-.qkx-manual-detail { font-size:11.5px; color:#64748b; font-weight:400; }
-.qkx-sub-header {
-  font-size:12px; font-weight:800; color:#1e3a8a; text-transform:uppercase;
-  letter-spacing:.06em; margin:14px 0 6px 0;
-  border-left:3px solid #101F90; padding:3px 0 3px 9px;
-  background:linear-gradient(90deg,#eef1fb 0%,rgba(238,241,251,0) 100%);
-}
-/* Spreadsheet-style grid for the RRNRBL checklist: real vertical column
-   borders on every cell (qkx-table's default only has horizontal row
-   borders), so merged Category/Sub-section cells (via rowspan) read as
-   genuine grouped spreadsheet cells rather than a plain list. */
-.qkx-grid td, .qkx-grid th {
-  border-right:1px solid #dde5ef;
-}
-.qkx-grid td:first-child, .qkx-grid td:nth-child(2) {
-  border-right:2px solid #cbd5e1;
-}
-.qkx-grid-wrap { margin-bottom:16px; }
-</style>
-<div class="qkx-topbar">
-  <div><span class="qkx-logo">MAS<span>TEC</span></span><span class="qkx-title">QUICK IX — Pre-Script Validation</span></div>
-  <div class="qkx-credit">Made by <b>AKSHATHA KALLUR</b><br>Powered by <b>MASTEC</b></div>
-</div>
-""", unsafe_allow_html=True)
-
-STATUS_COLORS = {
-    "MATCH": ("#065f46", "#d1fae5"), "match": ("#065f46", "#d1fae5"), "PASS": ("#065f46", "#d1fae5"),
-    "MISMATCH": ("#991b1b", "#fee2e2"), "mismatch": ("#991b1b", "#fee2e2"), "FAIL": ("#991b1b", "#fee2e2"),
-    "SKIPPED": ("#64748b", "#f1f5f9"), "unknown": ("#64748b", "#f1f5f9"),
-    "na": ("#64748b", "#f1f5f9"), "N/A": ("#64748b", "#f1f5f9"),
-    "INFO": ("#1d4ed8", "#dbeafe"), "info": ("#1d4ed8", "#dbeafe"),
-    "manual": ("#92400e", "#fef3c7"), "MANUAL": ("#92400e", "#fef3c7"), "EXPECTED": ("#92400e", "#fef3c7"),
-}
-DEFAULT_COLOR = ("#334155", "#ffffff")
-STATUS_LABEL = {"match": "match", "mismatch": "mismatch", "manual": "manual",
-                "unknown": "no data", "na": "n/a", "info": "info"}
+def _agg(results_list, note_fields=("node", "cell", "note")):
+    """Any MISMATCH -> mismatch. Only MATCH/INFO seen -> match. Nothing but
+    SKIPPED (or empty) -> unknown (no data to judge, not a pass)."""
+    if not results_list:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in results_list if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if bad:
+        parts = []
+        for r in bad[:6]:
+            bits = [str(r.get(f)) for f in note_fields if r.get(f)]
+            parts.append(": ".join(bits) if bits else str(r))
+        more = f" (+{len(bad)-6} more)" if len(bad) > 6 else ""
+        return "mismatch", "; ".join(parts) + more
+    if real:
+        return "match", f"{len(real)} checked, no mismatch."
+    skipped_notes = {r.get("note") for r in results_list if r.get("note")}
+    return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
 
 
-def esc(v):
-    return html.escape("" if v is None else str(v))
+def _worst_status(statuses):
+    """Roll several (status, note) verdicts into one, worst-first:
+    mismatch > manual > unknown > match. Notes from every contributing
+    verdict at that severity are joined, so the row says which field(s)
+    actually failed rather than just that something did."""
+    order = ["mismatch", "manual", "unknown", "match"]
+    pairs = [s for s in statuses if s]
+    if not pairs:
+        return "unknown", "No data (check did not run for this site)."
+    for level in order:
+        hits = [n for s, n in pairs if s == level]
+        if hits:
+            seen, notes = set(), []
+            for n in hits:
+                if n and n not in seen:
+                    seen.add(n)
+                    notes.append(n)
+            return level, "; ".join(notes)
+    return "unknown", "No data (check did not run for this site)."
 
 
-def render_table(rows, columns=None, status_key="status", empty_msg="No data."):
-    """rows: list[dict]. Bordered HTML table, each row's background/text
-    colour driven by rows[i][status_key]. columns: optional [(key,label),
-    ...] order; defaults to the first row's own key order. status_key=None
-    disables colouring (plain bordered table)."""
-    if not rows:
-        return f'<div class="qkx-empty">{esc(empty_msg)}</div>'
-    if columns is None:
-        columns = [(k, k.replace("_", " ").title()) for k in rows[0].keys()]
-    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns)
-    body = []
-    for r in rows:
-        color, bg = STATUS_COLORS.get(str(r.get(status_key, "")), DEFAULT_COLOR) if status_key else DEFAULT_COLOR
-        cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
-        body.append(f'<tr style="background:{bg};color:{color};">{cells}</tr>')
-    # Zebra striping only on uncoloured tables: a `td` background paints over
-    # the row's inline `tr` background, so applying it globally would wash out
-    # every status colour.
-    zebra = " qkx-zebra" if not status_key else ""
-    return (f'<div class="qkx-table-wrap"><table class="qkx-table{zebra}"><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+def _pre_detected_status(node_logs_text, what):
+    """'Detected in the Pre kget log' checks (Radio Ports / RfBranch /
+    Sharing Radio).
 
+    These three are presence checks, not comparisons: the Pre log either
+    exposes the data or it doesn't. Detected on at least one node -> match.
+    Logs uploaded but the data is absent everywhere -> mismatch (the Pre
+    capture is incomplete, which is the thing worth flagging). No logs at
+    all -> unknown, never a pass."""
+    import pre_extract as pe
+    if not node_logs_text:
+        return "unknown", "No Pre kget logs uploaded — nothing to detect."
 
-def render_table_with_comments(rows, columns, status_key="status", note_key="note", bad_value="MISMATCH"):
-    """Row background/text colour driven by rows[i][status_key] (same
-    green/red/etc. palette as every other table), ending in one 'Comments'
-    column holding the note text — no separate Status/Note columns."""
-    if not rows:
-        return '<div class="qkx-empty">No data.</div>'
-    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns) + '<th style="min-width:170px;">Comments</th>'
-    body = []
-    for r in rows:
-        color, bg = STATUS_COLORS.get(str(r.get(status_key, "")), DEFAULT_COLOR)
-        cells = "".join(f"<td>{esc(r.get(k, ''))}</td>" for k, _ in columns)
-        cells += f'<td style="min-width:170px;">{esc(r.get(note_key, ""))}</td>'
-        body.append(f'<tr style="background:{bg};color:{color};">{cells}</tr>')
-    return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
-
-
-# ── Pre vs Post row-type palette — mirrors QUICKIX HTML's .new/.delete/
-# .change/.nochange row classes exactly (background colours match the
-# screenshots: pale green=new, pale red=delete, pale amber=change/moved,
-# plain white=nochange). ──
-PRE_POST_ROW_COLORS = {
-    "new": "#d1fae5", "delete": "#fee2e2", "change": "#fef3c7", "nochange": "#ffffff",
-}
-
-
-def render_node_pre_post_table(rows):
-    """Node / Status / PTP, whole-row background from row['type']."""
-    if not rows:
-        return '<div class="qkx-empty">Run validation with Pre logs and a CIQ to populate this.</div>'
-    head = "".join(f"<th>{h}</th>" for h in ("Node", "Status", "PTP"))
-    body = []
-    for r in rows:
-        bg = PRE_POST_ROW_COLORS.get(r["type"], "#ffffff")
-        status_color = "#b45309" if r["type"] == "change" else "#0f1720"
-        ptp_color = "#991b1b" if r.get("_ptp_flag") else "#0f1720"
-        body.append(
-            f'<tr style="background:{bg};"><td>{esc(r["node"])}</td>'
-            f'<td style="color:{status_color};font-weight:600;">{esc(r["status"])}</td>'
-            f'<td style="color:{ptp_color};font-weight:600;">{esc(r["ptp"])}</td></tr>'
-        )
-    return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
-
-
-def _pre_post_summary_pills(summary):
-    """New/Deleted/Moved/No Change count pills, same labels+order as the
-    HTML's own badge row above each LTE/5G Pre vs Post table."""
-    items = [("new", "New", "#059669"), ("deleted", "Deleted", "#dc2626"),
-             ("moved", "Moved", "#b45309"), ("nochange", "No Change", "#334155")]
-    return "".join(
-        f'<span class="qkx-count-pill"><b style="color:{color}">{summary.get(key, 0)}</b> {label}</span>'
-        for key, label, color in items
-    )
-
-
-def render_cell_pre_post_table(rows, field_columns):
-    """field_columns: list of (value_key, ok_key, label) for the PRE|POST
-    comparison columns (e.g. ('sc','_sc_ok','SC')) — each cell coloured
-    green/red from its own ok flag (None -> plain, used for Deleted rows
-    where there's nothing to compare). Row background still follows
-    row_type like the node table, but lighter, since the HTML also tints
-    New/Deleted/Moved rows while still colouring individual mismatched
-    fields red within them."""
-    if not rows:
-        return '<div class="qkx-empty">No data.</div>'
-    head = "".join(f"<th>{h}</th>" for h in ("Node", "Cell")) \
-        + "".join(f"<th>{esc(label)}</th>" for _, _, label in field_columns) \
-        + "".join(f"<th>{h}</th>" for h in ("Link", "Comments"))
-    body = []
-    for r in rows:
-        row_bg = PRE_POST_ROW_COLORS.get(r["row_type"], "#ffffff")
-        cells = f"<td>{esc(r['node'])}</td><td><b>{esc(r['cell'])}</b></td>"
-        for val_key, ok_key, _ in field_columns:
-            ok = r.get(ok_key)
-            if ok is None:
-                cells += f"<td>{esc(r.get(val_key, '-'))}</td>"
-            else:
-                color = "#059669" if ok else "#dc2626"
-                cells += f'<td style="color:{color};font-weight:700;">{esc(r.get(val_key, "-"))}</td>'
-        cells += f"<td>{esc(r.get('link', '-'))}</td><td>{esc(r.get('comment', ''))}</td>"
-        body.append(f'<tr style="background:{row_bg};">{cells}</tr>')
-    return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
-
-
-def _sheet_mentions_cell(ciq_wb, sheet_name, cell_id):
-    """True if any cell in the given CIQ sheet contains cell_id as a
-    substring anywhere — mirrors the HTML's own Antenna Info / Losses &
-    Delays presence check (antenna.some(r => Object.values(r).some(v =>
-    String(v).includes(cellId)))), not an RFDS lookup."""
-    if not cell_id or sheet_name not in ciq_wb.sheetnames:
-        return False
-    for row in cer.sheet_rows_as_dicts(ciq_wb[sheet_name]):
-        for v in row.values():
-            if v is not None and cell_id in str(v):
-                return True
-    return False
-
-
-def build_rfds_grouped_rows(results, ciq_wb, rfds_pages, rfds_bytes=None):
-    """One row per cell, merging Cell verification / RRU verification /
-    Antenna verification / Cell id / Antenna info / Losses & Delays /
-    Warning — matches the confirmed HTML grouped-header table, including
-    its exact pass/fail criteria: RRH match, antenna match-or-N/A, cell ID
-    match, Antenna Info found (CIQ 'Antenna Information' sheet mentions
-    the cell), and Losses & Delays found (CIQ 'Losses and Delays' sheet
-    mentions the cell) unless the antenna is AIR-series, where loss data
-    isn't mandatory."""
-    cell_map = {}
-    for r in results.get("cells_vs_rfds", []):
-        cell_map.setdefault(r["cell"], {})["cv"] = r
-    for r in results.get("radio_type", []):
-        cell_map.setdefault(r["cell"], {})["rt"] = r
-    for r in results.get("cell_id_vs_rfds", []):
-        cell_map.setdefault(r["cell"], {})["ci"] = r
-
-    # Antenna model: 'RF Inventory Details (Final)' filtered to
-    # EquipmentType=='ANTENNA' — the authoritative per-antenna record
-    # (Model + Linked Cells explicitly), not inferred from Sec-Pos position
-    # in 'Port Level Details'. AIR-series radios have no separate antenna
-    # row here (antenna is integrated into the radio) — those cells simply
-    # get no RFDS antenna entry, which is correct, not a gap.
-    rf_antennas = rf.extract_rf_inventory_antennas(rfds_pages, rfds_bytes) if rfds_pages is not None else {}
-    ant_by_cell = {}
-    # LTE cells: 'eUtran Parameters' / 'antenna model'. 5G cells: '5G Info' /
-    # 'Antenna Type' — the same field under a different column name on a
-    # different sheet. Without the 5G leg, every NR cell fell through to the
-    # 'no antenna row' branch and rendered as '—' in BOTH the RFDS and CIQ
-    # antenna columns, even though extract_rf_inventory_antennas() had
-    # already found their antenna (confirmed: HXON001791_N002A_1 etc. are
-    # present in the RF Inventory 'Linked Cells' list, and were being
-    # discarded here rather than never extracted).
-    for sheet, cell_col, ant_col in (("eUtran Parameters", "EutranCellFDDId", "antenna model"),
-                                      ("5G Info", "NRCellDU", "Antenna Type")):
-        if sheet not in ciq_wb.sheetnames:
+    found, missing, any_radio_data = [], [], False
+    for nid, text in node_logs_text.items():
+        if not text:
             continue
-        for r in cer.sheet_rows_as_dicts(ciq_wb[sheet]):
-            cell = r.get(cell_col)
-            if not cell or cell in ant_by_cell:
-                continue
-            ciq_ant = r.get(ant_col)
-            ant_row = rf_antennas.get(cell)
-            tier, detail = ar.resolve_antenna(ciq_ant, ant_row["model"] if ant_row else None)
-            ant_by_cell[cell] = {"ciq": ciq_ant or "—", "rfds": (ant_row or {}).get("model", "NOT FOUND"),
-                                  "tier": tier, "found": ant_row is not None}
-
-    rows = []
-    for cell, parts in cell_map.items():
-        cv, rt, ci = parts.get("cv", {}), parts.get("rt", {}), parts.get("ci", {})
-        an = ant_by_cell.get(cell, {})
-        cell_status = cv.get("status", "SKIPPED")
-        rru_status = rt.get("status", "SKIPPED")
-        # Cell id here is CIQ vs RFDS ONLY. check_cell_id_vs_rfds's own
-        # status is a THREE-way verdict —
-        #     match = (ciq == rfds) and (pre == 'NA' or pre == ciq)
-        # — so reusing it dragged the Pre-vs-CIQ comparison into this tab
-        # and flagged rows red while showing two IDENTICAL numbers
-        # (confirmed: FCON094120_N005B_1/N005C_1, RFDS 52 / CIQ 52, red).
-        # Pre vs CIQ is the Audit tab's job; recompute from the two values
-        # this table actually displays so the verdict matches what's shown.
-        _ciq_id = str(ci.get("ciq") or "").strip()
-        _rfds_id = str(ci.get("rfds_rcn") or "").strip()
-        if not ci or not _rfds_id or _rfds_id == "NOT CHECKED":
-            cellid_status = "SKIPPED"
-        elif _rfds_id == "NOT FOUND":
-            cellid_status = "MISMATCH"
+        if what == "ports":
+            fru = pe.extract_cell_to_fru(text)
+            n = len(pe.extract_cell_to_rilink_detail(text, fru))
+            label = "RiLink/RiPort entries"
+        elif what == "rfbranch":
+            refs = pe.extract_rf_branch_refs(text)
+            n = sum(1 for v in refs.values() if v.get("sef_branches") or v.get("tx_ref"))
+            label = "cells with RfBranch refs"
+        elif what == "sharing":
+            fru = pe.extract_cell_to_fru(text)
+            counts = {}
+            for cell, f in fru.items():
+                if f and f != "-":
+                    counts[f] = counts.get(f, 0) + 1
+            n = sum(1 for c in counts.values() if c > 1)
+            label = "radios shared by >1 cell"
+            # A site with no shared radio is a legitimate design, but that
+            # is only knowable if radio data was actually read. Track
+            # whether ANY radio was seen so 'no sharing' can be told apart
+            # from 'nothing parsed'.
+            if counts:
+                any_radio_data = True
         else:
-            cellid_status = "MATCH" if _ciq_id == _rfds_id else "MISMATCH"
-        ant_tier = an.get("tier")
-        if not an:
-            ant_status = "SKIPPED"
-        elif not an.get("found"):
-            ant_status = "MANUAL"  # amber — RFDS has no antenna data at all ("N/A", not a real mismatch)
-        elif ant_tier in ("EXACT", "NORMALIZED", "SUFFIX", "TRUNCATED"):
-            ant_status = "MATCH"
-        else:
-            ant_status = "MISMATCH"
+            return "unknown", f"Unknown detection target '{what}'."
+        (found if n else missing).append(f"{nid}: {n} {label}")
 
-        is_air = str(an.get("rfds") or "").upper().startswith("AIR") or str(an.get("ciq") or "").upper().startswith("AIR")
-        ant_info_found = _sheet_mentions_cell(ciq_wb, "Antenna Information", cell)
-        loss_found = _sheet_mentions_cell(ciq_wb, "Losses and Delays", cell)
-        loss_mandatory = not is_air
-        loss_status = "MATCH" if loss_found else ("MANUAL" if not loss_mandatory else "MISMATCH")
-        loss_display = "FOUND" if loss_found else ("N/A" if not loss_mandatory else "NOT FOUND")
-
-        warnings = []
-        if cell_status == "MISMATCH":
-            warnings.append("Cell mismatch")
-        if rru_status == "MISMATCH":
-            warnings.append("RRU mismatch")
-        if ant_status == "MISMATCH":
-            warnings.append("Antenna mismatch")
-        if cellid_status == "MISMATCH":
-            warnings.append("Cell ID mismatch (CIQ vs RFDS)")
-        if not ant_info_found:
-            warnings.append("Antenna Info missing")
-        if loss_mandatory and not loss_found:
-            warnings.append("Losses & Delays missing")
-
-        fail = any(s == "MISMATCH" for s in (cell_status, rru_status, ant_status, cellid_status)) \
-            or not ant_info_found or (loss_mandatory and not loss_found)
-
-        rows.append({
-            "node": cv.get("node") or rt.get("node") or ci.get("node") or "",
-            "cell_rfds": cv.get("rfds_cell", "—"), "cell_ciq": cv.get("ciq_cell", "—") or cell, "cell_status": cell_status,
-            "rru_rfds": rt.get("rfds", "—"), "rru_ciq": rt.get("ciq", "—"), "rru_status": rru_status,
-            "ant_rfds": an.get("rfds", "—"), "ant_ciq": an.get("ciq", "—"), "ant_status": ant_status,
-            "cellid_rfds": ci.get("rfds_rcn", "—"), "cellid_ciq": ci.get("ciq", "—"), "cellid_status": cellid_status,
-            "ant_info": "FOUND" if ant_info_found else "NOT FOUND", "ant_info_status": "MATCH" if ant_info_found else "MISMATCH",
-            "losses_delays": loss_display, "losses_status": loss_status,
-            "warning": "; ".join(warnings) if warnings else "—",
-            "overall": "FAIL" if fail else "PASS",
-        })
-    rows.sort(key=lambda r: r["cell_ciq"] or "")
-    return rows
+    if found:
+        return "match", "; ".join(found)
+    if what == "sharing" and any_radio_data:
+        # Radios WERE read and none is shared — a legitimate site design.
+        return "match", "No shared radios on this site (each cell on its own radio)."
+    return "mismatch", "Not detected in any Pre log — " + ("; ".join(missing) or "no usable log text.")
 
 
-def render_rfds_grouped_table(rows):
-    if not rows:
-        return '<div class="qkx-empty">No data.</div>'
+def _filter(results_list, rule_prefix):
+    return [r for r in results_list if str(r.get("rule", "")).strip() == rule_prefix]
 
-    def gcell(val, status, group_start=False):
-        color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
-        cls = ' class="qkx-group-start"' if group_start else ""
-        return f'<td{cls} style="background:{bg};color:{color};">{esc(val)}</td>'
 
-    def scell(val, status, group_start=False):
-        color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
-        cls = ' class="qkx-group-start"' if group_start else ""
-        return f'<td{cls} style="background:{bg};color:{color};font-weight:600;">{esc(val)}</td>'
+# ══════════════════════════════════════════════════════════════════════
+# EDP field-level checks (cabinet naming / port size / port facing /
+# bearer VLAN clash / IPv6 bearer+OAM groups). run_validation.py's own
+# pipeline never built these - they only exist today in the separate
+# HTML tool's EDP Validator - so this ports that exact logic here,
+# reading straight off edp_rows (ciq_edp_reader.build_edp_index output).
+# ══════════════════════════════════════════════════════════════════════
 
-    head1 = ('<th colspan="2">Cell verification</th><th colspan="2" class="qkx-group-start">RRU verification</th>'
-             '<th colspan="2" class="qkx-group-start">Antenna verification</th>'
-             '<th colspan="2" class="qkx-group-start">Cell id</th>'
-             '<th rowspan="2" class="qkx-group-start">Antenna info</th><th rowspan="2">Losses &amp; Delays</th>'
-             '<th rowspan="2" style="min-width:160px;">Warning</th>')
-    head2 = '<th>RFDS</th><th>CIQ</th>' * 4
-    body = []
-    for r in rows:
-        warn_cell = (f'<td style="min-width:160px;color:#991b1b;font-weight:700;">{esc(r["warning"])}</td>'
-                     if r["warning"] != "—" else '<td style="min-width:160px;">—</td>')
-        tds = (
-            gcell(r["cell_rfds"], r["cell_status"]) + gcell(r["cell_ciq"], r["cell_status"])
-            + gcell(r["rru_rfds"], r["rru_status"], True) + gcell(r["rru_ciq"], r["rru_status"])
-            + gcell(r["ant_rfds"], r["ant_status"], True) + gcell(r["ant_ciq"], r["ant_status"])
-            + gcell(r["cellid_rfds"], r["cellid_status"], True) + gcell(r["cellid_ciq"], r["cellid_status"])
-            + scell(r["ant_info"], r["ant_info_status"], True) + scell(r["losses_delays"], r["losses_status"]) + warn_cell
+def _norm(v):
+    v = "" if v is None else str(v).strip()
+    return "" if v.lower() in ("none", "nan") else v
+
+
+def _edp_role(edp_row):
+    return "PRIMARY" if _norm(edp_row.get("SIAD_PORT_FACING_BBU")) else "SECONDARY"
+
+
+def _edp_node_rows(edp_rows, node_ids):
+    """{node_id: edp_row_or_None} for every node we're checking."""
+    out = {}
+    for nid in node_ids:
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        out[nid] = rows[0] if rows else None
+    return out
+
+
+def _edp_found_status(edp_rows, node_ids):
+    rows = _edp_node_rows(edp_rows, node_ids)
+    missing = [n for n, r in rows.items() if r is None]
+    if not node_ids:
+        return "unknown", "No nodes to check."
+    if missing:
+        return "mismatch", "; ".join(f"{n} is missing in EDP" for n in missing)
+    return "match", f"{len(node_ids)} node(s) all found in EDP."
+
+
+def _edp_cabinet_status(edp_rows, node_ids):
+    rows = _edp_node_rows(edp_rows, node_ids)
+    bad, checked = [], 0
+    for nid, r in rows.items():
+        if r is None:
+            continue
+        checked += 1
+        cab = _norm(r.get("CABINET"))
+        role = _edp_role(r)
+        ok = bool(re.match(r"^BBU\s*\d+V?$", cab, re.I)) if cab else False
+        if role == "SECONDARY" and cab and not cab.upper().endswith("V"):
+            ok = False
+        if not ok:
+            bad.append(f"{nid}: cabinet '{cab or '(blank)'}' ({role})")
+    if not checked:
+        return "unknown", "No EDP rows to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} node(s) checked, all pass."
+
+
+def _edp_port_size_status(edp_rows, node_ids, mm_rows_by_node):
+    rows = _edp_node_rows(edp_rows, node_ids)
+    bad, checked = [], 0
+    for nid, r in rows.items():
+        if r is None:
+            continue
+        mode = _norm(mm_rows_by_node.get(nid, {}).get("BBU Mode")).upper()
+        size = _norm(r.get("SIAD_PORT_SIZE_BBU")).upper()
+        if not size:
+            continue
+        checked += 1
+        if mode in ("TMBB", "MMBB") and size != "10GE":
+            bad.append(f"{nid}: {mode} node shows port size '{size}', expected 10GE")
+    if not checked:
+        return "unknown", "No SIAD_PORT_SIZE_BBU values to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} node(s) checked, all pass."
+
+
+def _edp_port_facing_status(edp_rows, node_ids):
+    rows = _edp_node_rows(edp_rows, node_ids)
+    bad, checked = [], 0
+    for nid, r in rows.items():
+        if r is None:
+            continue
+        checked += 1
+        role = _edp_role(r)
+        facing = _norm(r.get("SIAD_PORT_FACING_BBU"))
+        if role == "PRIMARY" and not facing:
+            bad.append(f"{nid}: Primary but SIAD_PORT_FACING_BBU is blank")
+        if role == "SECONDARY" and facing:
+            bad.append(f"{nid}: Secondary but SIAD_PORT_FACING_BBU is populated ('{facing}')")
+    if not checked:
+        return "unknown", "No EDP rows to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} node(s) checked, all pass."
+
+
+def _edp_bearer_vlan_status(edp_rows, node_ids):
+    rows = _edp_node_rows(edp_rows, node_ids)
+    vlans = [(_norm(r.get("BEARER_ENODEB_SB_VLAN_ID")), nid) for nid, r in rows.items() if r]
+    vlans = [(v, n) for v, n in vlans if v]
+    if not vlans:
+        return "unknown", "No BEARER_ENODEB_SB_VLAN_ID values to check."
+    seen = {}
+    clashes = []
+    for v, n in vlans:
+        if v in seen and seen[v] != n:
+            clashes.append(f"VLAN {v} shared by {seen[v]} and {n}")
+        seen[v] = n
+    if clashes:
+        return "mismatch", "; ".join(clashes[:6])
+    return "match", f"{len(vlans)} node(s), no bearer VLAN clash."
+
+
+def _edp_group_status(edp_rows, node_ids, fields, label):
+    rows = _edp_node_rows(edp_rows, node_ids)
+    bad, checked = [], 0
+    for nid, r in rows.items():
+        if r is None:
+            continue
+        checked += 1
+        missing = [f for f in fields if not _norm(r.get(f))]
+        if missing:
+            bad.append(f"{nid}: missing {', '.join(missing)}")
+    if not checked:
+        return "unknown", "No EDP rows to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} node(s) checked, all {label} fields present."
+
+
+IPV6_BEARER_FIELDS = ["IPV6_ENODEB_BEARER_SUBNET_61", "IPV6_ENODEB_SIAD_BEARER_SUB_64",
+                       "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "IPV6_ENODEB_BEARER_IP"]
+IPV6_OAM_FIELDS = ["OAM_ENODEB_SIAD_OAM_VLAN", "IPV6_ENODEB_OAM_SUBNET_61",
+                    "IPV6_ENODEB_SIAD_OAM_SUB_64", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "IPV6_ENODEB_OAM_IP"]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# New checks that had no home anywhere yet: SW-version consistency across
+# nodes, MME Region (N2E), NR_SA tab + TAC digit rule, FA Code CIQ-vs-RFDS.
+# ══════════════════════════════════════════════════════════════════════
+
+def _sw_consistency_status(sw_version_results):
+    versions = {r.get("sw_version") for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND")}
+    if not versions:
+        return "unknown", "No SW version captured from any Pre kget-all log."
+    if len(versions) > 1:
+        detail = "; ".join(f"{r.get('node')}={r.get('sw_version')}" for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND"))
+        return "mismatch", f"Mixed SW versions across Pre nodes: {detail}"
+    return "match", f"All Pre nodes on {versions.pop()}."
+
+
+def _sw_status_v2(sw_version_results):
+    """Confirmed to do BOTH signals, not just one: (1) every node that has a
+    Pre log actually shows a detected SW version, AND (2) every detected
+    version agrees across nodes. Either failing is a mismatch."""
+    if not sw_version_results:
+        return "unknown", "No Pre kget-all logs loaded."
+    missing = [r.get("node") for r in sw_version_results if r.get("sw_version") in (None, "NOT FOUND")]
+    versions = {r.get("sw_version") for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND")}
+    bad = []
+    if missing:
+        bad.append(f"No SW version detected for: {', '.join(missing)}")
+    if len(versions) > 1:
+        detail = "; ".join(f"{r.get('node')}={r.get('sw_version')}" for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND"))
+        bad.append(f"Mixed SW versions across Pre nodes: {detail}")
+    if bad:
+        return "mismatch", " | ".join(bad)
+    if versions:
+        return "match", f"All Pre nodes show a SW version, all on {versions.pop()}."
+    return "unknown", "No SW version captured from any Pre kget-all log."
+
+
+def _mme_region_status(ciq_wb):
+    """N2E-ness is a SITE-level fact, not per-node: presence of any real cell
+    row in the CIQ's Nokia_Info tab (the source-Nokia cell being migrated
+    off) means this is an N2E site — confirmed real CIQ structure has a
+    'Nokia Cell Id' column there, non-empty only for actual N2E migrations
+    (every non-N2E CIQ checked has Nokia_Info present but entirely empty).
+    For an N2E site, EVERY node's MME Region (Mixed Mode Info tab) must be
+    N-RAN; E-RAN is flagged so it can be raised as a PI to the design team."""
+    if "Mixed Mode Info" not in ciq_wb.sheetnames:
+        return "unknown", "No Mixed Mode Info sheet."
+    is_n2e = False
+    if "Nokia_Info" in ciq_wb.sheetnames:
+        nokia_rows = cer.sheet_rows_as_dicts(ciq_wb["Nokia_Info"])
+        is_n2e = any(_norm(r.get("Nokia Cell Id")) for r in nokia_rows)
+    if not is_n2e:
+        return "match", "No cells in Nokia_Info — not an N2E site, MME Region rule does not apply."
+    rows = cer.sheet_rows_as_dicts(ciq_wb["Mixed Mode Info"])
+    bad = [r for r in rows if re.search(r"E-?RAN", _norm(r.get("MME Region")), re.I)
+           and not re.search(r"N-?RAN", _norm(r.get("MME Region")), re.I)]
+    if bad:
+        return "mismatch", "; ".join(
+            f"{_norm(r.get('eNodeB Name'))}: MME Region '{_norm(r.get('MME Region'))}' — should be N-RAN, raise PI to design team"
+            for r in bad
         )
-        body.append(f"<tr>{tds}</tr>")
-    return (f'<div class="qkx-table-wrap"><table class="qkx-table">'
-            f'<thead><tr>{head1}</tr><tr>{head2}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+    return "match", f"N2E site — {len(rows)} node(s), MME Region correctly N-RAN."
 
 
-def render_pre_vs_edp_pivot_table(rows):
-    """Node ID + one 2-col (pre | EDP) group per Bearer/OAM field — matches
-    the wide screenshot layout. rows come from
-    rrnrbl_checklist.build_pre_vs_edp_pivot_rows()."""
-    if not rows:
-        return '<div class="qkx-empty">No data.</div>'
-    groups = [("Bearer VLAN", "bearer_vlan"), ("Bearer IPv6", "bearer_ipv6"),
-              ("Bearer Default Router", "bearer_router"), ("OAM VLAN", "oam_vlan"),
-              ("OAM IPv6", "oam_ipv6"), ("OAM Default Router", "oam_router")]
-    head1 = '<th rowspan="2">Node ID</th>' + "".join(
-        f'<th colspan="2" class="qkx-group-start">{esc(label)}</th>' for label, _ in groups)
-    head2 = "".join('<th class="qkx-group-start">pre</th><th>EDP</th>' for _ in groups)
-    body = []
+def _nr_sa_tac_status(ciq_wb):
+    has_nr_sa = "NR_SA" in ciq_wb.sheetnames
+    if not has_nr_sa:
+        return "na", "No NR_SA tab in this CIQ — SA-carrier TAC rule does not apply."
+    if "5G Info" not in ciq_wb.sheetnames:
+        return "unknown", "NR_SA tab present but no 5G Info sheet found."
+    rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"])
+    bad = []
+    checked = 0
     for r in rows:
-        cells = f"<td>{esc(r['label'])}</td>"
-        for _, key in groups:
-            cells += (f'<td class="qkx-group-start">{esc(r.get(key + "_pre", ""))}</td>'
-                      f'<td>{esc(r.get(key + "_edp", ""))}</td>')
-        body.append(f"<tr>{cells}</tr>")
-    return (f'<div class="qkx-table-wrap"><table class="qkx-table">'
-            f'<thead><tr>{head1}</tr><tr>{head2}</tr></thead>'
-            f'<tbody>{"".join(body)}</tbody></table></div>')
+        nsa_sa = _norm(r.get("NSA/SA")).upper()
+        tac = _norm(r.get("nRTAC"))
+        cell = _norm(r.get("NRCellDU"))
+        if not nsa_sa or not cell:
+            continue
+        checked += 1
+        is_sa = "SA" in nsa_sa and "NSA" not in nsa_sa
+        is_nsa = "NSA" in nsa_sa
+        if is_sa and len(tac) != 7:
+            bad.append(f"{cell}: NSA/SA=SA but nRTAC='{tac}' (expected 7 digits)")
+        elif is_nsa and tac not in ("", "0"):
+            bad.append(f"{cell}: NSA/SA=NSA but nRTAC='{tac}' (expected blank/0)")
+    if not checked:
+        return "unknown", "NR_SA tab present but no NSA/SA values read from 5G Info."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} 5G Info row(s): nRTAC digit-count matches NSA/SA."
 
 
-def section_title(text, badge=None):
-    """badge: optional right-aligned pill (e.g. '18 CELLS'), matching
-    QUICKIX HTML's card-header count badge."""
-    badge_html = f'<span class="qkx-title-badge">{esc(badge)}</span>' if badge else ''
-    st.markdown(f'<div class="qkx-section-title" style="display:flex;justify-content:space-between;align-items:center;">'
-                f'<span>{esc(text)}</span>{badge_html}</div>', unsafe_allow_html=True)
+def _fa_code_status(site_details, ciq_wb):
+    """Compares the CIQ's own FA Code (site_details['fa_code'], always
+    CIQ-sourced per build_site_details()) against the RFDS-sourced value
+    (site_details['rfds_fa_code']) - NOT against itself. An earlier version
+    of this function read site_details.get('fa_code') and called it
+    'rfds_fa', but that key has never held the RFDS value (RFDS's own value
+    is never merged into 'fa_code' - see build_site_details()), so this was
+    silently comparing the CIQ FA Code against itself and never actually
+    checked RFDS at all."""
+    rfds_fa = _norm(site_details.get("rfds_fa_code"))
+    if "5G Info" not in ciq_wb.sheetnames:
+        return "unknown", "No 5G Info sheet (LTE-only build) to compare."
+    rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"])
+    ciq_fas = sorted({_norm(r.get("FA Code")) for r in rows if _norm(r.get("FA Code"))})
+    if not rfds_fa:
+        return "unknown", "No FA Code found on the RFDS Site Details page - not checked."
+    if not ciq_fas:
+        return "unknown", "No FA Code on the CIQ 5G Info sheet."
+    bad = [f for f in ciq_fas if f != rfds_fa]
+    if bad:
+        return "mismatch", f"RFDS FA Code {rfds_fa} vs CIQ FA Code(s) {', '.join(bad)}"
+    return "match", f"RFDS and CIQ FA Code both {rfds_fa}."
 
 
-def count_caption(rows, status_key="status", bad_value="MISMATCH", noun="row"):
-    n_bad = sum(1 for r in rows if r.get(status_key) == bad_value)
-    st.caption(f"{len(rows)} {noun}(s) checked — {n_bad} mismatch(es).")
+def _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages):
+    has_xmu_nodes = []
+    for nid in node_ids:
+        row = cer.find_enb_row(enb_rows_all, nid)
+        if not row:
+            continue
+        x1, x2 = _norm(row.get("1st XMU")).upper(), _norm(row.get("2nd XMU")).upper()
+        if x1 not in ("", "NO", "N/A", "NOT USED") or x2 not in ("", "NO", "N/A", "NOT USED"):
+            has_xmu_nodes.append(nid)
+    if not has_xmu_nodes:
+        return "match", "No node shows a 1st/2nd XMU in CIQ eNB Info."
+    if not rfds_pages:
+        return "unknown", f"{', '.join(has_xmu_nodes)} show XMU in CIQ, but no RFDS PDF was provided to check."
+    full_text = " ".join(rfds_pages.values()).upper() if isinstance(rfds_pages, dict) else ""
+    if "XMU" not in full_text:
+        return "mismatch", f"{', '.join(has_xmu_nodes)} show XMU in CIQ eNB Info, but 'XMU' does not appear anywhere in the RFDS PDF text."
+    return "match", f"{len(has_xmu_nodes)} node(s) with XMU in CIQ — RFDS PDF text also mentions XMU."
 
 
 # ══════════════════════════════════════════════════════════════════════
-# RRNRBL Checklist renderer — flat category banners (no nesting; Streamlit
-# expanders can't nest and the HTML tool's own renderer doesn't collapse
-# per-category either), auto rows batched into one coloured table per
-# run, manual rows get a real checkbox + comment box so the value survives
-# reruns and feeds the downloadable xlsx.
+# The 63-row checklist definition. `row` = exact Excel row in
+# Checklist_RRNRBL.xlsx ("Legacy - N2e Engineer Checklist" sheet).
+# `check` is a zero-arg callable returning (status, detail), or None
+# for a manual item.
 # ══════════════════════════════════════════════════════════════════════
-def _chip(status):
-    """Status chip markup — every checklist row carries one so a status is
-    readable on its own, not only via a pale row background."""
-    cls = {"match": "match", "MATCH": "match", "PASS": "match",
-           "mismatch": "mismatch", "MISMATCH": "mismatch", "FAIL": "mismatch",
-           "manual": "manual", "MANUAL": "manual", "EXPECTED": "manual",
-           "info": "info", "INFO": "info",
-           }.get(status, "unknown")
-    return f'<span class="qkx-chip {cls}">{esc(STATUS_LABEL.get(status, status))}</span>'
+
+def _edp_controller_status(edp_rows, controller_ids):
+    """NEW - Controller/ANCEQ checks (cabinet naming/port-size/etc. above are
+    Primary/Secondary-only). controller_ids: list of EDP SITE_NAME values for
+    Controller rows (= the CIQ's Controller Info 'Controller ID').
+    IPv6 ANCEQ fields are checked as informational only - a real, valid EDP
+    row was found with every IPv6 ANCEQ_* field genuinely blank, so treating
+    it as a required field would be a false mismatch."""
+    if not controller_ids:
+        return "na", "No Controller node in this CIQ's Controller Info sheet."
+    bad, checked = [], 0
+    ipv6_present = 0
+    for cid in controller_ids:
+        rows = cer.edp_rows_for_site(edp_rows, cid)
+        if not rows:
+            bad.append(f"{cid}: not published in EDP")
+            continue
+        r = rows[0]
+        checked += 1
+        missing = [f for f in ("ANCEQ_TYPE", "ANCEQ_NAME", "ANCEQ_SIAD_IP_HOST_1", "ANCEQ_SIAD_IP_HOST_2") if not _norm(r.get(f))]
+        if missing:
+            bad.append(f"{cid}: missing {', '.join(missing)}")
+        if _norm(r.get("ANCEQ_SIAD_IPV6_HOST_1")):
+            ipv6_present += 1
+    if not checked:
+        return "unknown", "; ".join(bad) if bad else "No EDP rows to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} controller(s) checked (IPv4 required fields all present; {ipv6_present} also have IPv6)."
 
 
-def render_checklist_grid(rows, manual_values):
-    """One continuous spreadsheet-style grid for the WHOLE checklist:
-    Category | Sub-section | Item | Detail | Status, covering every row
-    (auto AND manual) in reading order. Category/Sub-section cells use
-    rowspan to merge consecutive identical values — the actual spreadsheet
-    "grouped cell" look, rather than repeating the same category name on
-    every row or breaking the table into one fragment per category (the
-    old render_rrnrbl_checklist() approach).
+def _edp_ptp_status(edp_rows, node_ids):
+    """NEW - EDP's own PTP fields (SIAD_PTP_VLAN_ID + the PTP_VLAN_SUBNET_30 /
+    PTP_SIAD_INTERFACE_IP / PTP_CAB_INTERFACE_IP group), confirmed present on
+    a real published EDP row. Separate from the kget-log-side PTP guess in
+    pre_extract.extract_ptp_status() - this one reads data this backend
+    definitely has."""
+    rows = _edp_node_rows(edp_rows, node_ids)
+    bad, checked, no_ptp = [], 0, 0
+    for nid, r in rows.items():
+        if r is None:
+            continue
+        vlan = _norm(r.get("SIAD_PTP_VLAN_ID"))
+        if not vlan:
+            no_ptp += 1
+            continue
+        checked += 1
+        missing = [f for f in ("PTP_VLAN_SUBNET_30", "PTP_SIAD_INTERFACE_IP", "PTP_CAB_INTERFACE_IP") if not _norm(r.get(f))]
+        if missing:
+            bad.append(f"{nid}: PTP VLAN {vlan} set but missing {', '.join(missing)}")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        return "match", f"{checked} node(s) with PTP configured, all required fields present."
+    return "info", f"No node declares a PTP VLAN in EDP ({no_ptp} checked) — PTP may not be in scope for this build."
 
-    manual_values: {row_number: {"done": bool, "comment": str}} — the
-    CURRENTLY SAVED values for manual items (read from session_state by the
-    caller), so a manual row's Detail column shows what's actually been
-    entered so far instead of always looking blank. Manual rows remain
-    read-only in this grid; actually entering a comment still happens in
-    the separate fill-in section below (a raw HTML table cannot host a
-    live checkbox/text-input widget)."""
-    if not rows:
-        return '<div class="qkx-empty">Run validation to populate the checklist.</div>'
 
-    # Precompute rowspans: for each row, how many rows below it (inclusive)
-    # share the same (cat) or (cat, sub) — 0 means "this row is covered by
-    # an earlier rowspan, emit no <td> for this column at all".
-    n = len(rows)
-    cat_span = [0] * n
-    sub_span = [0] * n
-    i = 0
-    while i < n:
-        j = i
-        while j < n and rows[j]["cat"] == rows[i]["cat"]:
-            j += 1
-        cat_span[i] = j - i
-        i = j
-    i = 0
-    while i < n:
-        j = i
-        while j < n and rows[j]["cat"] == rows[i]["cat"] and rows[j].get("sub") == rows[i].get("sub"):
-            j += 1
-        sub_span[i] = j - i
-        i = j
+def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_pages=None, node_logs_text=None):
+    mm_rows = cer.mixed_mode_rows(ciq_wb) if ciq_wb else []
+    mm_by_node = {}
+    for r in mm_rows:
+        n = _norm(r.get("Node to be built as")) or _norm(r.get("eNodeB Name"))
+        if n:
+            mm_by_node[n] = r
+    enb_rows_all = cer.enb_info_rows(ciq_wb) if ciq_wb else []
 
-    head = ('<th style="width:15%;">Category</th><th style="width:15%;">Sub-section</th>'
-            '<th style="width:24%;">Item</th><th>Detail</th><th style="width:96px;">Status</th>')
-    body = []
-    for idx, r in enumerate(rows):
-        status = r["status"]
-        color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
-        if status == "manual":
-            mv = manual_values.get(r["row"], {})
-            detail = mv.get("comment") or "—"
-            if mv.get("done"):
-                detail = f"\u2713 {detail}" if detail != "—" else "\u2713 Marked done"
+    board_type = results.get("board_type", [])
+    identity = results.get("identity", [])
+
+    # Primary AND Secondary node ids — node_ids (checked_nodes) only ever
+    # holds the Primary name, so site_name/cabinet/bbu_type/node_model and
+    # the 6 bearer/OAM rows below (which all need to see a Secondary that
+    # EDP is missing, or a Secondary added by an SMBB->MMBB transition)
+    # need this instead. Computed here rather than passed in, matching the
+    # EDP Validator tab's own fix for the same gap.
+    node_role_list = build_primary_secondary_node_list(ciq_wb) if ciq_wb else []
+    edp_node_ids = [n["node"] for n in node_role_list] or node_ids
+
+    def edp_field(fields, label):
+        return lambda: _edp_group_status(edp_rows, node_ids, fields, label)
+
+    rows = [
+        (13, "Major showstopper check", None, "SW should be match with ENM", "NR/Radio",
+         lambda: _sw_status_v2(results.get("sw_version", []))),
+
+        (15, "EDP check", "EDP vs Site", "site_name", "NR/Radio", lambda: _edp_found_status(edp_rows, edp_node_ids)),
+        (16, "EDP check", "EDP vs Site", "cabinet", "Radio", lambda: _cabinet_pairing_status(ciq_wb, edp_rows, edp_node_ids)),
+        (17, "EDP check", "EDP vs Site", "bbu_type", "Radio", lambda: _bbu_type_vs_node_model_status(ciq_wb, edp_rows, edp_node_ids)),
+        (18, "EDP check", "EDP vs Site", "node_model", "Radio", lambda: _node_model_vs_bbu_type_status(ciq_wb, edp_rows, edp_node_ids)),
+        (19, "EDP check", "EDP vs Site", "siad_port_size_bbu", "Radio", lambda: _siad_port_size_pre_status(node_logs_text, ciq_wb, edp_rows, edp_node_ids)),
+        (20, "EDP check", "EDP vs Site", "siad_port_facing_bbu", "Radio", lambda: _edp_port_facing_status(edp_rows, edp_node_ids)),
+        (21, "EDP check", "EDP vs Site", "bearer_enodeb_sb_vlan_id", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID")),
+        (22, "EDP check", "EDP vs Site", "ipv6_siad_bearer_ip_def_router", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True)),
+        (23, "EDP check", "EDP vs Site", "ipv6_enodeb_bearer_ip", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True)),
+        (24, "EDP check", "EDP vs Site", "oam_enodeb_siad_oam_vlan", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN")),
+        (25, "EDP check", "EDP vs Site", "ipv6_siad_oam_ip_def_router", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", is_ipv6=True)),
+        (26, "EDP check", "EDP vs Site", "ipv6_enodeb_oam_ip", "Radio",
+         lambda: _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_ip", "IPV6_ENODEB_OAM_IP", is_ipv6=True)),
+
+        (28, "RFDS Checks", "Pre Vs RFDS Sheet in QWEST", "FACode", "Radio", lambda: _fa_code_status(site_details, ciq_wb)),
+        (29, "RFDS Checks", None, "JobDetail", "Radio", None),
+        (30, "RFDS Checks", None, "NonRFInventoryDetails(Final)", "Radio", None),
+        (31, "RFDS Checks", None, "CellDetails(Final) -- CellID / RCN /RRH", "Radio",
+         lambda: _agg(results.get("cells_vs_rfds", []) + results.get("radio_type", []))),
+        (32, "RFDS Checks", None, "AntennaPositionDetails -- Model / LinkedCells / Azimuth(Design)  / Total Postions", "Radio", None),
+        (33, "RFDS Checks", None, "Plumbing Diagram -- TxRx / TMA / Radio - RET Controller / Total Postions", "Radio", None),
+
+        (35, "CIQ tabs checks", "Revision History", "All Confirmation checks", "NR/Radio", None),
+        (36, "CIQ tabs checks", "Mixed Mode Info Tab", "eNBId and gNBId ENM vs CIQ", "NR/Radio", lambda: _agg(identity)),
+        (37, "CIQ tabs checks", "Mixed Mode Info Tab", "MME Region [N2E site MME Regionn should be with N-RAN,if its E-RAN,raise PI to design team]", "NR/Radio", lambda: _mme_region_status(ciq_wb)),
+        (38, "CIQ tabs checks", "Mixed Mode Info Tab", "Make sure Primary & secondary node is matching with RFDS-Non RF Inventory Details (Final)", "Radio", lambda: _agg(results.get("primary_secondary", []))),
+
+        (39, "CIQ tabs checks", "5g info", "NRCellDU/ NRCellCU  ENM vs CIQ ", "NR/Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
+        (40, "CIQ tabs checks", "5g info", "nRTAC/ cellLocalId ENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (41, "CIQ tabs checks", "5g info", "arfcnDL/ arfcnUL and bSChannelBwDL/ bSChannelBwDL\nENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
+        (42, "CIQ tabs checks", "5g info", "RBB Type vs no.ofrx and tx from ENM", "Radio", lambda: _agg(results.get("params_5g", []))),
+        (43, "CIQ tabs checks", "5g info", "DSS check", "NR/Radio", lambda: _agg(results.get("dss", []))),
+        (44, "CIQ tabs checks", "5g info", "ssbFrequency /ssbOffset/ ssbDuration ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
+        (45, "CIQ tabs checks", "5g info", "NSA/SA", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
+        (46, "CIQ tabs checks", "5g info", "Make sure  BBU Type should match with RFDS and CIQ - BBU Type", "NR/Radio", lambda: _agg(board_type)),
+        (47, "CIQ tabs checks", "5g info", "NRCellDU/NRCellCU/cellLocalId/RRU Type/ BeamDirection (Azimuth) /Antenna Type /Electrical Tilt must same as RFDS ", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
+        (48, "CIQ tabs checks", "5g info", "NR TAC - Existing sectors - ENM", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
+        (49, "CIQ tabs checks", "5g info", " NR TAC   - For newly added Carriers-  NSA= 0 & SA =7 digit value", "NR/Radio", lambda: _nr_sa_tac_status(ciq_wb)),
+        (50, "CIQ tabs checks", "5g info", "6472 / AIR-6449 - C Band / AIR6419 - DOD - Check for the SEF/FRU -- Check for the SEF/FRU", "Radio", lambda: _agg(results.get("sef_fru", []))),
+        (51, "CIQ tabs checks", "5g info", "Unique Port for 5G and LTE incase of Separate Radio - Ports and data ports ", "Radio", lambda: _agg(results.get("port_uniqueness", []))),
+
+        (52, "CIQ tabs checks", "gNB Info", "gNBId/gNodeB Name must should with  Mixed Mode Info tab ", "NR/Radio", lambda: _agg(identity)),
+        (53, "CIQ tabs checks", "gNB Info", "DU type should be same as 5G Info tab - BBU Type", "NR/Radio", lambda: _agg(board_type)),
+
+        (54, "CIQ tabs checks", "eNB Info", "eNBId/eNodeB Name should match with Mixed Mode Info tab - eNBId/eNodeB", "NR/Radio", lambda: _agg(identity)),
+        (55, "CIQ tabs checks", "eNB Info", "BBU Type should match with RFDS - BBU Type", "Radio", lambda: _agg(board_type)),
+        (56, "CIQ tabs checks", "eNB Info", "TAC Value", "NR/Radio", lambda: _agg(results.get("tac", []))),
+
+        (57, "CIQ tabs checks", "eUtran Parameters Tab", "earfcnDl/ dlChannelBandwidth ENM vs CIQ", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
+        (58, "CIQ tabs checks", "eUtran Parameters Tab", "RBB type/ noOfTx/noOfRx\nIdentify  ISDLONLY carrier", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
+        (59, "CIQ tabs checks", "eUtran Parameters Tab", "cellId ENM vs CIQ \nIdentify cellid change SOW", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (60, "CIQ tabs checks", "eUtran Parameters Tab", "EutranCellFDDId/beamDirection should match with RFDS - EutranCell", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
+        (61, "CIQ tabs checks", "eUtran Parameters Tab", "electricalAntennaTilt should be integer value not character - Tilt", "Radio", lambda: _agg(results.get("params_4g", []))),
+        (62, "CIQ tabs checks", "eUtran Parameters Tab", "configuredOutputPower depends on RRU type (Ericsson 4490, 4890, or 4472 radios (e.g., NSB or Allagi projects, New Carrier Adds, Radio Swaps) will be Configured with maximum allowed power of 160W.) - configuredOutputPower", "Radio", None),
+        (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx / RBB Type Need to be checked with - Single / Double RILink - RRU type & RBB type", "Radio", lambda: _agg(results.get("params_4g", []))),
+        (64, "CIQ tabs checks", "eUtran Parameters Tab", "1)Compare Sectorid With Carrier Progression - sectorId / Carrier", "Radio", lambda: _agg(results.get("carrier_progression", []))),
+        (65, "CIQ tabs checks", "eUtran Parameters Tab", "PhysicalLayerCellIdGroup and physicalLayerSubCellId should be unique - PCI", "Radio", lambda: _agg(results.get("pci_4g", []) + results.get("pci_5g", []))),
+        (66, "CIQ tabs checks", "eUtran Parameters Tab", "Pre-existing node cellId must be same as ENM & N2E/NSB site CellId should be match with RFDS - Cellid", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (67, "CIQ tabs checks", "eUtran Parameters Tab", "Riport should be unique", "Radio", lambda: _agg(results.get("xmu_port_overlap", []))),
+        (68, "CIQ tabs checks", "eUtran Parameters Tab", "tmaType / tmaConfiguration", "Radio", None),
+        (69, "CIQ tabs checks", "eUtran Parameters Tab", "antenna model", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
+        (70, "CIQ tabs checks", "eUtran Parameters Tab", " XMU Validation - Need to check with RFDS - XMU", "Radio", lambda: _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages)),
+        (71, "CIQ tabs checks", "eUtran Parameters Tab", "ENM Validation - Need to check with site locator or ENM sheet (B2E) - ENM", "Radio", None),
+
+        (72, "CIQ tabs checks", "Losses and delay", "Check for Losses delay matches to FDD and TxRx", "Radio", lambda: _agg(results.get("losses_vs_antenna", []))),
+        (73, "CIQ tabs checks", "Antenna Information", "AntennaUnit/AntennaSubunit should unique for the band wise", "Radio", lambda: _agg(results.get("antenna", []))),
+        (74, "CIQ tabs checks", "Sector Movement / Deletion sheet", "All source cells cellid/SSB/ BW matching with ENM and all target cells with eUtan tab", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+
+        # Rows 75-76 are new in the updated template (they pushed the old
+        # "Pre checks" block from 75-79 down to 77-81). Both are EDP/ENM IP
+        # comparisons this project has no automated check for, so they're
+        # manual rather than silently reusing an unrelated check's result.
+        (75, "IP Validation Pre Vs EDP", None, "Please verify the NodeB bearer IP, VLAN ID, and router default IP with EDP. If there is any mismatch, need to flag.(for board swap node)", "Radio",
+         lambda: _worst_status([
+             # Same Pre-vs-EDP comparison rows 21-23 already perform, rolled
+             # up into one verdict for the board-swap row. Not a new check:
+             # the bearer VLAN / IPv6 / default-router fields are compared
+             # Pre(kget) vs the site's own EDP row, IPv6 normalised before
+             # comparing.
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True),
+         ])),
+        (76, "Rehoming sites ( IP Verification )", None, "For Daffi node rehoming, we need to check the existing IP/VLAN details of all nodes. If there is any mismatch between EDP and ENM, need to flag", "Radio",
+         lambda: _worst_status([
+             # Rehoming verifies the EXISTING IP/VLAN of every node, so this
+             # rolls up all six bearer+OAM fields (rows 21-26) rather than
+             # the bearer-only three used by the board-swap row above.
+             # Same underlying Pre(kget)-vs-EDP comparison; no new logic.
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_ip", "IPV6_ENODEB_OAM_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", is_ipv6=True),
+         ])),
+
+        (78, "Pre checks", "ENM Pre-checks", "Radio Ports", "Radio", lambda: _pre_detected_status(node_logs_text, "ports")),
+        (79, "Pre checks", "ENM Pre-checks", "RfBranch", "Radio", lambda: _pre_detected_status(node_logs_text, "rfbranch")),
+        (80, "Pre checks", "ENM Pre-checks", "Sharing Radio", "Radio", lambda: _pre_detected_status(node_logs_text, "sharing")),
+        (81, "Pre checks", "ENM Pre-checks", "SSNALIST", "Radio", None),
+    ]
+
+    out = []
+    for row, cat, sub, item, tag, check in rows:
+        if check is None:
+            status, detail = "manual", "No automated check exists for this item."
         else:
-            detail = r.get("detail", "")
-
-        cells = ""
-        if cat_span[idx] > 0:
-            cells += f'<td rowspan="{cat_span[idx]}" style="font-weight:700;vertical-align:top;background:#f8fafc;">{esc(r["cat"])}</td>'
-        if sub_span[idx] > 0:
-            sub_text = esc(r.get("sub")) if r.get("sub") else "\u2014"
-            cells += f'<td rowspan="{sub_span[idx]}" style="vertical-align:top;color:#475569;">{sub_text}</td>'
-        cells += (f'<td style="color:{color};font-weight:600;">{esc(r["item"])}</td>'
-                  f'<td style="color:{color};">{esc(detail)}</td>'
-                  f'<td style="width:96px;">{_chip(status)}</td>')
-        body.append(f'<tr style="background:{bg};">{cells}</tr>')
-
-    return (f'<div class="qkx-table-wrap qkx-grid-wrap"><table class="qkx-table qkx-grid">'
-            f'<thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>')
-
-
-def render_rrnrbl_checklist(rows):
-    if not rows:
-        st.markdown('<div class="qkx-empty">Run validation to populate the checklist.</div>', unsafe_allow_html=True)
-        return
-
-    counts = {}
-    for r in rows:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-    order = ["mismatch", "manual", "match", "info", "unknown", "na"]
-    pills = "".join(
-        f'<span class="qkx-count-pill"><b style="color:{STATUS_COLORS.get(k, DEFAULT_COLOR)[0]}">{counts[k]}</b> '
-        f'{esc(STATUS_LABEL.get(k, k))}</span>'
-        for k in sorted(counts, key=lambda x: (order.index(x) if x in order else 99, x))
-    )
-    st.markdown(f'<div style="margin:2px 0 10px 0;">{pills}</div>', unsafe_allow_html=True)
-    st.caption("Auto-checked below \u2014 untick or edit any remarks that need a manual call, then download.")
-
-    # Indication icon is separate from the actual tick box now (column order:
-    # Indication, Check, Tick, Scope, Remarks) — previously the emoji was
-    # baked into the checkbox's own label, which is what read as messy/
-    # unclear and put the indication in the wrong position.
-    STATUS_TICK = {"match": ("\u2713", "#059669"), "mismatch": ("\u2717", "#dc2626"),
-                   "manual": ("\u270e", "#b45309"), "unknown": ("\u2013", "#94a3b8"),
-                   "info": ("i", "#2563eb"), "na": ("\u2013", "#94a3b8")}
-    STATUS_BG = {"match": "#eafaf1", "mismatch": "#fdecea", "manual": "#fff8e5",
-                 "unknown": "#f1f3f6", "info": "#eaf2fb", "na": "#f1f3f6"}
-    COLS = [0.06, 0.36, 0.06, 0.08, 0.44]
-
-    st.markdown("""
-    <style>
-    .qkx-chk-wrap { max-width: 1180px; }
-    .qkx-chk-wrap [data-testid="stVerticalBlock"] { gap: 0rem !important; }
-    .qkx-chk-wrap [data-testid="stElementContainer"] { margin: 0 !important; }
-    .qkx-chk-wrap [data-testid="column"] { padding: 0 !important; }
-    .qkx-chk-wrap [data-testid="stHorizontalBlock"] { gap: 0rem !important; }
-    .qkx-chk-hdr { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.85em;
-                   padding:5px 8px; border:1px solid #14283f; text-align:center; line-height:1.4; }
-    .qkx-chk-hdr.left { text-align:left; }
-    .qkx-chk-cat2 { background:#1e3a5f; color:#fff; font-weight:700; font-size:0.92em;
-                    padding:5px 10px; border:1px solid #14283f; line-height:1.5; }
-    .qkx-chk-cell { padding:2px 8px; border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
-                    height:26px; min-height:26px; display:flex; align-items:center; font-size:0.9em; }
-    .qkx-chk-wrap [data-testid="stCheckbox"], .qkx-chk-wrap [data-testid="stTextInput"] {
-        border-left:1px solid #dbe2ea; border-bottom:1px solid #dbe2ea;
-        height:26px; min-height:26px; display:flex; align-items:center; background:#fff;
-    }
-    .qkx-chk-wrap [data-testid="stCheckbox"] { justify-content:center; }
-    .qkx-chk-wrap [data-testid="stCheckbox"] label { padding:0 !important; margin:0 !important;
-                    transform:scale(1.25); }
-    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"] {
-                    width:20px !important; height:20px !important; border-radius:3px !important; }
-    .qkx-chk-wrap [data-testid="stCheckbox"] div[role="checkbox"][aria-checked="true"] {
-                    background:#059669 !important; border-color:#059669 !important; }
-    .qkx-chk-wrap [data-testid="stTextInput"] > div { border:none !important; background:transparent !important;
-                    height:26px !important; min-height:26px !important; }
-    .qkx-chk-wrap [data-testid="stTextInput"] input { height:24px !important; min-height:24px !important;
-                    padding:0 6px !important; font-size:0.9em !important; border-radius:0 !important;
-                    background:transparent !important; box-shadow:none !important; }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown('<div class="qkx-chk-wrap">', unsafe_allow_html=True)
-    hc = st.columns(COLS, gap="small")
-    for c, label, cls in zip(hc, ["Indication", "Check", "Tick", "Scope", "Remarks"],
-                              ["", "left", "", "left", "left"]):
-        c.markdown(f'<div class="qkx-chk-hdr {cls}">{label}</div>', unsafe_allow_html=True)
-
-    last_cat = last_sub = object()
-    for r in rows:
-        if r["cat"] != last_cat or r.get("sub") != last_sub:
-            hdr = esc(r["cat"]) + (f" \u2014 {esc(r['sub'])}" if r.get("sub") else "")
-            st.markdown(f'<div class="qkx-chk-cat2">{hdr}</div>', unsafe_allow_html=True)
-            last_cat, last_sub = r["cat"], r.get("sub")
-
-        key = f'rrnrbl_{r["row"]}'
-        default_checked = r["status"] == "match"
-        default_comment = "" if r["status"] == "manual" else (r.get("detail") or "")
-        tick, color = STATUS_TICK.get(r["status"], ("\u2013", "#94a3b8"))
-        bg = STATUS_BG.get(r["status"], "#f1f3f6")
-
-        c0, c1, c2, c3, c4 = st.columns(COLS, gap="small")
-        with c0:
-            st.markdown(f'<div class="qkx-chk-cell" style="justify-content:center;border-left:none;'
-                        f'background:{bg};color:{color};font-weight:800;">{tick}</div>', unsafe_allow_html=True)
-        with c1:
-            st.markdown(f'<div class="qkx-chk-cell" style="background:{bg};">{esc(r["item"])}</div>', unsafe_allow_html=True)
-        with c2:
-            st.checkbox("", value=default_checked, key=f"{key}_checked", label_visibility="collapsed")
-        with c3:
-            st.markdown(f'<div class="qkx-chk-cell" style="background:{bg};color:#475569;">{esc(r.get("tag",""))}</div>', unsafe_allow_html=True)
-        with c4:
-            st.text_input("Remarks", value=default_comment, key=f"{key}_comment",
-                          label_visibility="collapsed", placeholder="Remarks\u2026")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-def collect_manual_overrides(checklist):
-    overrides = {}
-    for row in checklist:
-        r = row["row"]
-        default_checked = row["status"] == "match"
-        overrides[r] = {
-            "checked": st.session_state.get(f"rrnrbl_{r}_checked", default_checked),
-            "comment": st.session_state.get(f"rrnrbl_{r}_comment", ""),
-        }
-    return overrides
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Session state / one-shot validation run
-# ══════════════════════════════════════════════════════════════════════
-st.session_state.setdefault("has_run", False)
-
-
-def strip_ansi(text):
-    """Removes terminal control sequences from a raw log capture. Some Pre
-    kget-all logs are captured via a terminal client (e.g. PuTTY) with
-    color/bold formatting enabled, which wraps the node-id prompt in ANSI
-    codes: 'FCL04120> lt all' becomes '\\x1b[1mFCL04120\\x1b[0m> lt all'.
-    Every regex in this project that matches a prompt line expects it to
-    start with the bare node id, so without this the ANSI codes make
-    node_id_from_log()/split_commands() fail silently — the whole log then
-    parses to nothing, and node identification falls back to the uploaded
-    FILENAME (confirmed: a real PuTTY-captured log showed Node ID as
-    'FCL04120.txt', SW Version, BB Type, and all cell tables empty).
-    Applied once here, at the single point every uploaded log's raw bytes
-    are first decoded to text, so every downstream function (which all
-    receive already-decoded text) is unaffected regardless of capture tool."""
-    text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)  # CSI: colors, bold, cursor movement
-    text = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)', '', text)  # OSC: window title/icon name
-    text = re.sub(r'\x1b.', '', text)  # any remaining lone ESC + one char
-    return text
-
-
-def _tmp_path(data, suffix):
-    tf = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-    tf.write(data)
-    tf.close()
-    return tf.name
-
-
-def run_full_validation(ciq_bytes, edp_bytes, edp_ext, rfds_bytes, node_logs_text):
-    ciq_path = _tmp_path(ciq_bytes, ".xlsx")
-    edp_path = _tmp_path(edp_bytes, edp_ext or ".xls")
-    rfds_path = _tmp_path(rfds_bytes, ".pdf") if rfds_bytes else None
-
-    with tempfile.TemporaryDirectory() as tmp:
-        out_pdf = os.path.join(tmp, "validation_report.pdf")
-        (pdf_path, results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages,
-         pre_text, post_text, scope_lines, sow) = rv.run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf)
-        with open(pdf_path, "rb") as f:
-            pdf_bytes = f.read()
-
-    checklist = rc.build_checklist(results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages, node_logs_text)
-    site_id_fa = " / ".join(v for v in (site_details.get("site_id"), site_details.get("fa_code")) if v)
-
-    # Computed once here rather than inline in each tab: those call sites ran on
-    # EVERY Streamlit rerun (any widget interaction anywhere in the app reruns
-    # the whole script), so a checkbox click in an unrelated tab was silently
-    # re-parsing every uploaded Pre log again. Tabs now just read these back.
-    node_role_list = rc.build_primary_secondary_node_list(ciq_wb)
-    edp_field_rows = rc.build_edp_field_table(edp_rows, node_role_list)
-    pre_edp_pivot_rows = rc.build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows) if node_logs_text else []
-    amos_summary_rows, amos_lte_rows, amos_nr_rows = av.build_amos_tables(node_logs_text) if node_logs_text else ([], [], [])
-
-    return dict(
-        results=results, site_details=site_details, ciq_wb=ciq_wb, edp_rows=edp_rows,
-        checked_nodes=checked_nodes, rfds_pages=rfds_pages, rfds_bytes=rfds_bytes,
-        pre_text=pre_text, post_text=post_text,
-        scope_lines=scope_lines, sow=sow, checklist=checklist, site_id_fa=site_id_fa,
-        pdf_bytes=pdf_bytes, node_logs_text=node_logs_text,
-        node_role_list=node_role_list, edp_field_rows=edp_field_rows,
-        pre_edp_pivot_rows=pre_edp_pivot_rows,
-        amos_summary_rows=amos_summary_rows, amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════
-# INPUT PAGE — shown only until "Run Validation" succeeds. Everything the
-# tool needs is uploaded here once; no tab has its own uploader anymore.
-# ══════════════════════════════════════════════════════════════════════
-if not st.session_state["has_run"]:
-    st.markdown("#### Load site data")
-    c1, c2 = st.columns(2)
-    with c1:
-        ciq_up = st.file_uploader("CIQ workbook — required", type=["xlsx"], key="in_ciq")
-        edp_up = st.file_uploader("EDP workbook — required (.xls or .xlsx)", type=["xls", "xlsx"], key="in_edp")
-    with c2:
-        rfds_up = st.file_uploader("RFDS PDF — optional", type=["pdf"], key="in_rfds")
-        log_ups = st.file_uploader("Pre kget-all / hget logs — optional, one per node", type=["txt", "log"],
-                                    accept_multiple_files=True, key="in_logs")
-
-    ready = bool(ciq_up and edp_up)
-    if st.button("▶ Run Validation", type="primary", disabled=not ready, use_container_width=True):
-        node_logs_text = {}
-        for u in (log_ups or []):
-            text = strip_ansi(u.getvalue().decode("utf-8", errors="ignore"))
-            nid = pe.node_id_from_log(text) or u.name
-            node_logs_text[nid] = text
-        with st.spinner("Running full validation…"):
             try:
-                state = run_full_validation(
-                    ciq_up.getvalue(), edp_up.getvalue(), os.path.splitext(edp_up.name)[1],
-                    rfds_up.getvalue() if rfds_up else None, node_logs_text,
-                )
-            except Exception as e:
-                st.error(f"Validation failed: {e}")
-                st.stop()
-        st.session_state["state"] = state
-        st.session_state["_memo"] = {}   # new run ⇒ drop all derived caches
-        st.session_state["has_run"] = True
-        st.rerun()
-    elif not ready:
-        st.caption("CIQ and EDP are both required to run validation. RFDS PDF and Pre logs are optional but enable more checks.")
-    st.stop()
+                status, detail = check()
+            except Exception as e:  # never let one bad check take down the whole checklist
+                status, detail = "unknown", f"Check raised an error: {e}"
+        out.append({"row": row, "cat": cat, "sub": sub, "item": item, "tag": tag,
+                    "status": status, "detail": detail})
+    return out
+
 
 # ══════════════════════════════════════════════════════════════════════
-# RESULTS — one validation run, five tabs, all reading the same state.
+# Fill the real template.
 # ══════════════════════════════════════════════════════════════════════
-state = st.session_state["state"]
+
+_FPB_PART = "xl/featurePropertyBag/featurePropertyBag.xml"
+_FPB_CONTENT_TYPE = "application/vnd.ms-excel.featurepropertybag+xml"
+_FPB_REL_TYPE = "http://schemas.microsoft.com/office/2022/11/relationships/FeaturePropertyBag"
 
 
-# ── Consolidated mismatch views ────────────────────────────────────────
-# The consolidated report shows only what needs ACTION: mismatches, broken
-# out to the individual PARAMETER that disagrees, rather than dumping every
-# checked row (passes included) as a wide table.
-_MM_NA = {"", "NA", "NOT AVAILABLE", "NOT FOUND", "NOT CHECKED", "-", "\u2014", "NONE"}
+def _restore_native_checkboxes(filled_bytes, template_path):
+    """openpyxl's save() silently drops xl/featurePropertyBag/featurePropertyBag.xml
+    - the part that marks C-column cells as Excel's native interactive
+    Checkbox control (confirmed by a real load->set value->save round-trip:
+    the part vanishes even though the underlying boolean cell value is
+    preserved). Without it, Excel still shows the right TRUE/FALSE value but
+    the checkbox widget itself is gone. This copies that part (and its two
+    small registration entries) from the original template's zip into the
+    filled workbook's zip after openpyxl is done, so the checkboxes stay
+    exactly as clickable as they were in the template you uploaded."""
+    import zipfile
 
-# Internal field name -> the label an engineer reads on the report.
-_MM_PARAM_LABEL = {
-    "earfcndl": "EARFCNDL", "earfcnul": "EARFCNUL",
-    "arfcnDL": "ARFCNDL", "arfcnUL": "ARFCNUL",
-    "dlChannelBandwidth": "BW DL", "ulChannelBandwidth": "BW UL",
-    "bSChannelBwDL": "BW DL", "bSChannelBwUL": "BW UL",
-    "ssbfrequency": "SSB Frequency",
-    "sec_id": "Sector Carrier", "power": "Power",
-}
+    with zipfile.ZipFile(template_path) as tz:
+        if _FPB_PART not in tz.namelist():
+            return filled_bytes  # template has no native checkboxes to restore
+        fpb_xml = tz.read(_FPB_PART)
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(filled_bytes)) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                text = data.decode("utf-8")
+                if _FPB_PART.split("xl/")[1] not in text and "featurePropertyBag" not in text:
+                    text = text.replace(
+                        "</Types>",
+                        f'<Override PartName="/{_FPB_PART}" ContentType="{_FPB_CONTENT_TYPE}"/></Types>',
+                    )
+                data = text.encode("utf-8")
+            elif item.filename == "xl/_rels/workbook.xml.rels":
+                text = data.decode("utf-8")
+                if _FPB_REL_TYPE not in text:
+                    existing_ids = [int(rid) for rid in re.findall(r'Id="rId(\d+)"', text)]
+                    new_id = f"rId{max(existing_ids, default=0) + 1}"
+                    text = text.replace(
+                        "</Relationships>",
+                        f'<Relationship Id="{new_id}" Type="{_FPB_REL_TYPE}" '
+                        f'Target="featurePropertyBag/featurePropertyBag.xml"/></Relationships>',
+                    )
+                data = text.encode("utf-8")
+            dst.writestr(item, data)
+        if _FPB_PART not in src.namelist():
+            dst.writestr(_FPB_PART, fpb_xml)
+    out.seek(0)
+    return out.read()
 
 
-# CIQ-side validation rules, and the label each one reports under.
-_MM_CIQ_CHECKS = [
-    ("pci_4g", "PCI clash (LTE)"),
-    ("pci_5g", "PCI clash (5G)"),
-    ("antenna", "Antenna uniqueness"),
-    ("port_uniqueness", "Port clash"),
-    ("xmu_port_overlap", "XMU port overlap"),
-    ("sef_fru", "SEF / FRU"),
-    ("radio_sharing", "Sharing radio"),
-    ("radio_port_conflict", "Radio port conflict"),
-    ("nbiot", "NBIoT"),
-    ("sector_id_4890", "SectorID (4890)"),
-    ("rfbranch_per_aug", "RfBranch per AUG"),
-    ("losses_vs_antenna", "Losses vs Antenna Info"),
-    ("tilt", "Tilt not an integer"),
-    ("mmwave_rach", "mmWave RACH"),
-    ("carrier_progression", "Carrier progression"),
-    ("ptp_matrix", "PTP configuration"),
+def fill_checklist_xlsx(checklist, site_id_fa, engineer_name=None, sow=None, date_str=None,
+                         template_path=TEMPLATE_PATH, manual_overrides=None):
+    """manual_overrides: optional {row_number: {'done': bool, 'comment': str}}
+    for rows whose status is 'manual' - lets a person's own checkbox/comment
+    (entered in the Streamlit UI) override the generic 'no automated check'
+    placeholder text before this gets written out."""
+    manual_overrides = manual_overrides or {}
+    wb = openpyxl.load_workbook(template_path)
+    ws = wb["Legacy - N2e Engineer Checklist"]
+
+    ws["B8"] = site_id_fa or ""
+    ws["B9"] = date_str or datetime.date.today().strftime("%m/%d/%Y")
+    if engineer_name:
+        ws["B7"] = engineer_name
+    if sow:
+        ws["B10"] = sow
+
+    for entry in checklist:
+        r = entry["row"]
+        override = manual_overrides.get(r)
+        if entry["status"] == "manual" and override is not None:
+            ws[f"C{r}"] = bool(override.get("done"))
+            comment = (override.get("comment") or "").strip()
+            ws[f"E{r}"] = f"[MANUAL — user-confirmed] {comment}" if comment else "[MANUAL — marked done, no comment]" if override.get("done") else "[MANUAL] Not yet reviewed."
+            continue
+        ws[f"C{r}"] = (entry["status"] == "match")
+        label, _ = STATUS_META.get(entry["status"], ("", False))
+        comment = entry["detail"] or ""
+        ws[f"E{r}"] = f"[{label}] {comment}" if label else comment
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return _restore_native_checkboxes(buf.read(), template_path)
+
+
+EDP_FIELD_TABLE_COLUMNS = [
+    "SITE_NAME", "CABINET", "BBU_TYPE", "NODE_MODEL", "SIAD_PORT_SIZE_BBU",
+    "SIAD_PORT_FACING_BBU", "BEARER_ENODEB_SB_VLAN_ID", "IPV6_SIAD_BEARER_IP_DEF_ROUTER",
+    "IPV6_ENODEB_BEARER_IP", "OAM_ENODEB_SIAD_OAM_VLAN", "IPV6_SIAD_OAM_IP_DEF_ROUTER",
+    "IPV6_ENODEB_OAM_IP",
 ]
 
 
-def _mm_is_na(v):
-    return str(v).strip().upper() in _MM_NA
+def build_primary_secondary_node_list(ciq_wb):
+    """One {node, role} entry per PHYSICAL node declared in Mixed Mode
+    Info — both the Primary (whichever of eNodeB/gNodeB Name matches 'Node
+    to be built as') and the Secondary (the other one), when both exist.
 
-
-def _mm_row(cell, source, param, left_label, left, right):
-    return {"cell": cell, "source": source, "param": param,
-            "comments": f"{left_label} - {left} | {'EDP' if source.endswith('EDP') else 'CIQ'} - {right}"}
-
-
-def build_consolidated_mismatches(grouped_rows, results, pre_edp_rows=None):
-    """Flat, parameter-level mismatch list for the consolidated report.
-
-    Three comparison families, all reduced to the same four columns
-    (Cell name / Mismatch on / Parameter / Comments):
-
-      'RFDS vs CIQ'  - RRU, Antenna, Cell ID, cell missing from RFDS, and
-                       cells missing from the CIQ's Antenna Information /
-                       Losses and Delays sheets.
-      'KGET vs CIQ'  - Sector Carrier, Cell ID, TAC, EARFCNDL/UL,
-                       ARFCNDL/UL, BW, Power, TX, RX, RRU and RILink
-                       (single/double).
-      'KGET vs EDP'  - Bearer VLAN / IPv6 / Default Router and the OAM
-                       equivalents.
-
-    A field whose Pre/KGET side is NA or NOT AVAILABLE is not a mismatch -
-    there is nothing to compare it against - which mirrors how the
-    underlying checks decide their own status."""
-    rows = []
-
-    # ── RFDS vs CIQ ────────────────────────────────────────────────────
-    for r in grouped_rows or []:
-        # Prefer whichever side actually carries the cell identifier: on a
-        # "not found" row one side holds the literal 'NOT FOUND', and that
-        # must not become the Cell name.
-        cell = next((v for v in (r.get("cell_ciq"), r.get("cell_rfds"))
-                     if v and not _mm_is_na(v)), "\u2014")
-        if r.get("cell_status") == "MISMATCH":
-            rows.append(_mm_row(cell, "RFDS vs CIQ", "Cell Not Found", "RFDS",
-                                r.get("cell_rfds", "\u2014"), r.get("cell_ciq", "\u2014")))
-        if r.get("rru_status") == "MISMATCH":
-            rows.append(_mm_row(cell, "RFDS vs CIQ", "RRU", "RFDS",
-                                r.get("rru_rfds", "\u2014"), r.get("rru_ciq", "\u2014")))
-        if r.get("ant_status") == "MISMATCH":
-            rows.append(_mm_row(cell, "RFDS vs CIQ", "Antenna", "RFDS",
-                                r.get("ant_rfds", "\u2014"), r.get("ant_ciq", "\u2014")))
-        if r.get("cellid_status") == "MISMATCH":
-            rows.append(_mm_row(cell, "RFDS vs CIQ", "CellID", "RFDS",
-                                r.get("cellid_rfds", "\u2014"), r.get("cellid_ciq", "\u2014")))
-        # Presence on the two CIQ sheets — a cell the RFDS designs but the
-        # CIQ never lists is a real gap, reported per sheet.
-        if r.get("ant_info_status") == "MISMATCH":
-            rows.append({"cell": cell, "source": "RFDS vs CIQ", "param": "Missing in Antenna Info",
-                         "comments": "Cell not listed on the CIQ 'Antenna Information' sheet"})
-        if r.get("losses_status") == "MISMATCH":
-            rows.append({"cell": cell, "source": "RFDS vs CIQ", "param": "Missing in Losses and Delays",
-                         "comments": "Cell not listed on the CIQ 'Losses and Delays' sheet"})
-
-    # ── KGET vs CIQ ────────────────────────────────────────────────────
-    for key in ("params_4g", "params_5g", "sector_swap"):
-        for r in results.get(key, []):
-            if str(r.get("status", "")).upper() != "MISMATCH":
-                continue
-            cell = r.get("cell") or "\u2014"
-            for k, v in r.items():
-                if k in ("rule", "node", "cell", "status", "note") or not isinstance(v, str) or " | " not in v:
-                    continue
-                pre, _, ciq = v.partition(" | ")
-                pre, ciq = pre.strip(), ciq.strip()
-                if not _mm_is_na(pre) and pre != ciq:
-                    rows.append(_mm_row(cell, "KGET vs CIQ", _MM_PARAM_LABEL.get(k, k), "KGET", pre, ciq))
-            # sector_swap: pre_X / ciq_X pairs. TX/RX is stored as one
-            # 'AxB' string but reads better split into its own TX and RX
-            # rows; RILink (Single/Double) rides in the same field on
-            # standalone-5G rows, where it is a link-type not an AxB count.
-            for k in list(r):
-                if not k.startswith("pre_"):
-                    continue
-                b = k[4:]
-                ciq_key = "ciq_" + b if "ciq_" + b in r else (b if b in r else None)
-                if not ciq_key:
-                    continue
-                pre, ciq = str(r[k]).strip(), str(r[ciq_key]).strip()
-                if _mm_is_na(pre) or pre == ciq:
-                    continue
-                if b == "txrx":
-                    pre_m = re.fullmatch(r"(\d+)x(\d+)", pre)
-                    ciq_m = re.fullmatch(r"(\d+)x(\d+)", ciq)
-                    if pre_m and ciq_m:
-                        for idx, lbl in ((1, "TX"), (2, "RX")):
-                            if pre_m.group(idx) != ciq_m.group(idx):
-                                rows.append(_mm_row(cell, "KGET vs CIQ", lbl, "KGET",
-                                                    pre_m.group(idx), ciq_m.group(idx)))
-                        continue
-                    if pre in ("Single", "Double") or "Single" in ciq or "Double" in ciq:
-                        rows.append(_mm_row(cell, "KGET vs CIQ", "Link", "KGET", pre, ciq))
-                        continue
-                rows.append(_mm_row(cell, "KGET vs CIQ", _MM_PARAM_LABEL.get(b, b), "KGET", pre, ciq))
-
-    for key, label in (("cell_id_vs_rfds", "CellID"), ("radio_type", "RRU")):
-        for r in results.get(key, []):
-            if str(r.get("status", "")).upper() != "MISMATCH":
-                continue
-            pre, ciq = str(r.get("pre", "")).strip(), str(r.get("ciq", "")).strip()
-            if not _mm_is_na(pre) and pre != ciq:
-                rows.append(_mm_row(r.get("cell") or "\u2014", "KGET vs CIQ", label, "KGET", pre, ciq))
-
-    # TAC: NR is per-cell (pre_nrtac/ciq_nrtac); LTE is one node-level row
-    # whose values live only in its note, so the note is carried as-is.
-    for r in results.get("nr_tac", []):
-        if str(r.get("status", "")).upper() != "MISMATCH":
-            continue
-        pre, ciq = str(r.get("pre_nrtac") or "").strip(), str(r.get("ciq_nrtac") or "").strip()
-        if not _mm_is_na(pre) and pre != ciq:
-            rows.append(_mm_row(r.get("cell") or "\u2014", "KGET vs CIQ", "TAC", "KGET", pre, ciq))
-    for r in results.get("tac", []):
-        if str(r.get("status", "")).upper() == "MISMATCH":
-            rows.append({"cell": r.get("node") or "\u2014", "source": "KGET vs CIQ",
-                         "param": "TAC", "comments": r.get("note", "")})
-
-    # ── CIQ checks (sanity / uniqueness rules on the CIQ itself) ───────
-    for key, label in _MM_CIQ_CHECKS:
-        for r in results.get(key, []):
-            if str(r.get("status", "")).upper() not in ("MISMATCH", "FAIL", "WARN"):
-                continue
-            cell = r.get("cell")
-            if not cell or _mm_is_na(cell):
-                cell = r.get("node") or "\u2014"
-            rows.append({"cell": cell, "source": "CIQ check", "param": label,
-                         "comments": r.get("note", "") or "\u2014"})
-
-    # ── KGET vs EDP ────────────────────────────────────────────────────
-    for r in pre_edp_rows or []:
-        if str(r.get("status", "")).lower() != "mismatch":
-            continue
-        rows.append({"cell": r.get("node") or "\u2014", "source": "KGET vs EDP",
-                     "param": r.get("field", "\u2014"),
-                     "comments": f"KGET - {r.get('pre_value', '\u2014')} | EDP - {r.get('edp_value', '\u2014')}"})
-
-    seen, unique = set(), []
-    for r in rows:
-        sig = (r["cell"], r["source"], r["param"], r["comments"])
-        if sig not in seen:
-            seen.add(sig)
-            unique.append(r)
-    unique.sort(key=lambda r: (r["source"], r["cell"], r["param"]))
-    return unique
-
-
-# ── Per-validation-run memo ────────────────────────────────────────────
-# Streamlit re-executes the WHOLE script on every widget interaction, and
-# st.tabs renders every tab's body regardless of which one is on screen.
-# So ticking one checkbox in the RRNRBL checklist re-ran all the derived
-# work for all five tabs before the next tick could register.
-# build_rfds_grouped_rows() was the worst of it: it calls
-# extract_rf_inventory_antennas(), whose genuine-PDF path runs pdfplumber
-# table extraction (~2.7s on a real RFDS), and it was being called TWICE
-# per rerun — once for the RFDS tab and again for the consolidated report
-# — so roughly 5s of pure recompute per keystroke/tick.
-# None of these inputs change between reruns; they only change when
-# 'Run Validation' produces a new state. Memoising against that run
-# (cache is reset in the run handler) makes the second and later reruns
-# effectively free.
-def _memo(key, fn, sig=()):
-    # One slot per key: a new sig replaces the old entry rather than adding
-    # to it, so the checklist workbook cache can't grow a copy per tick.
-    cache = st.session_state.setdefault("_memo", {})
-    hit = cache.get(key)
-    if hit is not None and hit[0] == sig:
-        return hit[1]
-    val = fn()
-    cache[key] = (sig, val)
-    return val
-results = state["results"]
-ciq_wb = state["ciq_wb"]
-site_details = state["site_details"]
-edp_rows = state["edp_rows"]
-checked_nodes = state["checked_nodes"]
-rfds_pages = state["rfds_pages"]
-node_logs_text = state["node_logs_text"]
-sow = state["sow"]
-
-@st.dialog("Revision History", width="large")
-def _show_revision_history_dialog(ciq_wb):
-    sheet_name, rows = cer.read_revision_history(ciq_wb)
-    if not rows:
-        st.caption("No Revision History sheet found in this CIQ.")
-        return
-    # The sheet stacks TWO mini-tables with different headers (Version/
-    # Description/Updated Date/Updated By, then Date/Confirmations
-    # Received) — a header row is any row whose first two cells are both
-    # non-numeric-looking text, same detection QUICKIX's own renderer uses
-    # rather than assuming a fixed row count for the first table.
-    def _looks_like_header(row):
-        a, b = str(row[0]).strip(), str(row[1]).strip()
-        return bool(a) and bool(b) and not any(ch.isdigit() for ch in a[:1])
-
-    blocks, current = [], None
-    for row in rows:
-        if _looks_like_header(row):
-            current = {"header": row, "rows": []}
-            blocks.append(current)
-        elif current is not None:
-            current["rows"].append(row)
+    This does NOT reuse checked_nodes (run_validation.py's own node list):
+    checked_nodes only ever holds the PRIMARY name ('Node to be built as'),
+    so every existing EDP check in this module (_edp_found_status etc.,
+    all called with checked_nodes) has only ever looked up the primary
+    node's own EDP row — a real gap confirmed on a real dual-tech site:
+    HXL04147 (primary) and HXIN010147 (secondary) are two separate EDP
+    rows under different SITE_NAME values, and HXIN010147's row was never
+    looked up anywhere. This function is additive: it does not change
+    checked_nodes or any existing check, it only supplies both node names
+    for the field-value display table below."""
+    out = []
+    for m in cer.mixed_mode_rows(ciq_wb):
+        build_as = _norm(m.get("Node to be built as")).upper()
+        e_name = _norm(m.get("eNodeB Name"))
+        g_name = _norm(m.get("gNodeB Name"))
+        bbu_mode = _norm(m.get("BBU Mode")).upper()
+        if e_name and e_name.upper() == build_as:
+            primary, secondary = e_name, g_name
+        elif g_name and g_name.upper() == build_as:
+            primary, secondary = g_name, e_name
         else:
-            current = {"header": ["", "", "", "", ""], "rows": [row]}
-            blocks.append(current)
-
-    for block in blocks:
-        # Keep every header column that has a label OR that any data row in
-        # this block actually uses (drops the sheet's trailing blank 5th
-        # column when nothing in the block ever fills it, without hiding a
-        # legitimately blank-labelled column that does have data).
-        n = len(block["header"])
-        used = [bool(str(block["header"][i]).strip()) or any(str(r[i]).strip() for r in block["rows"] if i < len(r))
-                for i in range(n)]
-        columns = [(i, str(block["header"][i]) or f"Col {i+1}") for i in range(n) if used[i]]
-        if not columns:
-            continue
-        st.markdown(render_table(
-            [dict(zip(range(n), r)) for r in block["rows"]],
-            columns=columns, status_key=None,
-        ), unsafe_allow_html=True)
+            primary, secondary = (e_name or g_name), (g_name if e_name else "")
+        if primary:
+            out.append({"node": primary, "role": "Primary"})
+        if secondary and bbu_mode != "SMBB":
+            out.append({"node": secondary, "role": "Secondary"})
+    return out
 
 
-top_l, top_m, top_r = st.columns([1, 1, 4])
-with top_l:
-    if st.button("🔄 New Validation Run", use_container_width=True):
-        st.session_state.clear()
-        st.rerun()
-with top_m:
-    if st.button("📜 Revision History", use_container_width=True):
-        _show_revision_history_dialog(ciq_wb)
-with top_r:
-    bits = [f"Site ID: `{site_details.get('site_id') or '—'}`", f"FA Code: `{site_details.get('fa_code') or '—'}`",
-            f"USID: `{site_details.get('usid') or '—'}`", f"Nodes: `{', '.join(checked_nodes) or '—'}`"]
-    st.caption(" &nbsp;·&nbsp; ".join(bits), unsafe_allow_html=True)
+def build_edp_field_table(edp_rows, node_role_list):
+    """One row per (node, role) in node_role_list, with the raw EDP field
+    values requested for a side-by-side view: SITE_NAME/CABINET/BBU_TYPE/
+    NODE_MODEL/SIAD_PORT_SIZE_BBU/SIAD_PORT_FACING_BBU/
+    BEARER_ENODEB_SB_VLAN_ID/IPV6_SIAD_BEARER_IP_DEF_ROUTER/
+    IPV6_ENODEB_BEARER_IP/OAM_ENODEB_SIAD_OAM_VLAN/
+    IPV6_SIAD_OAM_IP_DEF_ROUTER/IPV6_ENODEB_OAM_IP.
 
-tab_rfds, tab_audit, tab_edp, tab_consolidated = st.tabs(
-    ["RFDS Validation", "Audit", "EDP Validator", "Consolidated Report"]
-)
+    Uses the same per-node EDP row lookup (cer.edp_rows_for_site) every
+    other EDP check in this module uses, via node_role_list from
+    build_primary_secondary_node_list() so both Primary and Secondary
+    physical nodes get their OWN row looked up (see that function's
+    docstring for why this differs from every existing check's node list).
+    This is a raw-value DISPLAY table, not a new check."""
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        rec = rows[0] if rows else None
+        row = {"node": nid, "role": entry["role"]}
+        for col in EDP_FIELD_TABLE_COLUMNS:
+            row[col] = _norm(rec.get(col)) if rec else "NOT FOUND"
+        out.append(row)
+    return out
 
-# ══════════════════════════════════════════════════════════════════════
-# TAB 1 — RFDS Validation: every RFDS-vs-CIQ(-vs-Pre) comparison the run
-# already computed (Primary/Secondary, Board type, XMU, Cells, Cell ID,
-# Radio type) — all colour-coded, bordered tables.
-# ══════════════════════════════════════════════════════════════════════
-with tab_rfds:
-    st.subheader("RFDS Validation")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.markdown(f'<div class="qkx-stat"><b>FA Code</b><br>{esc(site_details.get("fa_code") or "—")}</div>', unsafe_allow_html=True)
-    m2.markdown(f'<div class="qkx-stat"><b>USID</b><br>{esc(site_details.get("usid") or "—")}</div>', unsafe_allow_html=True)
-    m3.markdown(f'<div class="qkx-stat"><b>Site ID</b><br>{esc(site_details.get("site_id") or "—")}</div>', unsafe_allow_html=True)
-    m4.markdown(f'<div class="qkx-stat"><b>Atoll Name</b><br>{esc(site_details.get("atoll_site_name") or "—")}</div>', unsafe_allow_html=True)
 
-    if rfds_pages is None:
-        st.info("No RFDS PDF was loaded for this run — RFDS-dependent comparisons below are skipped.")
+def build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows):
+    """Pre (from Pre kget-all logs, pre_extract.extract_bearer_oam_ipv6())
+    vs EDP (the same field, read directly off the site's own EDP row) for
+    the 6 bearer/OAM fields — one row per node in node_role_list that has
+    a Pre log available. A node with no uploaded Pre log is skipped (there
+    is nothing to compare, not a MISMATCH)."""
+    import ipaddress
+    import pre_extract as pe
 
-    _rfds_inventory_text = None
-    if rfds_pages is not None:
-        _t = rf.find_pages_by_heading(rfds_pages, "Non RF Inventory Details (Final)")
-        _rfds_inventory_text = re.sub(r"\s+", "", _t) if _t else None
+    def _ipv6_equal(a, b):
+        """Two IPv6 address strings are the SAME address even when written
+        differently — confirmed real case: Pre reports '...6:954:2' and EDP
+        reports '...6:0954:2' for the identical address (a zero-padded
+        hextet). A plain string compare after stripping '/64' called that a
+        mismatch; this parses both through ipaddress.IPv6Address so
+        zero-padding, letter case, and '::' compression differences are all
+        normalised before comparing. Falls back to the stripped-string
+        compare if either side fails to parse (e.g. a genuinely malformed
+        value), so a parse failure surfaces as its own mismatch rather than
+        silently passing."""
+        try:
+            return ipaddress.IPv6Address(a.split("/")[0]) == ipaddress.IPv6Address(b.split("/")[0])
+        except ValueError:
+            return a.split("/")[0] == b.split("/")[0]
 
-    def _board_rfds_display(r):
-        ciq_du = r.get("ciq_du_type") or ""
-        if r.get("rfds_agrees") is True:
-            return ciq_du or "FOUND"
-        if _rfds_inventory_text:
-            candidates = sorted(set(re.findall(r"\d{4,5}", _rfds_inventory_text)) - {ciq_du})
-            return "/".join(candidates[:3]) if candidates else "NOT FOUND"
-        return "NOT CHECKED"
-
-    def _ciq_xmu_count(node_id, ciq_wb):
-        mm = next((m for m in cer.mixed_mode_rows(ciq_wb)
-                   if str(m.get("Node to be built as") or m.get("eNodeB Name") or "").strip() == node_id), None)
-        if mm is None:
-            return None
-        e_name, g_name = mm.get("eNodeB Name"), mm.get("gNodeB Name")
-        row = None
-        if e_name and "eNB Info" in ciq_wb.sheetnames:
-            row = next((r for r in cer.sheet_rows_as_dicts(ciq_wb["eNB Info"])
-                        if str(r.get("eNodeB Name", "")).strip().upper() == str(e_name).strip().upper()), None)
-        if row is None and g_name and "gNB Info" in ciq_wb.sheetnames:
-            row = next((r for r in cer.sheet_rows_as_dicts(ciq_wb["gNB Info"])
-                        if str(r.get("gNodeB Name", "")).strip().upper() == str(g_name).strip().upper()), None)
-        if row is None:
-            return None
-        return sum(1 for k in ("1st XMU", "2nd XMU", "3rd XMU") if str(row.get(k, "")).strip().upper() == "YES")
-
-    with st.container(border=True):
-        section_title("Primary & Secondary Node")
-        rows = results.get("primary_secondary", [])
-        display_rows = [
-            dict(r, comments="Match" if r.get("status") != "MISMATCH" else
-                 f"Mismatch found on {wt.primary_secondary_mismatched_role(r)} id on {r.get('node')}.")
-            for r in rows
-        ]
-        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq", "CIQ"),
-                                                                        ("edp", "EDP"), ("rfds", "RFDS")],
-                                                note_key="comments"),
-                    unsafe_allow_html=True)
-
-    with st.container(border=True):
-        section_title("Board Type")
-        rows = results.get("board_type", [])
-        display_rows = [
-            dict(r, rfds=_board_rfds_display(r),
-                 comments=("Match" if r.get("status") == "MATCH" else
-                           f"Board swap (expected) on {r.get('node')}." if r.get("status") == "EXPECTED" else
-                           f"Board type mismatch found on the {r.get('node')}."))
-            for r in rows
-        ]
-        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq_du_type", "CIQ DU Type"),
-                                                                        ("edp_model", "EDP Model"), ("rfds", "RFDS")],
-                                                note_key="comments"),
-                    unsafe_allow_html=True)
-        if rfds_pages is not None:
-            st.caption("RFDS model is a best-effort text match against the RFDS's Non RF Inventory section, not a structured per-node field.")
-
-    with st.container(border=True):
-        section_title("XMU Validation")
-        rows = results.get("xmu", [])
-        display_rows = []
-        for r in rows:
-            n = _ciq_xmu_count(r.get("node"), ciq_wb)
-            ciq_label = f"{n} XMU" if n else ("0 XMU" if n == 0 else "—")
-            rfds_val = r.get("rfds_xmu")
-            rfds_label = "XMU Found" if rfds_val is True else ("XMU Not Found" if rfds_val is False else "NOT CHECKED")
-            comments = "Match" if r.get("status") == "MATCH" else f"XMU mismatch found on the {r.get('node')}."
-            display_rows.append(dict(r, ciq_xmu=ciq_label, rfds_xmu=rfds_label, comments=comments))
-        st.markdown(render_table_with_comments(display_rows, columns=[("node", "Node"), ("ciq_xmu", "CIQ XMU"),
-                                                                        ("rfds_xmu", "RFDS XMU")],
-                                                note_key="comments"),
-                    unsafe_allow_html=True)
-        st.caption("RFDS doesn't expose an XMU count (only presence) — RFDS XMU shows Found/Not Found, not a count.")
-
-    with st.container(border=True):
-        grouped_rows = _memo("grouped_rows", lambda: build_rfds_grouped_rows(
-            results, ciq_wb, rfds_pages, state.get("rfds_bytes")))
-        n_fail = sum(1 for r in grouped_rows if r["overall"] == "FAIL")
-        n_pass = len(grouped_rows) - n_fail
-        st.markdown(
-            f'<div style="text-align:right;font-weight:700;margin:0 0 8px;">'
-            f'Total: {len(grouped_rows)} &nbsp;|&nbsp; '
-            f'<span style="color:#065f46;">PASS: {n_pass}</span> &nbsp;|&nbsp; '
-            f'<span style="color:#991b1b;">FAIL: {n_fail}</span></div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(render_rfds_grouped_table(grouped_rows), unsafe_allow_html=True)
-        st.caption('"Losses & Delays" has no extractor in this backend yet — always shows NOT AVAILABLE, not a fabricated pass.')
-
-# ══════════════════════════════════════════════════════════════════════
-# TAB 2 — Audit: Pre checks (AMOS) / CIQ Checks / Audit (Pre vs CIQ) / CR Desc
-# ══════════════════════════════════════════════════════════════════════
-with tab_audit:
-    sub_pre, sub_ciq, sub_audit, sub_crdesc = st.tabs(["Pre checks (AMOS)", "CIQ Checks", "Audit (Pre vs CIQ)", "CR Desc"])
-
-    with sub_pre:
-        if not node_logs_text:
-            st.info("No Pre kget-all logs were loaded for this run.")
-        else:
-            summary_rows, lte_rows, nr_rows = state["amos_summary_rows"], state["amos_lte_rows"], state["amos_nr_rows"]
-
-            section_title("Node Summary", badge=f"{len(summary_rows)} NODE(S)")
-            st.markdown(render_table(summary_rows, status_key=None, columns=[
-                ("node", "Node ID"), ("sw_package", "BB Type"), ("sw_version", "SW Version"),
-                ("type", "Mode"), ("ptp_status", "PTP Status"), ("sa_nsa_status", "SA/NSA Status"),
-            ]), unsafe_allow_html=True)
-
-            section_title(f"LTE Cells — {', '.join(summary_rows and [r['node'] for r in summary_rows] or sorted(node_logs_text))}",
-                          badge=f"{len(lte_rows)} CELLS")
-            st.markdown(render_table(lte_rows, status_key=None, columns=[
-                ("node", "Node"), ("cell", "Cell"), ("sector_carrier", "Sector Carries"), ("rru", "RRUs"),
-                ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
-                ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
-                ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
-                ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"),
-            ]), unsafe_allow_html=True)
-
-            section_title("5G NR Cells", badge=f"{len(nr_rows)} CELLS")
-            st.markdown(render_table(nr_rows, status_key=None, columns=[
-                ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("tx", "TX"), ("rx", "RX"),
-                ("sef_rfbranches", "SEF RFBRANCHES"),
-                ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"),
-            ]), unsafe_allow_html=True)
-
-    with sub_ciq:
-        import ciq_checks as cc
-
-        controller_rows = cv.build_controller_info(ciq_wb)
-        if controller_rows:
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                section_title("Node Integration")
-                st.markdown(render_table(cv.build_node_integration(ciq_wb), status_key=None, columns=[
-                    ("node", "Node"), ("eNBId", "ENBID"), ("eNodeB", "ENODEB"), ("gNBId", "GNBID"), ("gNodeB", "GNODEB"),
-                    ("mode", "Mode"), ("bb_type", "BB Type"), ("mme_region", "MME Region"), ("enm", "ENM"),
-                    ("xmu", "XMU"), ("ports", "Ports"),
-                ]), unsafe_allow_html=True)
-            with col2:
-                section_title("Controller Info")
-                st.markdown(render_table(controller_rows, status_key=None, columns=[
-                    ("usid", "USID"), ("controller", "Controller"), ("id", "ID"),
-                ]), unsafe_allow_html=True)
-        else:
-            section_title("Node Integration")
-            st.markdown(render_table(cv.build_node_integration(ciq_wb), status_key=None, columns=[
-                ("node", "Node"), ("eNBId", "ENBID"), ("eNodeB", "ENODEB"), ("gNBId", "GNBID"), ("gNodeB", "GNODEB"),
-                ("mode", "Mode"), ("bb_type", "BB Type"), ("mme_region", "MME Region"), ("enm", "ENM"),
-                ("xmu", "XMU"), ("ports", "Ports"),
-            ]), unsafe_allow_html=True)
-
-        ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb)
-        ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
-        cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows)
-
-        section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
-        st.markdown(render_table(ciq_lte_rows, status_key=None, columns=[
-            ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("electrical_tilt", "Electrical Tilt"),
-            ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
-            ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
-            ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
-        ]), unsafe_allow_html=True)
-
-        section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
-        st.markdown(render_table(ciq_nr_rows, status_key=None, columns=[
-            ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
-            ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-            ("sharing_radio", "Sharing Radio"), ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
-        ]), unsafe_allow_html=True)
-
-        antenna_rows = cs.check_antenna_uniqueness(node_id="", ciq_wb=ciq_wb)
-        section_title("Antenna Uniqueness", badge=f"{len(antenna_rows)}")
-        st.markdown(render_table(antenna_rows, status_key="status", columns=[
-            ("cell", "Cells"), ("aug_au_asu_1", "AUG/AU/ASU (1)"), ("aug_au_asu_2", "AUG/AU/ASU (2)"),
-            ("verdict", "Status"),
-        ]), unsafe_allow_html=True)
-
-    with sub_audit:
-        import pre_post_audit as ppa
-
-        section_title("Pre vs Post")
-        pre_summary_rows = state["amos_summary_rows"]
-        ciq_node_rows = cv.build_node_integration(ciq_wb)
-        node_pre_post_rows = ppa.build_node_pre_post(pre_summary_rows, ciq_node_rows, node_logs_text, edp_rows)
-        st.markdown(render_node_pre_post_table(node_pre_post_rows), unsafe_allow_html=True)
-
-        if node_logs_text:
-            lte_pp_rows = ppa.compare_lte_cell_level(node_logs_text, ciq_wb)
-            lte_pp_summary = ppa.summarize_rows(lte_pp_rows)
-            section_title("LTE: Pre vs Post")
-            st.markdown(_pre_post_summary_pills(lte_pp_summary), unsafe_allow_html=True)
-            st.caption("Green = Match  Red = Mismatch  Format: PRE | POST")
-            st.markdown(render_cell_pre_post_table(lte_pp_rows, [
-                ("sc", "_sc_ok", "Sec Carrier"), ("cellid", "_cellid_ok", "Cell ID"), ("tac", "_tac_ok", "TAC"),
-                ("bw", "_bw_ok", "BW"), ("dl", "_dl_ok", "EARFCN DL"), ("ul", "_ul_ok", "EARFCN UL"),
-                ("power", "_power_ok", "Power"), ("tx", "_tx_ok", "TX"), ("rx", "_rx_ok", "RX"),
-                ("rru", "_rru_ok", "RRU Model"),
-            ]), unsafe_allow_html=True)
-
-            nr_pp_rows = ppa.compare_nr_cell_level(node_logs_text, ciq_wb)
-            nr_pp_summary = ppa.summarize_rows(nr_pp_rows)
-            section_title("5G: Pre vs Post")
-            st.markdown(_pre_post_summary_pills(nr_pp_summary), unsafe_allow_html=True)
-            st.caption("Green = Match  Red = Mismatch  Format: PRE | POST")
-            st.markdown(render_cell_pre_post_table(nr_pp_rows, [
-                ("cellid", "_cellid_ok", "Cell ID"), ("dl", "_dl_ok", "ARFCN DL"), ("ul", "_ul_ok", "ARFCN UL"),
-                ("bw_dl", "_bw_dl_ok", "BW DL"), ("bw_ul", "_bw_ul_ok", "BW UL"), ("power", "_power_ok", "TX Power"),
-                ("ssb", "_ssb_ok", "SSB Frequency"), ("rru", "_rru_ok", "RRU Model"),
-            ]), unsafe_allow_html=True)
-        else:
-            st.caption("Upload Pre kget-all logs to see the LTE/5G cell-level Pre vs Post tables.")
-
-        # Engineer Comments is computed silently here (not displayed in this
-        # tab) purely so CR Desc's auto-detected Nodes/Bands still populate —
-        # CR Desc reads state["engineer_comments"] via extract_bands_from_comments().
-        amos_lte_rows = state["amos_lte_rows"] if node_logs_text else None
-        amos_nr_rows = state["amos_nr_rows"] if node_logs_text else None
-        ciq_lte_rows = cv.build_param_table(ciq_wb, "eUtran Parameters", ["EutranCellFDDId", "RRU type"])
-        ciq_nr_rows = cv.build_param_table(ciq_wb, "5G Info", ["NRCellDU", "RRU Type"])
-        state["engineer_comments"] = build_engineer_comments(
-            sow, results, checked_nodes,
-            amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
-            ciq_lte_rows=ciq_lte_rows, ciq_nr_rows=ciq_nr_rows,
-            node_logs_text=node_logs_text,
-        )
-
-    with sub_crdesc:
-        section_title("CR Description")
-        engineer_comments = state.get("engineer_comments", [])
-        all_nodes, deleted_nodes_cr, regular_nodes_cr = extract_nodes_from_audit(sow, checked_nodes)
-        bands_cr = extract_bands_from_comments(engineer_comments)
-
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            mic_mca = st.selectbox("MIC DESC", ["MIC - MCA", "MCA - CRAN"], key="cr_mic_mca")
-        with c2:
-            site_name_in = st.text_input("Site Name", placeholder="e.g. DOWNTOWN_EAST", key="cr_site_name")
-        with c3:
-            # Auto-fetched from the CIQ's own 5G Info 'FA Code' column
-            # (site_details['fa_code'] is always CIQ-sourced - see
-            # checks_node.build_site_details()) - still editable, since the
-            # user may need to override it.
-            fa_number_in = st.text_input("FA Number", value=site_details.get("fa_code") or "",
-                                          placeholder="e.g. 1034567", key="cr_fa_number")
-        c4, c5 = st.columns(2)
-        with c4:
-            sw_version_in = st.text_input("Sw Version", placeholder="e.g. 25.Q4", key="cr_sw_version")
-        with c5:
-            link_in = st.text_input("Link", placeholder="link to CIQ / ticket / script", key="cr_link")
-
-        rfds_fa = site_details.get("rfds_fa_code")
-        if rfds_fa:
-            ciq_fa = site_details.get("fa_code")
-            if ciq_fa and rfds_fa != ciq_fa:
-                st.warning(f"FA Code mismatch — CIQ: `{ciq_fa}` vs RFDS: `{rfds_fa}`. "
-                           f"The field above uses the CIQ value; verify which is correct before sending.")
-            else:
-                st.caption(f"FA Code confirmed — CIQ and RFDS both report `{ciq_fa}`.")
-        elif rfds_pages is not None:
-            st.caption("RFDS was provided but no FA Code was found on it — CIQ value used, not cross-checked.")
-
-        n1, n2 = st.columns(2)
-        with n1:
-            st.markdown("**Nodes (from Audit)** — auto-detected")
-            st.markdown(", ".join(all_nodes) if all_nodes else "_Run validation to auto-populate…_")
-        with n2:
-            st.markdown("**Bands (from Audit)** — auto-detected")
-            st.markdown(" / ".join(bands_cr) if bands_cr else "_Run validation to auto-populate…_")
-
-        if st.button("Generate CR Description", type="primary", key="btn_gen_cr"):
-            cr_text, breakdown = build_cr_description(mic_mca, site_name_in, fa_number_in, all_nodes, bands_cr)
-            if cr_text is None:
-                st.error("Please enter Site Name and FA Number (and make sure a validation run has produced node data).")
-            else:
-                st.session_state["cr_output"] = cr_text
-                st.session_state["cr_breakdown"] = breakdown
-
-        if st.session_state.get("cr_output"):
-            st.text_area("Generated CR description", value=st.session_state["cr_output"], height=80, key="cr_output_area")
-            st.markdown(render_table(
-                [{"field": k, "value": v} for k, v in (st.session_state.get("cr_breakdown") or [])],
-                columns=[("field", "Field"), ("value", "Value")], status_key=None,
-            ), unsafe_allow_html=True)
-
-        st.divider()
-        email_text = build_radio_ret_email(sw_version_in, fa_number_in, link_in, engineer_comments)
-        st.text_area("Radio/RET Comments Email", value=email_text, height=260, key="cr_email_area")
-
-# ══════════════════════════════════════════════════════════════════════
-# TAB 3 — EDP Validator
-# ══════════════════════════════════════════════════════════════════════
-with tab_edp:
-    st.subheader("EDP Validator")
-    node_role_list = state["node_role_list"]
-
-    section_title("EDP Field Values — Primary & Secondary Nodes")
-    edp_field_rows = state["edp_field_rows"]
-    st.markdown(render_table(edp_field_rows, status_key=None, columns=[
-        ("node", "Node"), ("role", "Role"), ("SITE_NAME", "SITE_NAME"), ("CABINET", "CABINET"),
-        ("BBU_TYPE", "BBU_TYPE"), ("NODE_MODEL", "NODE_MODEL"), ("SIAD_PORT_SIZE_BBU", "SIAD_PORT_SIZE_BBU"),
-        ("SIAD_PORT_FACING_BBU", "SIAD_PORT_FACING_BBU"), ("BEARER_ENODEB_SB_VLAN_ID", "BEARER_ENODEB_SB_VLAN_ID"),
-        ("IPV6_SIAD_BEARER_IP_DEF_ROUTER", "IPV6_SIAD_BEARER_IP_DEF_ROUTER"),
-        ("IPV6_ENODEB_BEARER_IP", "IPV6_ENODEB_BEARER_IP"),
-        ("OAM_ENODEB_SIAD_OAM_VLAN", "OAM_ENODEB_SIAD_OAM_VLAN"),
-        ("IPV6_SIAD_OAM_IP_DEF_ROUTER", "IPV6_SIAD_OAM_IP_DEF_ROUTER"),
-        ("IPV6_ENODEB_OAM_IP", "IPV6_ENODEB_OAM_IP"),
-    ]), unsafe_allow_html=True)
-
-    section_title("Pre vs EDP — Bearer & OAM IPv6/VLAN")
-    if not node_logs_text:
-        st.caption("Upload Pre kget-all logs to compare these fields against EDP.")
-    else:
-        pivot_rows = state["pre_edp_pivot_rows"]
-        if not pivot_rows:
-            st.caption("No Pre log matched any Primary/Secondary node for this run.")
-        else:
-            st.markdown(render_pre_vs_edp_pivot_table(pivot_rows), unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════
-# TAB 4 — Consolidated Report: Pre/Post Config → SOW Summary → Warnings &
-# Comments (always visible) → RRNRBL Checklist → RFDS vs CIQ & Pre vs CIQ
-# → CIQ Sanity Check → EDP Checks (each collapsible) → PDF/xlsx downloads.
-# ══════════════════════════════════════════════════════════════════════
-with tab_consolidated:
-    st.subheader("Consolidated Report")
-
-    section_title("Pre / Post Configuration")
-    pc1, pc2 = st.columns(2)
-    pc1.markdown(f'<div class="qkx-stat" style="text-align:left;"><b>Pre</b><br>{esc(state["pre_text"] or "(none — new build / no Pre log)")}</div>', unsafe_allow_html=True)
-    pc2.markdown(f'<div class="qkx-stat" style="text-align:left;"><b>Post</b><br>{esc(state["post_text"] or "—")}</div>', unsafe_allow_html=True)
-
-    section_title("SOW Summary")
-    scope_lines = state["scope_lines"]
-    if scope_lines:
-        st.markdown("\n".join(f"- {esc(l)}" for l in scope_lines))
-    else:
-        st.caption("Nothing to report.")
-
-    with st.expander("RRNRBL Checklist", expanded=False):
-        checklist = state["checklist"]
-        render_rrnrbl_checklist(checklist)
-
-    # ── Every mismatch in one place, grouped by comparison family ──────
-    # One section (not three separate expanders to hunt through), but the
-    # rows stay categorised under the three headings below rather than
-    # being flattened into an undifferentiated list.
-    section_title("Mismatches")
-    mm_rows = _memo("mm_rows", lambda: build_consolidated_mismatches(
-        _memo("grouped_rows", lambda: build_rfds_grouped_rows(
-            results, ciq_wb, rfds_pages, state.get("rfds_bytes"))),
-        results,
-        rc.build_pre_vs_edp_ipv6_table(node_logs_text, state["node_role_list"], edp_rows)
-        if node_logs_text else []))
-
-    # category heading -> which "source" values belong under it
-    MM_GROUPS = [
-        ("Mismatches \u2014 RFDS vs CIQ & KGET vs CIQ", ("RFDS vs CIQ", "KGET vs CIQ")),
-        ("CIQ Sanity Check", ("CIQ check",)),
-        ("EDP Checks \u2014 KGET vs EDP", ("KGET vs EDP",)),
+    field_map = [
+        ("bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID", "Bearer VLAN", False),
+        ("bearer_ip", "IPV6_ENODEB_BEARER_IP", "Bearer IPv6", True),
+        ("bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "Bearer Default Router", True),
+        ("oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN", "OAM VLAN", False),
+        ("oam_ip", "IPV6_ENODEB_OAM_IP", "OAM IPv6", True),
+        ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "OAM Default Router", True),
     ]
 
-    if not mm_rows:
-        st.success("No mismatches found.")
-    else:
-        st.caption(f"**{len(mm_rows)}** mismatch(es) found across {len(MM_GROUPS)} categories.")
-        for heading, sources in MM_GROUPS:
-            group = [r for r in mm_rows if r["source"] in sources]
-            st.markdown(f'<div class="qkx-sec-sub">{esc(heading)} '
-                        f'<span class="qkx-count-pill"><b>{len(group)}</b></span></div>',
-                        unsafe_allow_html=True)
-            if not group:
-                st.caption("No mismatches in this category.")
-                continue
-            st.markdown(render_table(group, status_key=None, columns=[
-                ("cell", "Cell / Node"), ("source", "Mismatch on"),
-                ("param", "Parameter"), ("comments", "Comments"),
-            ]), unsafe_allow_html=True)
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        log_text = (node_logs_text or {}).get(nid)
+        if not log_text:
+            continue
+        pre_vals = pe.extract_bearer_oam_ipv6(log_text)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+        for pre_key, edp_key, label, is_ipv6 in field_map:
+            pre_v = pre_vals.get(pre_key)
+            edp_v = _norm(edp_rec.get(edp_key)) if edp_rec else None
+            if pre_v is None and not edp_v:
+                continue  # neither side has data - nothing to show
+            if not pre_v or not edp_v:
+                status = "unknown"
+            elif is_ipv6:
+                status = "match" if _ipv6_equal(pre_v, edp_v) else "mismatch"
+            else:
+                status = "match" if pre_v == edp_v else "mismatch"
+            out.append({
+                "node": nid, "role": entry["role"], "field": label,
+                "pre_value": pre_v or "Not found in Pre log",
+                "edp_value": edp_v or "Not found in EDP",
+                "status": status,
+            })
+    return out
 
-    st.divider()
-    manual_overrides = collect_manual_overrides(state["checklist"])
-    # Keyed on the overrides themselves: reruns that don't touch a tick or
-    # a remark reuse the built workbook instead of rebuilding it (this ran
-    # unconditionally on every rerun, including every checklist tick).
-    _ov_sig = tuple(sorted((r, bool(v.get("checked")), str(v.get("comment") or ""))
-                            for r, v in manual_overrides.items()))
-    checklist_xlsx = _memo("checklist_xlsx",
-                           lambda: rc.fill_checklist_xlsx(state["checklist"], state["site_id_fa"],
-                                                          manual_overrides=manual_overrides),
-                           _ov_sig)
-    d1, d2 = st.columns(2)
-    with d1:
-        st.download_button("⬇️ Download PDF", data=state["pdf_bytes"], file_name="validation_report.pdf",
-                            mime="application/pdf", use_container_width=True)
-    with d2:
-        st.download_button("⬇️ Download filled RRNRBL Checklist (.xlsx)", data=checklist_xlsx,
-                            file_name="Checklist_RRNRBL_filled.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True, key="cr_checklist_dl")
-    st.caption("Check a manual box or type a comment above, then click Download again to bake it into the file.")
+
+def build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows):
+    """One row per (node, role): Bearer/OAM VLAN, IPv6, Default Router,
+    pre + EDP side by side — wide layout (Node ID + 2-col-per-field),
+    replacing the long one-row-per-field format from
+    build_pre_vs_edp_ipv6_table() above. A node with no uploaded Pre log
+    still gets a row (pre columns show '—'), so the Node ID list is
+    complete regardless of which logs were uploaded this run."""
+    import pre_extract as pe
+
+    field_map = [
+        ("bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID", "bearer_vlan"),
+        ("bearer_ip", "IPV6_ENODEB_BEARER_IP", "bearer_ipv6"),
+        ("bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", "bearer_router"),
+        ("oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN", "oam_vlan"),
+        ("oam_ip", "IPV6_ENODEB_OAM_IP", "oam_ipv6"),
+        ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "oam_router"),
+    ]
+    role_short = {"Primary": "P", "Secondary": "S"}
+
+    out = []
+    for entry in node_role_list:
+        nid = entry["node"]
+        log_text = (node_logs_text or {}).get(nid)
+        pre_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+        row = {"label": f"{nid} ({role_short.get(entry['role'], entry['role'][:1])})"}
+        for pre_key, edp_key, out_key in field_map:
+            row[f"{out_key}_pre"] = pre_vals.get(pre_key) or "—"
+            row[f"{out_key}_edp"] = _norm(edp_rec.get(edp_key)) if edp_rec else "—"
+        out.append(row)
+    return out
+
+
+# ── Unified Pre/CIQ vs Post(EDP) checklist — the 12-field spec confirmed
+# against the screenshot table. Two fields (the Default Router pair) are
+# intentionally excluded from mismatch-highlighting per that spec (still
+# shown, status forced to 'info' so they never render red/green) — routers
+# are shared infra, not something a build error would typically shift.
+#
+# Per-field source of the "Pre/CIQ" side:
+#   - the 6 Bearer/OAM network fields  -> Pre kget-all log (extract_bearer_oam_ipv6)
+#   - node_model                        -> CIQ, via the SAME results['board_type']
+#                                          check already computed elsewhere (CIQ DU
+#                                          Type vs EDP Model) — not Pre-log based,
+#                                          matching "Node model should match the CIQ"
+#   - cabinet                           -> derived, not read from any log: a
+#                                          Secondary's cabinet is checked against
+#                                          its OWN paired Primary's cabinet + 'V'
+#                                          (e.g. Primary BBU01 -> Secondary BBU01V),
+#                                          not just format-checked independently
+#                                          (the older _edp_cabinet_status above only
+#                                          checks the regex/'V' suffix in isolation,
+#                                          never that the NUMBER actually matches its
+#                                          own Primary — two unrelated nodes named
+#                                          BBU01/BBU02V would previously pass)
+#   - site_name/bbu_type/siad_port_size_bbu/siad_port_facing_bbu -> EDP value only,
+#                                          no Pre/CIQ counterpart in this pipeline
+#
+# A node with NO uploaded Pre log (new node — same convention run_validation.py
+# already uses for is_new_node=not has_pre) gets 'unknown' (grey, no highlight)
+# on every Pre-sourced field instead of 'mismatch': this is what makes an
+# SMBB(Pre)->MMBB(Post) transition safe — the newly-appearing Secondary has no
+# Pre history by definition, and that absence must not be flagged. The Primary's
+# own row is built and compared exactly as it always is, unaffected by whether
+# a Secondary exists at all.
+CHECKLIST_FIELD_SPEC = [
+    ("SITE_NAME", "site_name", True),
+    ("CABINET", "cabinet", True),
+    ("BBU_TYPE", "bbu_type", True),
+    ("NODE_MODEL", "node_model", True),
+    ("SIAD_PORT_SIZE_BBU", "siad_port_size_bbu", True),
+    ("SIAD_PORT_FACING_BBU", "siad_port_facing_bbu", True),
+    ("BEARER_ENODEB_SB_VLAN_ID", "bearer_enodeb_sb_vlan_id", True),
+    ("IPV6_SIAD_BEARER_IP_DEF_ROUTER", "ipv6_siad_bearer_ip_def_router", False),
+    ("IPV6_ENODEB_BEARER_IP", "ipv6_enodeb_bearer_ip", True),
+    ("OAM_ENODEB_SIAD_OAM_VLAN", "oam_enodeb_siad_oam_vlan", True),
+    ("IPV6_SIAD_OAM_IP_DEF_ROUTER", "ipv6_siad_oam_ip_def_router", False),
+    ("IPV6_ENODEB_OAM_IP", "ipv6_enodeb_oam_ip", True),
+]
+
+_PRE_NETWORK_FIELD_MAP = {
+    "BEARER_ENODEB_SB_VLAN_ID": "bearer_vlan",
+    "IPV6_ENODEB_BEARER_IP": "bearer_ip",
+    "IPV6_SIAD_BEARER_IP_DEF_ROUTER": "bearer_router_ip",
+    "OAM_ENODEB_SIAD_OAM_VLAN": "oam_vlan",
+    "IPV6_ENODEB_OAM_IP": "oam_ip",
+    "IPV6_SIAD_OAM_IP_DEF_ROUTER": "oam_router_ip",
+}
+
+
+def _cabinet_pairing_map(ciq_wb, edp_rows):
+    """{secondary_node_id: expected_cabinet} from the SAME Mixed Mode Info
+    pairing build_primary_secondary_node_list() uses — recomputed here
+    (rather than reverse-engineered from its flat output) so a Secondary
+    is always checked against its OWN Primary, never just row order."""
+    expected = {}
+    for m in cer.mixed_mode_rows(ciq_wb):
+        build_as = _norm(m.get("Node to be built as")).upper()
+        e_name, g_name = _norm(m.get("eNodeB Name")), _norm(m.get("gNodeB Name"))
+        bbu_mode = _norm(m.get("BBU Mode")).upper()
+        if e_name and e_name.upper() == build_as:
+            primary, secondary = e_name, g_name
+        elif g_name and g_name.upper() == build_as:
+            primary, secondary = g_name, e_name
+        else:
+            primary, secondary = (e_name or g_name), (g_name if e_name else "")
+        if not (secondary and primary and bbu_mode != "SMBB"):
+            continue
+        prim_rows = cer.edp_rows_for_site(edp_rows, primary)
+        prim_cab = _norm(prim_rows[0].get("CABINET")) if prim_rows else ""
+        expected[secondary] = f"{prim_cab}V" if prim_cab else None
+    return expected
+
+
+def _cabinet_pairing_status(ciq_wb, edp_rows, node_ids):
+    """Combines the existing format-only check (well-formed 'BBUxx'/'BBUxxV')
+    with the real cross-node pairing check confirmed in this conversation:
+    a Secondary's cabinet number must match its OWN Primary's, not just
+    look like a valid cabinet string in isolation."""
+    fmt_status, fmt_detail = _edp_cabinet_status(edp_rows, node_ids)
+    expected = _cabinet_pairing_map(ciq_wb, edp_rows)
+    bad, checked = [], 0
+    for nid, exp in expected.items():
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        actual = _norm(rows[0].get("CABINET")) if rows else ""
+        if not exp or not actual:
+            continue
+        checked += 1
+        if actual.upper() != exp.upper():
+            bad.append(f"{nid}: expected cabinet '{exp}' (from its own Primary), EDP shows '{actual}'")
+    if bad or fmt_status == "mismatch":
+        parts = ([fmt_detail] if fmt_status == "mismatch" else []) + bad
+        return "mismatch", "; ".join(parts[:6])
+    if checked:
+        return "match", f"{fmt_detail} {checked} Secondary/Primary pair(s) also checked, all pass."
+    return fmt_status, fmt_detail
+
+
+def _du_type_by_node(ciq_wb):
+    """{node_id: hardware model number} from eNB/gNB Info 'DU type' — the
+    CIQ-side counterpart to EDP's NODE_MODEL string (e.g. 'RAN PROCESSOR
+    6672' contains this same '6672')."""
+    out = {}
+    for r in (cer.enb_info_rows(ciq_wb) if ciq_wb else []):
+        n = _norm(r.get("eNodeB Name"))
+        if n:
+            out[n] = _norm(r.get("DU type"))
+    if ciq_wb and "gNB Info" in ciq_wb.sheetnames:
+        for r in cer.sheet_rows_as_dicts(ciq_wb["gNB Info"]):
+            n = _norm(r.get("gNodeB Name"))
+            if n and n not in out:
+                out[n] = _norm(r.get("DU type"))
+    return out
+
+
+def _bbu_type_vs_node_model_status(ciq_wb, edp_rows, node_ids):
+    """CIQ hardware board number (5G Info/eNB/gNB Info 'DU type'/'BBU Type')
+    vs EDP NODE_MODEL. Confirmed against real EDP data in this conversation:
+    the EDP column named BBU_TYPE actually holds the mode string
+    ('MIXED MODE'/'TRIPLE MODE'), and NODE_MODEL holds the hardware string
+    ('RAN PROCESSOR 6672', 'BASEBAND 6630') — the reverse of what the
+    column names suggest. This check is deliberately wired to NODE_MODEL,
+    not BBU_TYPE, for that reason."""
+    du_type = _du_type_by_node(ciq_wb)
+    bad, checked = [], 0
+    for nid in node_ids:
+        board = du_type.get(nid)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_model = _norm(rows[0].get("NODE_MODEL")) if rows else ""
+        if not board or not edp_model:
+            continue
+        checked += 1
+        if board not in edp_model:
+            bad.append(f"{nid}: CIQ board '{board}' not found in EDP NODE_MODEL '{edp_model}'")
+    if not checked:
+        return "unknown", "No CIQ board type / EDP NODE_MODEL data to check."
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    return "match", f"{checked} node(s) checked, all pass."
+
+
+# MMBB/TMBB map to a fixed EDP BBU_TYPE string, confirmed against real data.
+# SMBB does NOT — confirmed real value for an SMBB (LTE-only) node was
+# '4G LTE Macro', not 'SINGLE MODE' as originally assumed — so SMBB is
+# flagged 'manual' rather than compared against a guessed string.
+_BBU_MODE_TO_EDP_TYPE = {"MMBB": "MIXED MODE", "TMBB": "TRIPLE MODE"}
+
+
+def _node_model_vs_bbu_type_status(ciq_wb, edp_rows, node_ids):
+    """CIQ Mixed Mode Info 'BBU Mode' (MMBB/SMBB/TMBB) vs EDP BBU_TYPE."""
+    mm_rows = cer.mixed_mode_rows(ciq_wb) if ciq_wb else []
+    mode_by_node = {}
+    for r in mm_rows:
+        n = _norm(r.get("Node to be built as")) or _norm(r.get("eNodeB Name")) or _norm(r.get("gNodeB Name"))
+        if n:
+            mode_by_node[n] = _norm(r.get("BBU Mode")).upper()
+
+    bad, checked, manual = [], 0, []
+    for nid in node_ids:
+        mode = mode_by_node.get(nid)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_type = _norm(rows[0].get("BBU_TYPE")) if rows else ""
+        if not mode or not edp_type:
+            continue
+        expected = _BBU_MODE_TO_EDP_TYPE.get(mode)
+        if expected is None:
+            manual.append(f"{nid}: SMBB — EDP BBU_TYPE is '{edp_type}', no fixed expected string confirmed for SMBB yet")
+            continue
+        checked += 1
+        if edp_type.upper() != expected:
+            bad.append(f"{nid}: CIQ {mode} expects EDP BBU_TYPE '{expected}', got '{edp_type}'")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        note = f"{checked} node(s) checked, all pass."
+        if manual:
+            note += f" ({len(manual)} SMBB node(s) need manual check — see note)"
+        return "match", note
+    if manual:
+        return "manual", "; ".join(manual[:6])
+    return "unknown", "No CIQ BBU Mode / EDP BBU_TYPE data to check."
+
+
+def _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, pre_key, edp_col, is_ipv6=False):
+    """One EDP field, Pre vs EDP, per (node, role) in node_role_list. A node
+    with no uploaded Pre log at all is treated as 'no history to compare'
+    (unknown, not mismatch) — this is what makes an SMBB(Pre)->MMBB(Post)
+    transition safe: the newly-appearing Secondary has no Pre log by
+    definition, and that must not be flagged. Confirmed: highlight ALL 6
+    bearer/OAM fields equally, including both Default Router fields."""
+    import pre_extract as pe
+    import ipaddress
+
+    def _ipv6_eq(a, b):
+        try:
+            return ipaddress.IPv6Address(a.split("/")[0]) == ipaddress.IPv6Address(b.split("/")[0])
+        except ValueError:
+            return a.split("/")[0] == b.split("/")[0]
+
+    bad, checked, no_pre = [], 0, []
+    for entry in node_role_list:
+        nid = entry["node"]
+        log_text = (node_logs_text or {}).get(nid)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_v = _norm(rows[0].get(edp_col)) if rows else ""
+        if not log_text:
+            no_pre.append(nid)
+            continue
+        pre_v = pe.extract_bearer_oam_ipv6(log_text).get(pre_key) or ""
+        if not pre_v or not edp_v:
+            continue
+        checked += 1
+        same = _ipv6_eq(pre_v, edp_v) if is_ipv6 else (pre_v == edp_v)
+        if not same:
+            bad.append(f"{nid} ({entry['role']}): Pre={pre_v}, EDP={edp_v}")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        note = f"{checked} node(s) checked, all pass."
+        if no_pre:
+            note += f" ({len(no_pre)} node(s) with no Pre log, not checked: {', '.join(no_pre[:4])})"
+        return "match", note
+    if no_pre:
+        return "unknown", f"No Pre log for: {', '.join(no_pre[:6])}"
+    return "unknown", "No Pre/EDP data to compare."
+
+
+def _siad_port_size_pre_status(node_logs_text, ciq_wb, edp_rows, node_ids):
+    """Pre (admOperatingMode on the board-generation-specific transport
+    port — see pre_extract.extract_transport_port_mode) vs EDP
+    SIAD_PORT_SIZE_BBU."""
+    import pre_extract as pe
+    du_type = _du_type_by_node(ciq_wb)
+
+    bad, checked, no_port = [], 0, []
+    for nid in node_ids:
+        board = du_type.get(nid)
+        log_text = (node_logs_text or {}).get(nid)
+        if not board or not log_text:
+            continue
+        port, pre_size = pe.extract_transport_port_mode(log_text, board)
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_size = _norm(rows[0].get("SIAD_PORT_SIZE_BBU")) if rows else ""
+        if not pre_size:
+            no_port.append(f"{nid}: no known transport port found in Pre log for board '{board}'")
+            continue
+        if not edp_size:
+            continue
+        checked += 1
+        if pre_size.upper() != edp_size.upper():
+            bad.append(f"{nid}: Pre {port}={pre_size}, EDP={edp_size}")
+    if bad:
+        return "mismatch", "; ".join(bad[:6])
+    if checked:
+        note = f"{checked} node(s) checked, all pass."
+        if no_port:
+            note += f" ({len(no_port)} skipped: {'; '.join(no_port[:3])})"
+        return "match", note
+    if no_port:
+        return "unknown", "; ".join(no_port[:6])
+    return "unknown", "No Pre log / board type data to check."
+
+
+def build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb, results):
+    """One row per (node, role, field) across all 12 fields in
+    CHECKLIST_FIELD_SPEC — 'pre_value' is Pre-log/CIQ/derived depending on
+    the field (see module comment above), 'edp_value' is always the EDP
+    (Post/target) value. status is 'unknown' (no highlight) whenever
+    there's nothing on the Pre/CIQ side to compare, INCLUDING every node
+    with no uploaded Pre log at all — this is what keeps a newly-added
+    Secondary (SMBB->MMBB) from being flagged just for lacking history."""
+    import pre_extract as pe
+
+    board_type_by_node = {r.get("node"): r for r in results.get("board_type", [])}
+    cabinet_expected = _cabinet_pairing_map(ciq_wb, edp_rows)
+
+    out = []
+    for entry in node_role_list:
+        nid, role = entry["node"], entry["role"]
+        log_text = (node_logs_text or {}).get(nid)
+        pre_net_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
+        rows = cer.edp_rows_for_site(edp_rows, nid)
+        edp_rec = rows[0] if rows else None
+
+        for edp_col, label, highlight in CHECKLIST_FIELD_SPEC:
+            edp_v = _norm(edp_rec.get(edp_col)) if edp_rec else ""
+
+            if edp_col == "NODE_MODEL":
+                bt = board_type_by_node.get(nid)
+                pre_v = _norm(bt.get("ciq_du_type")) if bt else ""
+                edp_v = _norm(bt.get("edp_model")) if bt else edp_v
+                status = str(bt.get("status", "unknown")).lower() if bt else "unknown"
+            elif edp_col == "CABINET":
+                if role == "Secondary" and nid in cabinet_expected:
+                    pre_v = cabinet_expected[nid] or ""
+                    status = "unknown" if not pre_v or not edp_v else (
+                        "match" if pre_v.upper() == edp_v.upper() else "mismatch")
+                else:
+                    pre_v = ""
+                    status = "unknown"
+            elif edp_col in _PRE_NETWORK_FIELD_MAP:
+                pre_v = pre_net_vals.get(_PRE_NETWORK_FIELD_MAP[edp_col]) or ""
+                status = "unknown" if not pre_v or not edp_v else (
+                    "match" if pre_v == edp_v else "mismatch")
+            else:
+                pre_v = ""
+                status = "unknown"
+
+            if not highlight and status == "mismatch":
+                status = "info"  # unchecked fields: shown, never highlighted red
+
+            out.append({
+                "node": nid, "role": role, "field": label,
+                "pre_value": pre_v or "—", "edp_value": edp_v or "—",
+                "status": status,
+            })
+    return out
