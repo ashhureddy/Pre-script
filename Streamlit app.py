@@ -915,6 +915,7 @@ _MM_CIQ_CHECKS = [
     ("losses_vs_antenna", "Losses vs Antenna Info"),
     ("tilt", "Tilt not an integer"),
     ("mmwave_rach", "mmWave RACH"),
+    ("carrier_progression", "Carrier progression"),
     ("ptp_matrix", "PTP configuration"),
 ]
 
