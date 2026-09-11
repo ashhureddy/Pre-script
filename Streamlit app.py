@@ -189,6 +189,11 @@ div[data-testid="stExpander"] summary:hover { background:#f4f7fc; border-radius:
 .qkx-chip.info     { background:#dbeafe; color:#1d4ed8; border-color:#93c5fd; }
 .qkx-chip.unknown  { background:#f1f5f9; color:#64748b; border-color:#cbd5e1; }
 
+.qkx-sec-sub {
+  font-size:13px; font-weight:700; color:#1e3a5f;
+  margin:16px 0 6px 0; padding-bottom:4px;
+  border-bottom:1px solid #dde5ef;
+}
 .qkx-count-pill {
   font-size:11.5px; color:#334155; margin-right:6px;
   background:#fff; border:1px solid #dde5ef; border-radius:999px;
@@ -894,6 +899,26 @@ _MM_PARAM_LABEL = {
 }
 
 
+# CIQ-side validation rules, and the label each one reports under.
+_MM_CIQ_CHECKS = [
+    ("pci_4g", "PCI clash (LTE)"),
+    ("pci_5g", "PCI clash (5G)"),
+    ("antenna", "Antenna uniqueness"),
+    ("port_uniqueness", "Port clash"),
+    ("xmu_port_overlap", "XMU port overlap"),
+    ("sef_fru", "SEF / FRU"),
+    ("radio_sharing", "Sharing radio"),
+    ("radio_port_conflict", "Radio port conflict"),
+    ("nbiot", "NBIoT"),
+    ("sector_id_4890", "SectorID (4890)"),
+    ("rfbranch_per_aug", "RfBranch per AUG"),
+    ("losses_vs_antenna", "Losses vs Antenna Info"),
+    ("tilt", "Tilt not an integer"),
+    ("mmwave_rach", "mmWave RACH"),
+    ("ptp_matrix", "PTP configuration"),
+]
+
+
 def _mm_is_na(v):
     return str(v).strip().upper() in _MM_NA
 
@@ -1012,6 +1037,17 @@ def build_consolidated_mismatches(grouped_rows, results, pre_edp_rows=None):
         if str(r.get("status", "")).upper() == "MISMATCH":
             rows.append({"cell": r.get("node") or "\u2014", "source": "KGET vs CIQ",
                          "param": "TAC", "comments": r.get("note", "")})
+
+    # ── CIQ checks (sanity / uniqueness rules on the CIQ itself) ───────
+    for key, label in _MM_CIQ_CHECKS:
+        for r in results.get(key, []):
+            if str(r.get("status", "")).upper() not in ("MISMATCH", "FAIL", "WARN"):
+                continue
+            cell = r.get("cell")
+            if not cell or _mm_is_na(cell):
+                cell = r.get("node") or "\u2014"
+            rows.append({"cell": cell, "source": "CIQ check", "param": label,
+                         "comments": r.get("note", "") or "\u2014"})
 
     # ── KGET vs EDP ────────────────────────────────────────────────────
     for r in pre_edp_rows or []:
@@ -1485,92 +1521,41 @@ with tab_consolidated:
         checklist = state["checklist"]
         render_rrnrbl_checklist(checklist)
 
-    with st.expander("Mismatches \u2014 RFDS vs CIQ & KGET vs CIQ", expanded=False):
-        # EDP is deliberately NOT passed here: this expander covers the two
-        # CIQ-facing families only (its title says so), and KGET vs EDP has
-        # its own section below.
-        mm_rows = _memo("mm_rows", lambda: build_consolidated_mismatches(
-            _memo("grouped_rows", lambda: build_rfds_grouped_rows(
-                results, ciq_wb, rfds_pages, state.get("rfds_bytes"))),
-            results))
+    # ── Every mismatch in one place, grouped by comparison family ──────
+    # One section (not three separate expanders to hunt through), but the
+    # rows stay categorised under the three headings below rather than
+    # being flattened into an undifferentiated list.
+    section_title("Mismatches")
+    mm_rows = _memo("mm_rows", lambda: build_consolidated_mismatches(
+        _memo("grouped_rows", lambda: build_rfds_grouped_rows(
+            results, ciq_wb, rfds_pages, state.get("rfds_bytes"))),
+        results,
+        rc.build_pre_vs_edp_ipv6_table(node_logs_text, state["node_role_list"], edp_rows)
+        if node_logs_text else []))
 
-        if not mm_rows:
-            st.caption("No mismatches found.")
-        else:
-            # Per-column filters, mirroring the reference report's header
-            # dropdowns. These are cheap: the row set itself is memoised, so
-            # changing a filter only re-filters an in-memory list.
-            def _opts(k):
-                return ["All"] + sorted({r[k] for r in mm_rows})
+    # category heading -> which "source" values belong under it
+    MM_GROUPS = [
+        ("Mismatches \u2014 RFDS vs CIQ & KGET vs CIQ", ("RFDS vs CIQ", "KGET vs CIQ")),
+        ("CIQ Sanity Check", ("CIQ check",)),
+        ("EDP Checks \u2014 KGET vs EDP", ("KGET vs EDP",)),
+    ]
 
-            f1, f2, f3 = st.columns(3)
-            sel_cell = f1.selectbox("Cell name", _opts("cell"), key="mm_f_cell")
-            sel_src = f2.selectbox("Mismatch on", _opts("source"), key="mm_f_src")
-            sel_par = f3.selectbox("Parameter", _opts("param"), key="mm_f_param")
-
-            shown = [r for r in mm_rows
-                     if (sel_cell == "All" or r["cell"] == sel_cell)
-                     and (sel_src == "All" or r["source"] == sel_src)
-                     and (sel_par == "All" or r["param"] == sel_par)]
-
-            st.markdown(render_table(shown, status_key=None, columns=[
-                ("cell", "Cell name"), ("source", "Mismatch on"),
+    if not mm_rows:
+        st.success("No mismatches found.")
+    else:
+        st.caption(f"**{len(mm_rows)}** mismatch(es) found across {len(MM_GROUPS)} categories.")
+        for heading, sources in MM_GROUPS:
+            group = [r for r in mm_rows if r["source"] in sources]
+            st.markdown(f'<div class="qkx-sec-sub">{esc(heading)} '
+                        f'<span class="qkx-count-pill"><b>{len(group)}</b></span></div>',
+                        unsafe_allow_html=True)
+            if not group:
+                st.caption("No mismatches in this category.")
+                continue
+            st.markdown(render_table(group, status_key=None, columns=[
+                ("cell", "Cell / Node"), ("source", "Mismatch on"),
                 ("param", "Parameter"), ("comments", "Comments"),
             ]), unsafe_allow_html=True)
-            st.caption(f"Showing **{len(shown)}** of **{len(mm_rows)}** rows")
-
-    with st.expander("CIQ Sanity Check", expanded=False):
-        def _sanity_payload():
-            # Every CIQ-side validation the run performs. Additions over the
-            # original list: xmu_port_overlap and losses_vs_antenna (computed
-            # but never displayed), plus tilt / mmwave_rach /
-            # radio_port_conflict (checks that existed but were never wired
-            # into the pipeline at all, so they never ran).
-            all_rows = (results.get("pci_4g", []) + results.get("pci_5g", []) + results.get("antenna", [])
-                        + results.get("port_uniqueness", []) + results.get("sef_fru", [])
-                        + results.get("radio_sharing", []) + results.get("nbiot", [])
-                        + results.get("sector_id_4890", []) + results.get("rfbranch_per_aug", [])
-                        + results.get("dss", []) + results.get("ptp_matrix", [])
-                        + results.get("xmu_port_overlap", []) + results.get("losses_vs_antenna", [])
-                        + results.get("tilt", []) + results.get("mmwave_rach", [])
-                        + results.get("radio_port_conflict", []))
-            # Only rows needing action. MATCH/SKIPPED are passes or
-            # not-applicable; INFO is advisory (e.g. pre-existing DSS) and is
-            # not a CIQ error, so it is not listed as a mismatch here.
-            bad = [r for r in all_rows if str(r.get("status", "")).upper() in ("MISMATCH", "FAIL", "WARN")]
-            html = render_table(bad, columns=[("rule", "Rule"), ("node", "Node"), ("cell", "Cell"),
-                                              ("status", "Status"), ("note", "Note")]) if bad else ""
-            return bad, len(all_rows), html
-
-        ciq_bad, ciq_total, ciq_html = _memo("sanity_payload", _sanity_payload)
-        if ciq_bad:
-            st.caption(f"{len(ciq_bad)} mismatch(es) out of {ciq_total} CIQ validation row(s).")
-            st.markdown(ciq_html, unsafe_allow_html=True)
-        else:
-            st.caption(f"No mismatches \u2014 all {ciq_total} CIQ validation row(s) passed.")
-
-    with st.expander("EDP Checks \u2014 KGET vs EDP", expanded=False):
-        def _edp_payload():
-            # The 6 bearer/OAM network fields, Pre(kget) vs the site's own
-            # EDP row. build_pre_vs_edp_ipv6_table already normalises IPv6
-            # (zero-padding / '::' compression) before comparing, so a
-            # cosmetic formatting difference is not reported as a mismatch.
-            all_rows = (rc.build_pre_vs_edp_ipv6_table(node_logs_text, state["node_role_list"], edp_rows)
-                        if node_logs_text else [])
-            bad = [r for r in all_rows if str(r.get("status", "")).lower() == "mismatch"]
-            html = render_table(bad, columns=[("node", "Node"), ("role", "Role"), ("field", "Field"),
-                                              ("pre_value", "KGET"), ("edp_value", "EDP"),
-                                              ("status", "Status")]) if bad else ""
-            return bad, len(all_rows), html
-
-        edp_bad, edp_total, edp_html = _memo("edp_payload", _edp_payload)
-        if not node_logs_text:
-            st.caption("No Pre kget logs uploaded \u2014 KGET vs EDP not checked.")
-        elif edp_bad:
-            st.caption(f"{len(edp_bad)} mismatch(es) out of {edp_total} compared field(s).")
-            st.markdown(edp_html, unsafe_allow_html=True)
-        else:
-            st.caption(f"No mismatches \u2014 all {edp_total} compared field(s) agree.")
 
     st.divider()
     manual_overrides = collect_manual_overrides(state["checklist"])
