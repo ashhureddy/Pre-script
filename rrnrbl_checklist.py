@@ -59,6 +59,78 @@ def _agg(results_list, note_fields=("node", "cell", "note")):
     return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
 
 
+def _worst_status(statuses):
+    """Roll several (status, note) verdicts into one, worst-first:
+    mismatch > manual > unknown > match. Notes from every contributing
+    verdict at that severity are joined, so the row says which field(s)
+    actually failed rather than just that something did."""
+    order = ["mismatch", "manual", "unknown", "match"]
+    pairs = [s for s in statuses if s]
+    if not pairs:
+        return "unknown", "No data (check did not run for this site)."
+    for level in order:
+        hits = [n for s, n in pairs if s == level]
+        if hits:
+            seen, notes = set(), []
+            for n in hits:
+                if n and n not in seen:
+                    seen.add(n)
+                    notes.append(n)
+            return level, "; ".join(notes)
+    return "unknown", "No data (check did not run for this site)."
+
+
+def _pre_detected_status(node_logs_text, what):
+    """'Detected in the Pre kget log' checks (Radio Ports / RfBranch /
+    Sharing Radio).
+
+    These three are presence checks, not comparisons: the Pre log either
+    exposes the data or it doesn't. Detected on at least one node -> match.
+    Logs uploaded but the data is absent everywhere -> mismatch (the Pre
+    capture is incomplete, which is the thing worth flagging). No logs at
+    all -> unknown, never a pass."""
+    import pre_extract as pe
+    if not node_logs_text:
+        return "unknown", "No Pre kget logs uploaded — nothing to detect."
+
+    found, missing, any_radio_data = [], [], False
+    for nid, text in node_logs_text.items():
+        if not text:
+            continue
+        if what == "ports":
+            fru = pe.extract_cell_to_fru(text)
+            n = len(pe.extract_cell_to_rilink_detail(text, fru))
+            label = "RiLink/RiPort entries"
+        elif what == "rfbranch":
+            refs = pe.extract_rf_branch_refs(text)
+            n = sum(1 for v in refs.values() if v.get("sef_branches") or v.get("tx_ref"))
+            label = "cells with RfBranch refs"
+        elif what == "sharing":
+            fru = pe.extract_cell_to_fru(text)
+            counts = {}
+            for cell, f in fru.items():
+                if f and f != "-":
+                    counts[f] = counts.get(f, 0) + 1
+            n = sum(1 for c in counts.values() if c > 1)
+            label = "radios shared by >1 cell"
+            # A site with no shared radio is a legitimate design, but that
+            # is only knowable if radio data was actually read. Track
+            # whether ANY radio was seen so 'no sharing' can be told apart
+            # from 'nothing parsed'.
+            if counts:
+                any_radio_data = True
+        else:
+            return "unknown", f"Unknown detection target '{what}'."
+        (found if n else missing).append(f"{nid}: {n} {label}")
+
+    if found:
+        return "match", "; ".join(found)
+    if what == "sharing" and any_radio_data:
+        # Radios WERE read and none is shared — a legitimate site design.
+        return "match", "No shared radios on this site (each cell on its own radio)."
+    return "mismatch", "Not detected in any Pre log — " + ("; ".join(missing) or "no usable log text.")
+
+
 def _filter(results_list, rule_prefix):
     return [r for r in results_list if str(r.get("rule", "")).strip() == rule_prefix]
 
@@ -503,12 +575,34 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         # "Pre checks" block from 75-79 down to 77-81). Both are EDP/ENM IP
         # comparisons this project has no automated check for, so they're
         # manual rather than silently reusing an unrelated check's result.
-        (75, "IP Validation Pre Vs EDP", None, "NodeB bearer IP / VLAN ID / router default IP vs EDP (board swap node)", "Radio", None),
-        (76, "Rehoming sites ( IP Verification )", None, "Existing IP/VLAN of all nodes: EDP vs ENM (Daffi node rehoming)", "Radio", None),
+        (75, "IP Validation Pre Vs EDP", None, "NodeB bearer IP / VLAN ID / router default IP vs EDP (board swap node)", "Radio",
+         lambda: _worst_status([
+             # Same Pre-vs-EDP comparison rows 21-23 already perform, rolled
+             # up into one verdict for the board-swap row. Not a new check:
+             # the bearer VLAN / IPv6 / default-router fields are compared
+             # Pre(kget) vs the site's own EDP row, IPv6 normalised before
+             # comparing.
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True),
+         ])),
+        (76, "Rehoming sites ( IP Verification )", None, "Existing IP/VLAN of all nodes: EDP vs ENM (Daffi node rehoming)", "Radio",
+         lambda: _worst_status([
+             # Rehoming verifies the EXISTING IP/VLAN of every node, so this
+             # rolls up all six bearer+OAM fields (rows 21-26) rather than
+             # the bearer-only three used by the board-swap row above.
+             # Same underlying Pre(kget)-vs-EDP comparison; no new logic.
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_vlan", "BEARER_ENODEB_SB_VLAN_ID"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_ip", "IPV6_ENODEB_BEARER_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "bearer_router_ip", "IPV6_SIAD_BEARER_IP_DEF_ROUTER", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_vlan", "OAM_ENODEB_SIAD_OAM_VLAN"),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_ip", "IPV6_ENODEB_OAM_IP", is_ipv6=True),
+             _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, "oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", is_ipv6=True),
+         ])),
 
-        (78, "Pre checks", "ENM Pre-checks", "Radio Ports", "Radio", lambda: _agg(results.get("radio_type", []))),
-        (79, "Pre checks", "ENM Pre-checks", "RfBranch", "Radio", None),
-        (80, "Pre checks", "ENM Pre-checks", "Sharing Radio", "Radio", lambda: _agg(results.get("radio_sharing", []))),
+        (78, "Pre checks", "ENM Pre-checks", "Radio Ports", "Radio", lambda: _pre_detected_status(node_logs_text, "ports")),
+        (79, "Pre checks", "ENM Pre-checks", "RfBranch", "Radio", lambda: _pre_detected_status(node_logs_text, "rfbranch")),
+        (80, "Pre checks", "ENM Pre-checks", "Sharing Radio", "Radio", lambda: _pre_detected_status(node_logs_text, "sharing")),
         (81, "Pre checks", "ENM Pre-checks", "SSNALIST", "Radio", None),
     ]
 
