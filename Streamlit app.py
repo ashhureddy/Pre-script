@@ -1521,11 +1521,19 @@ with tab_consolidated:
 
     with st.expander("CIQ Sanity Check", expanded=False):
         def _sanity_payload():
+            # Every CIQ-side validation the run performs. Additions over the
+            # original list: xmu_port_overlap and losses_vs_antenna (computed
+            # but never displayed), plus tilt / mmwave_rach /
+            # radio_port_conflict (checks that existed but were never wired
+            # into the pipeline at all, so they never ran).
             all_rows = (results.get("pci_4g", []) + results.get("pci_5g", []) + results.get("antenna", [])
                         + results.get("port_uniqueness", []) + results.get("sef_fru", [])
                         + results.get("radio_sharing", []) + results.get("nbiot", [])
                         + results.get("sector_id_4890", []) + results.get("rfbranch_per_aug", [])
-                        + results.get("dss", []) + results.get("ptp_matrix", []))
+                        + results.get("dss", []) + results.get("ptp_matrix", [])
+                        + results.get("xmu_port_overlap", []) + results.get("losses_vs_antenna", [])
+                        + results.get("tilt", []) + results.get("mmwave_rach", [])
+                        + results.get("radio_port_conflict", []))
             # Only rows needing action. MATCH/SKIPPED are passes or
             # not-applicable; INFO is advisory (e.g. pre-existing DSS) and is
             # not a CIQ error, so it is not listed as a mismatch here.
