@@ -1243,6 +1243,51 @@ def check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name=None):
     return out
 
 
+def check_carrier_progression(node_id, ciq_wb, e_name=None, g_name=None):
+    """Carrier progression — within a node and technology, no two BANDS may
+    share the same Carrier value.
+
+    Confirmed against a real CIQ: Carrier reads like '1C', '3C', '5C', and
+    a bandwidth-expansion carrier is written '3C BWE'. That BWE suffix is
+    exactly why the comparison is on the FULL carrier string rather than a
+    normalised stem — on a real site AWS Band 4 carries '3C' while AWS-3
+    Band 66 carries '3C BWE', which is legal precisely because they are
+    different carrier designations. Stripping 'BWE' to compare stems would
+    flag that correct configuration as a clash.
+
+    Scope is per node and per technology (the LTE and 5G sheets are checked
+    separately): the same carrier label legitimately appears on an LTE node
+    and a 5G node of the same site.
+
+    A violation is one Carrier value mapped to two or more distinct bands."""
+    out = []
+    sheets = (('eUtran Parameters', 'EutranCellFDDId', 'eUTRA operating band', e_name, 'LTE'),
+              ('5G Info', 'NRCellDU', 'Operating Band', g_name, '5G'))
+    for sheet, cell_col, band_col, prefix, tech in sheets:
+        bands_by_carrier = {}
+        for row in _rows(ciq_wb, sheet):
+            cell = row.get(cell_col)
+            if not cell or (prefix and not str(cell).startswith(prefix)):
+                continue
+            carrier = str(row.get('Carrier') or '').strip().strip("'\"").strip()
+            band = str(row.get(band_col) or '').strip()
+            if not carrier or not band:
+                continue
+            bands_by_carrier.setdefault(carrier.upper(), {}).setdefault(band, []).append(str(cell))
+        for carrier, bands in sorted(bands_by_carrier.items()):
+            if len(bands) < 2:
+                continue
+            detail = '; '.join(f"{b} ({', '.join(sorted(cells))})" for b, cells in sorted(bands.items()))
+            out.append({'rule': '#CARRIER', 'node': node_id,
+                        'cell': ', '.join(sorted(c for cs in bands.values() for c in cs))[:120],
+                        'status': 'MISMATCH',
+                        'note': f"{tech} Carrier '{carrier}' is used by {len(bands)} different bands: {detail}."})
+    if not out:
+        out.append({'rule': '#CARRIER', 'node': node_id, 'cell': '-', 'status': 'MATCH',
+                    'note': 'Each carrier maps to a single band.'})
+    return out
+
+
 def check_tilt_integer(node_id, ciq_wb, e_name=None, g_name=None):
     """Antenna tilt values in the CIQ must be whole numbers.
 
