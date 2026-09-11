@@ -60,7 +60,7 @@ def run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf):
         'pci_4g', 'pci_5g', 'radio_type', 'sector_swap', 'radio_sharing',
         'port_uniqueness', 'xmu_port_overlap', 'antenna', 'nbiot', 'nr_tac', 'tac', 'sef_fru',
         'dss', 'sector_id_4890', 'rfbranch_per_aug', 'ptp_matrix', 'losses_vs_antenna',
-        'tilt', 'mmwave_rach', 'radio_port_conflict',
+        'tilt', 'mmwave_rach', 'radio_port_conflict', 'carrier_progression',
     )}
     sa_note_nodes = []
     unavailable_notes = [
@@ -112,6 +112,7 @@ def run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf):
         results['rfbranch_per_aug'] += cs.check_rfbranch_per_aug(node_id, log_text)
         results['losses_vs_antenna'] += cs.check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name)
         results['tilt'] += cs.check_tilt_integer(node_id, ciq_wb, e_name, g_name)
+        results['carrier_progression'] += cs.check_carrier_progression(node_id, ciq_wb, e_name, g_name)
         # CIQ-only checks that existed in checks_sector.py but were
         # never wired into the pipeline, so they never ran.
         results['mmwave_rach'] += cs.check_mmwave_rach(node_id, ciq_wb)
