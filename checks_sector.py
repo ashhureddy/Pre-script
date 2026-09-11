@@ -1243,6 +1243,52 @@ def check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name=None):
     return out
 
 
+def check_tilt_integer(node_id, ciq_wb, e_name=None, g_name=None):
+    """Antenna tilt values in the CIQ must be whole numbers.
+
+    Covers both sheets and every tilt column they carry:
+      eUtran Parameters - mechanicalAntennaTilt, electricalAntennaTilt,
+                          electricalAntennaTilt_2
+      5G Info           - 'Mechanical AntennaTilt', 'Electrical Tilt'
+
+    Values are read as text and may arrive with Excel's leading-apostrophe
+    text marker (confirmed real CIQ: 5G 'Electrical Tilt' reads as "'0'"),
+    which is stripped before parsing - without that every 5G row would
+    false-flag. A blank cell is not a failure (nothing was specified); a
+    value with a fractional part (2.5) is. A trailing '.0' is a whole
+    number and passes."""
+    out = []
+    sheets = (('eUtran Parameters', 'EutranCellFDDId', e_name,
+               ('mechanicalAntennaTilt', 'electricalAntennaTilt', 'electricalAntennaTilt_2')),
+              ('5G Info', 'NRCellDU', g_name,
+               ('Mechanical AntennaTilt', 'Electrical Tilt')))
+    for sheet, cell_col, prefix, cols in sheets:
+        for row in _rows(ciq_wb, sheet):
+            cell = row.get(cell_col)
+            if not cell or (prefix and not str(cell).startswith(prefix)):
+                continue
+            for col in cols:
+                raw = row.get(col)
+                if raw is None:
+                    continue
+                val = str(raw).strip().strip("'\"").strip()
+                if not val:
+                    continue
+                try:
+                    num = float(val)
+                except ValueError:
+                    out.append({'rule': '#TILT', 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
+                                'note': f"{col}='{val}' is not a number."})
+                    continue
+                if num != int(num):
+                    out.append({'rule': '#TILT', 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
+                                'note': f"{col}='{val}' must be a whole number."})
+    if not out:
+        out.append({'rule': '#TILT', 'node': node_id, 'cell': '-', 'status': 'MATCH',
+                    'note': 'All tilt values are whole numbers.'})
+    return out
+
+
 def check_rfbranch_per_aug(node_id, log_text):
     """Blueprint #34 'The RF branch number should not exceed 24 for each
     AUG'. Counts DISTINCT RfBranch numbers per AntennaUnitGroup across every
