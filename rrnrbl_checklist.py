@@ -558,7 +558,7 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (61, "CIQ tabs checks", "eUtran Parameters Tab", "electricalAntennaTilt integer", "Radio", lambda: _agg(results.get("params_4g", []))),
         (62, "CIQ tabs checks", "eUtran Parameters Tab", "configuredOutputPower depends on RRU type", "Radio", None),
         (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx/RBB Type vs Single/Double RILink", "Radio", lambda: _agg(results.get("params_4g", []))),
-        (64, "CIQ tabs checks", "eUtran Parameters Tab", "Compare Sectorid With Carrier Progression", "Radio", None),
+        (64, "CIQ tabs checks", "eUtran Parameters Tab", "Compare Sectorid With Carrier Progression", "Radio", lambda: _agg(results.get("carrier_progression", []))),
         (65, "CIQ tabs checks", "eUtran Parameters Tab", "PCI uniqueness", "Radio", lambda: _agg(results.get("pci_4g", []) + results.get("pci_5g", []))),
         (66, "CIQ tabs checks", "eUtran Parameters Tab", "Pre-existing node cellId vs ENM & RFDS", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
         (67, "CIQ tabs checks", "eUtran Parameters Tab", "Riport should be unique", "Radio", lambda: _agg(results.get("xmu_port_overlap", []))),
