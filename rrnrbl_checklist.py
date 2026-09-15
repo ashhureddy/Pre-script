@@ -1077,6 +1077,12 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (48, "CIQ tabs checks", "5g info", "NR TAC - Existing sectors - ENM", "NR/Radio", lambda: _nsa_sa_status(results.get("nr_tac", []))),
         (49, "CIQ tabs checks", "5g info", " NR TAC   - For newly added Carriers-  NSA= 0 & SA =7 digit value", "NR/Radio", lambda: _nr_sa_tac_status(ciq_wb)),
         (50, "CIQ tabs checks", "5g info", "6472 / AIR-6449 - C Band / AIR6419 - DOD - Check for the SEF/FRU -- Check for the SEF/FRU", "Radio", lambda: _agg(results.get("sef_fru", []))),
+        # Row numbers 82/83 are APPENDED template rows, but list position here
+        # controls the UI order — placed to match the rule-mapping sheet's own
+        # ordering (#49 after the SEF/FRU check, #68 after carrier progression)
+        # without renumbering every existing row and its template cell.
+        (82, "CIQ tabs checks", "5g info", "MMwave - Rach Should not Exceed 137 - PCI/RACH limitation", "Radio",
+         lambda: _agg(results.get("mmwave_rach", [])) if results.get("mmwave_rach") else ("na", "No mmWave (N260) sectors on this site - rule does not apply.")),
         (51, "CIQ tabs checks", "5g info", "Unique Port for 5G and LTE incase of Separate Radio - Ports and data ports ", "Radio", lambda: _agg_port_uniqueness(results.get("port_uniqueness", []))),
 
         (52, "CIQ tabs checks", "gNB Info", "gNBId/gNodeB Name must should with  Mixed Mode Info tab ", "NR/Radio", lambda: _agg(results.get("gnb_identity", []))),
@@ -1095,6 +1101,8 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx / RBB Type Need to be checked with - Single / Double RILink - RRU type & RBB type", "Radio",
          lambda: _agg_row63(results.get("rbb_tx_isdlonly_4g", []), results.get("rilink_vs_rbb_4g", []))),
         (64, "CIQ tabs checks", "eUtran Parameters Tab", "1)Compare Sectorid With Carrier Progression - sectorId / Carrier", "Radio", lambda: _agg_carrier_progression(results.get("carrier_progression", []))),
+        (83, "CIQ tabs checks", "eUtran Parameters Tab", "2) Check for sectorID for  4890 Radio Type. \"_s\" should not be present", "Radio",
+         lambda: _agg(results.get("sector_id_4890", [])) if results.get("sector_id_4890") else ("na", "No 4890 radios on this site - rule does not apply.")),
         (65, "CIQ tabs checks", "eUtran Parameters Tab", "PhysicalLayerCellIdGroup and physicalLayerSubCellId should be unique - PCI", "Radio", lambda: _agg(results.get("pci_4g", []) + results.get("pci_5g", []))),
         (66, "CIQ tabs checks", "eUtran Parameters Tab", "Pre-existing node cellId must be same as ENM & N2E/NSB site CellId should be match with RFDS - Cellid", "NR/Radio",
          lambda: _agg_row66(results.get("cell_id_vs_rfds", []), results.get("cellid_uniqueness_4g", []))),
