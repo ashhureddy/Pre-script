@@ -20,8 +20,50 @@ import re
 import openpyxl
 
 import ciq_edp_reader as cer
+from band_labels import SECTOR_ORDER, is_5g_cell
 
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Checklist_RRNRBL.xlsx")
+
+
+def _log_text_for(entry, node_logs_text):
+    """The Pre log text for a node_role_list entry - a Secondary's own
+    name never appears as a log filename/AMOS prompt, so log_alias (set
+    to the Primary on the same Mixed Mode Info row) is used instead when
+    present."""
+    return (node_logs_text or {}).get(entry.get("log_alias") or entry["node"])
+
+
+def _bearer_pre_value(pre_vals, pre_key, entry):
+    """Pick the right side of a bearer_vlan/bearer_ip/bearer_router_ip
+    value out of pre_extract.extract_bearer_oam_ipv6()'s result, using the
+    entry's tech (LTE/NR) when set - REQUIRED on a TMBB node, where both
+    identities' bearer values live in the same dict and the flat
+    (untagged) key only ever holds the LTE side. Falls back to the flat
+    key for OAM fields (no _lte/_nr split - confirmed shared) and for any
+    entry with no tech (non-TMBB, single-technology log).
+
+    NO fallback to the flat key when tech IS set and its own value is
+    missing — confirmed real bug: a genuinely new Secondary (gNodeB not
+    added to this node's Pre config yet, only appearing in the Post/CIQ
+    design — confirmed real case, TNL01216/TNMN001216, log has no
+    InterfaceIPv6=NR at all) got the Primary's own LTE value silently
+    substituted in, since the flat key is `bearer_vlan_lte or
+    bearer_vlan_nr` and the old `or pre_vals.get(pre_key)` fallback
+    reached for it whenever the NR side was None. A missing tech-specific
+    value must surface as no-data, never as the other technology's value.
+
+    A Secondary identity has NO OAM of its own — OAM belongs to the
+    physical node as a whole and is reported once, under the Primary
+    only (confirmed: EDP itself never publishes a separate OAM target
+    for a Secondary). So oam_* fields return None here for a Secondary
+    entry rather than the log's single shared OAM value, which would
+    otherwise look like it belongs to the Secondary too."""
+    if entry.get("role") == "Secondary" and pre_key.startswith("oam_"):
+        return None
+    tech = entry.get("tech")
+    if tech and pre_key in ("bearer_vlan", "bearer_ip", "bearer_router_ip"):
+        return pre_vals.get(f"{pre_key}_{tech.lower()}")
+    return pre_vals.get(pre_key)
 
 STATUS_META = {
     "match": ("PASS", True),
@@ -38,6 +80,105 @@ STATUS_META = {
 # result lists (every item in those lists already carries a 'status' of
 # MATCH / MISMATCH / SKIPPED / INFO - see checks_sector.py).
 # ══════════════════════════════════════════════════════════════════════
+
+def _agg_row66(cell_id_results, uniqueness_results):
+    """Row 66: combines the Pre-vs-CIQ cellId comparison (cell_id_vs_rfds,
+    shared with rows 40/59/74) with the NEW cellId uniqueness check —
+    unlike PCI, cellId must be unique across ALL bands on one node, not
+    scoped per-band. Same grouping convention as the other rows."""
+    all_results = cell_id_results + uniqueness_results
+    if not all_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in all_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in all_results if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
+    def _reason(r):
+        if r.get("rule") == "#66U":
+            return "Cell ID uniqueness clash"
+        return "Cell ID mismatch"
+
+    return "mismatch", _group_bad_by_node_reason(bad, real, _reason)
+
+
+def _agg_passthrough(results_list, empty_note="No data (check did not run for this site)."):
+    """Same as _agg, except on a clean pass it shows the check's OWN note(s)
+    rather than a generic 'N checked, no mismatch.' count — for checks that
+    return one meaningful summary line per node (DSS state, Losses/Delays
+    sector presence) where the node count is meaningless or misleading."""
+    if not results_list:
+        return "unknown", empty_note
+    real = [r for r in results_list if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if bad:
+        parts = []
+        for r in bad[:6]:
+            bits = [str(r.get(f)) for f in ("node", "cell", "note") if r.get(f)]
+            parts.append(": ".join(bits) if bits else str(r))
+        more = f" (+{len(bad)-6} more)" if len(bad) > 6 else ""
+        return "mismatch", "; ".join(parts) + more
+    if real:
+        notes, seen = [], set()
+        for r in real:
+            note = r.get("note")
+            if note and note not in seen:
+                seen.add(note)
+                notes.append(note)
+        status = "info" if any(r.get("status") == "INFO" for r in real) else "match"
+        return status, " | ".join(notes[:6])
+    skipped_notes = {r.get("note") for r in results_list if r.get("note")}
+    return "unknown", "; ".join(sorted(skipped_notes)) or empty_note
+
+
+def _agg_carrier_progression(carrier_results):
+    """Row 64: same as _agg, except the pass message is
+    check_carrier_progression's own 'Each carrier maps to a single
+    band.' instead of the generic 'N checked, no mismatch.' — the
+    function runs once per node and returns one lone MATCH row when
+    clean, so _agg's count (number of nodes, not cells) was misleading."""
+    if not carrier_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in carrier_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if bad:
+        parts = []
+        for r in bad[:6]:
+            bits = [str(r.get(f)) for f in ("node", "cell", "note") if r.get(f)]
+            parts.append(": ".join(bits) if bits else str(r))
+        more = f" (+{len(bad)-6} more)" if len(bad) > 6 else ""
+        return "mismatch", "; ".join(parts) + more
+    if real:
+        return "match", "Each carrier maps to a single band."
+    skipped_notes = {r.get("note") for r in carrier_results if r.get("note")}
+    return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
+
+def _agg_port_uniqueness(port_results):
+    """Rows 51/67 (Riport uniqueness): same as _agg, except the pass
+    message is 'No port clash, all RIports unique.' instead of the
+    generic 'N checked, no mismatch.' A mismatch still names exactly
+    which port is reused and by which cells, same as _agg's default
+    itemization."""
+    if not port_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in port_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if bad:
+        parts = []
+        for r in bad[:6]:
+            bits = [str(r.get(f)) for f in ("node", "cell", "note") if r.get(f)]
+            parts.append(": ".join(bits) if bits else str(r))
+        more = f" (+{len(bad)-6} more)" if len(bad) > 6 else ""
+        return "mismatch", "; ".join(parts) + more
+    if real:
+        return "match", "No port clash, all RIports unique."
+    skipped_notes = {r.get("note") for r in port_results if r.get("note")}
+    return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
 
 def _agg(results_list, note_fields=("node", "cell", "note")):
     """Any MISMATCH -> mismatch. Only MATCH/INFO seen -> match. Nothing but
@@ -57,6 +198,328 @@ def _agg(results_list, note_fields=("node", "cell", "note")):
         return "match", f"{len(real)} checked, no mismatch."
     skipped_notes = {r.get("note") for r in results_list if r.get("note")}
     return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
+
+def _group_bad_by_node_reason(bad, real, reason_of):
+    """Shared core for the 'not found in RFDS' / RRU / Cell ID grouping:
+    when 2+ cells on the SAME node fail for the SAME reason, produce one
+    summary line (count + involved bands) instead of listing each cell's
+    full detail. A LONE mismatch on a node keeps its full per-cell detail
+    (Pre/CIQ/RFDS values, etc.) — a single discrepancy is worth seeing in
+    full, not compressed. reason_of(r) returns the grouping key's human
+    label (e.g. 'not found in RFDS').
+
+    Within a grouped line, each band shows its SECTOR letters too when
+    only PART of that band failed — confirmed real need: 'AWS_1 Alpha,
+    Beta' failing while Gamma passes must stay visible even once grouped,
+    not collapse to a bare band name that reads as if all sectors failed.
+    'real' (every checked result, match + mismatch) is the denominator
+    used to tell whole-band-failed (just the band name) from
+    partial-band-failed (band name + the specific sector letters) —
+    using 'bad' alone can't make that distinction, since it has no record
+    of which sectors PASSED."""
+    checked_sectors = {}
+    for r in real:
+        key = (r.get("node"), r.get("label"))
+        checked_sectors.setdefault(key, set()).add(r.get("sector"))
+
+    by_node_reason = {}
+    for r in bad:
+        key = (r.get("node"), reason_of(r))
+        by_node_reason.setdefault(key, []).append(r)
+
+    parts = []
+    for (node, reason), entries in by_node_reason.items():
+        if len(entries) == 1:
+            r = entries[0]
+            bits = [str(r.get(f)) for f in ("node", "cell", "note") if r.get(f)]
+            parts.append(": ".join(bits) if bits else str(r))
+            continue
+        failed_sectors_by_label = {}
+        for r in entries:
+            failed_sectors_by_label.setdefault(r.get("label") or "unknown band", set()).add(r.get("sector"))
+        label_parts = []
+        for label, failed in sorted(failed_sectors_by_label.items()):
+            total = checked_sectors.get((node, label), set())
+            if total and failed >= total:
+                label_parts.append(label)
+            else:
+                ordered = [s for s in SECTOR_ORDER if s in failed] or sorted(s for s in failed if s)
+                label_parts.append(f"{label} ({', '.join(ordered)})" if ordered else label)
+        parts.append(f"{node}: {len(entries)} sector(s) with {reason} ({', '.join(label_parts)}).")
+    more = f" (+{len(parts)-6} more)" if len(parts) > 6 else ""
+    return "; ".join(parts[:6]) + more
+
+
+def _agg_row60(cells_results):
+    """Row 60: EutranCellFDDId presence, CIQ vs RFDS — filtered to LTE
+    cells only from cells_vs_rfds (which combines LTE+5G), using
+    is_5g_cell() to tell them apart. beamDirection has NO RFDS extraction
+    anywhere (same gap as row 47 — that data lives on RFDS's still-unbuilt
+    'AntennaPositionDetails' page), so it's always flagged for manual
+    verification regardless of the automated portion's outcome. A clean
+    automated pass is 'info' (blue), not 'match' — partially checked, not
+    a full pass."""
+    lte_results = [r for r in cells_results if r.get("cell") and not is_5g_cell(r["cell"])]
+    manual_note = "Verify the beamDirection manually."
+    if not lte_results:
+        return "manual", manual_note
+    real = [r for r in lte_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if bad:
+        def _reason(r):
+            return "not found in RFDS" if r.get("note") == "Not found in RFDS." else "found in RFDS but not in CIQ"
+        return "mismatch", _group_bad_by_node_reason(bad, real, _reason) + " " + manual_note
+    if real:
+        return "info", f"{len(real)} checked, no mismatch. {manual_note}"
+    skipped_notes = {r.get("note") for r in lte_results if r.get("note")}
+    base = "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+    return "manual", f"{base} {manual_note}"
+
+
+def _agg_row47(cells_results, cell_id_results, radio_results, nrcelldu_results, antenna_results):
+    """Row 47: automates NRCellDU/NRCellCU (internal consistency),
+    cellLocalId, RRU Type, and Antenna Type against RFDS/CIQ — same
+    grouping as row 31 (_agg_cell_details). Electrical Tilt and
+    BeamDirection have NO RFDS extraction at all (that data lives on
+    RFDS's 'AntennaPositionDetails' page, which is row 32's own
+    still-unbuilt placeholder) — always flagged for manual verification
+    regardless of the automated portion's outcome, since this row can
+    never be a full pass on its own.
+
+    Status: a genuine automated MISMATCH stays 'mismatch' (red) with the
+    manual-verify note appended, not overridden — an automated failure is
+    still a failure. Only a clean automated pass becomes 'info' (blue):
+    partially checked, not a full match, since Tilt/BeamDirection were
+    never actually verified."""
+    all_results = cells_results + cell_id_results + radio_results + nrcelldu_results + antenna_results
+    manual_note = "Verify the Electrical Tilt, BeamDirection manually."
+    if not all_results:
+        return "manual", manual_note
+    real = [r for r in all_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if bad:
+        def _reason(r):
+            rule = r.get("rule")
+            if rule == "#6/#18":
+                return "not found in RFDS" if r.get("note") == "Not found in RFDS." else "found in RFDS but not in CIQ"
+            if rule == "#6/#24":
+                return "Cell ID mismatch"
+            if rule == "#6":
+                return "RRU type mismatch"
+            if rule == "#39":
+                return "NRCellDU/NRCellCU mismatch"
+            if rule == "#47":
+                return "Antenna Type mismatch"
+            return "mismatch"
+        return "mismatch", _group_bad_by_node_reason(bad, real, _reason) + " " + manual_note
+    if real:
+        return "info", f"{len(real)} checked, no mismatch. {manual_note}"
+    skipped_notes = {r.get("note") for r in all_results if r.get("note")}
+    base = "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+    return "manual", f"{base} {manual_note}"
+
+
+def _agg_row63(rbb_results, rilink_results):
+    """Row 63 ('TxRx / RBB Type Need to be checked with - Single / Double
+    RILink - RRU type & RBB type'): combines the SAME RBB Type/TX-RX/
+    Radio Port validation as row 58 (check_rbb_tx_isdlonly_4g) with the
+    Pre-vs-CIQ RILink comparison (check_rilink_vs_rbb_4g) — same grouping
+    convention as the other rows."""
+    all_results = rbb_results + rilink_results
+    if not all_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in all_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in all_results if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
+    def _reason(r):
+        note = r.get("note") or ""
+        if "does not match the expected RBB" in note:
+            return "unparseable RBB type"
+        if "ISDLONLY" in note:
+            return "ISDLONLY mismatch"
+        if "implies TX/RX" in note:
+            return "RBB/TX-RX mismatch"
+        if "implies" in note and "link but Radio Port" in note:
+            return "Radio Port link mismatch"
+        if r.get("rule") == "#63":
+            return "RILink Pre vs CIQ mismatch"
+        return "mismatch"
+
+    return "mismatch", _group_bad_by_node_reason(bad, real, _reason)
+
+
+def _agg_electrical_tilt_type(results_tilt):
+    """Row 61 ('electricalAntennaTilt should be integer value not
+    character'): same grouping treatment as the other rows — whole-band
+    collapses to just the band name, partial names the specific sectors;
+    a lone mismatch keeps its full detail."""
+    if not results_tilt:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in results_tilt if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in results_tilt if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+    return "mismatch", _group_bad_by_node_reason(bad, real, lambda r: "electricalAntennaTilt stored as character")
+
+
+def _agg_rbb_tx_isdlonly_4g(results_4g):
+    """Row 58 ('RBB type/noOfTx/noOfRx / Identify ISDLONLY carrier'): same
+    grouping treatment as the 5G rows — whole-band collapses to just the
+    band name, partial names the specific sectors; a lone mismatch keeps
+    its full detail."""
+    if not results_4g:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in results_4g if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in results_4g if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
+    def _reason(r):
+        note = r.get("note") or ""
+        if "does not match the expected RBB" in note:
+            return "unparseable RBB type"
+        if "ISDLONLY" in note:
+            return "ISDLONLY mismatch"
+        if "implies TX/RX" in note:
+            return "RBB/TX-RX mismatch"
+        return "mismatch"
+
+    return "mismatch", _group_bad_by_node_reason(bad, real, _reason)
+
+
+def _agg_params_4g(params_results):
+    """Row 57 ('earfcnDl/dlChannelBandwidth ENM vs CIQ' — actually covers
+    all four LTE fields check_rf_params_4g checks: earfcnDl/earfcnUl/
+    dlChannelBandwidth/ulChannelBandwidth). Same grouping treatment as
+    the 5G rows — whole-band collapses to just the band name, partial
+    names the specific sectors; a lone mismatch keeps its full detail."""
+    if not params_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in params_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in params_results if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+    return "mismatch", _group_bad_by_node_reason(bad, real, lambda r: "earfcn/bandwidth mismatch")
+
+
+def _agg_cell_details(cells_results, cell_id_results, radio_results):
+    """Row 31 ('CellDetails(Final) -- CellID / RCN / RRH'): same as _agg,
+    except cells failing for the SAME reason on the SAME node are grouped
+    into one summary line (see _group_bad_by_node_reason) instead of
+    listed cell-by-cell — covers cell presence BOTH directions ('not
+    found in RFDS' / 'found in RFDS but not in CIQ'), Cell ID mismatch,
+    and RRU type mismatch — matching this row's own title. Applies to any
+    band/sector, not just DOD_BWE (N77 carrier '_3') — confirmed: the
+    grouping is about the failure reason itself repeating, not which band
+    it happens to be.
+
+    Reason is dispatched by each result's 'rule' tag (#6/#18 = cell
+    presence, #6/#24 = Cell ID, #6 = RRU), not by matching note text —
+    Cell ID's mismatch note embeds live Pre/CIQ/RFDS values with no fixed
+    string to match on, unlike the other two."""
+    all_results = cells_results + cell_id_results + radio_results
+    if not all_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in all_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in all_results if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
+    def _reason(r):
+        rule = r.get("rule")
+        if rule == "#6/#18":
+            return "not found in RFDS" if r.get("note") == "Not found in RFDS." else "found in RFDS but not in CIQ"
+        if rule == "#6/#24":
+            return "Cell ID mismatch"
+        if rule == "#6":
+            return "RRU type mismatch"
+        return "mismatch"
+
+    return "mismatch", _group_bad_by_node_reason(bad, real, _reason)
+
+
+def _agg_rbb_5g(results_5g):
+    """Row 42 ('RBB Type vs no.ofrx and tx from ENM'): same grouping
+    treatment as _agg_cell_id — 2+ cells on one node failing for the SAME
+    reason (RBB Type unparseable / RILink mismatch / TX-RX mismatch)
+    summarize to one line with the involved bands; a lone mismatch keeps
+    its full detail."""
+    if not results_5g:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in results_5g if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in results_5g if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+
+    def _reason(r):
+        note = r.get("note") or ""
+        if "does not match the expected RBB" in note:
+            return "unparseable RBB Type"
+        if note.startswith("RILink"):
+            return "RILink mismatch"
+        if "TX/RX" in note:
+            return "TX/RX mismatch"
+        return "mismatch"
+
+    return "mismatch", _group_bad_by_node_reason(bad, real, _reason)
+
+
+def _agg_ssb_5g(ssb_results):
+    """Row 44 ('ssbFrequency/ssbOffset/ssbDuration'): same grouping
+    treatment as _agg_cell_id — 2+ cells on one node with a mismatch
+    summarize to one line naming just the band when EVERY sector of that
+    band failed, or '<band> (<sectors>)' when only some did; a lone
+    mismatch keeps its full Pre/CIQ field-level detail."""
+    if not ssb_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in ssb_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in ssb_results if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+    return "mismatch", _group_bad_by_node_reason(bad, real, lambda r: "ssbFrequency/ssbOffset/ssbDuration mismatch")
+
+
+def _agg_cell_id(cell_id_results):
+    """Cell ID checks (rows 40/59/66/74, all reading the same
+    cell_id_vs_rfds results): same grouping treatment as
+    _agg_cell_details — 2+ cells on one node with a Cell ID mismatch
+    summarize to one line with the involved bands (and specific sector
+    letters when only part of a band failed); a lone mismatch keeps its
+    full Pre/CIQ/RFDS detail."""
+    if not cell_id_results:
+        return "unknown", "No data (check did not run for this site)."
+    real = [r for r in cell_id_results if r.get("status") not in (None, "SKIPPED")]
+    bad = [r for r in real if r.get("status") == "MISMATCH"]
+    if not bad:
+        if real:
+            return "match", f"{len(real)} checked, no mismatch."
+        skipped_notes = {r.get("note") for r in cell_id_results if r.get("note")}
+        return "unknown", "; ".join(sorted(skipped_notes)) or "Skipped for every node (no Pre log / no RFDS)."
+    return "mismatch", _group_bad_by_node_reason(bad, real, lambda r: "Cell ID mismatch")
 
 
 def _worst_status(statuses):
@@ -106,18 +569,44 @@ def _pre_detected_status(node_logs_text, what):
             n = sum(1 for v in refs.values() if v.get("sef_branches") or v.get("tx_ref"))
             label = "cells with RfBranch refs"
         elif what == "sharing":
+            import band_labels as bl
             fru = pe.extract_cell_to_fru(text)
-            counts = {}
+            # Radio sharing = two or more sectors OF THE SAME BAND landing
+            # on one physical radio.
+            #
+            # Both qualifiers matter, and getting either wrong produced a
+            # false positive on a real site:
+            #   - several cells on one radio is NOT sharing (RRU-7 carries
+            #     2A_1, 2A_3, 9A_1, N002A_1 — ordinary multi-carrier), and
+            #   - several BANDS on one radio is NOT sharing either (that
+            #     same RRU-7 carries AWS, PCS and 5G_PCS, all sector Alpha).
+            # Only a repeated SECTOR within one band on one radio counts.
+            #
+            # band_label() returns (band_with_carrier, sector) — the
+            # carrier index is stripped so AWS_1 and AWS_3 compare as one
+            # band, and its sector name is used rather than re-parsing the
+            # cell name.
+            sectors_by_radio_band = {}
             for cell, f in fru.items():
-                if f and f != "-":
-                    counts[f] = counts.get(f, 0) + 1
-            n = sum(1 for c in counts.values() if c > 1)
-            label = "radios shared by >1 cell"
-            # A site with no shared radio is a legitimate design, but that
-            # is only knowable if radio data was actually read. Track
-            # whether ANY radio was seen so 'no sharing' can be told apart
-            # from 'nothing parsed'.
-            if counts:
+                if not f or f == "-":
+                    continue
+                label, sector = bl.band_label(cell)
+                if not label or not sector:
+                    continue
+                band = re.sub(r'_\d+$', '', str(label))
+                sectors_by_radio_band.setdefault((f, band), set()).add(sector)
+            shared = {k: v for k, v in sectors_by_radio_band.items() if len(v) > 1}
+            n = len(shared)
+            label = "radio/band combination(s) carrying 2+ sectors"
+            if shared:
+                detail = "; ".join(f"{f} {b}: {', '.join(sorted(secs))}"
+                                   for (f, b), secs in sorted(shared.items()))
+                found.append(f"{nid}: {detail}")
+                continue
+            # 'No sharing' is a legitimate design, but only knowable if
+            # radio data was actually read — track that so it can be told
+            # apart from 'nothing parsed'.
+            if sectors_by_radio_band:
                 any_radio_data = True
         else:
             return "unknown", f"Unknown detection target '{what}'."
@@ -290,22 +779,46 @@ def _sw_consistency_status(sw_version_results):
 def _sw_status_v2(sw_version_results):
     """Confirmed to do BOTH signals, not just one: (1) every node that has a
     Pre log actually shows a detected SW version, AND (2) every detected
-    version agrees across nodes. Either failing is a mismatch."""
+    version agrees across nodes. Either failing is a mismatch.
+
+    SKIPPED entries (no Pre log at all for this node — confirmed real case:
+    a genuinely new node being added in this build, e.g. Pre has 2 nodes
+    and CIQ adds a 3rd) are excluded from 'missing' entirely — that node
+    was never expected to have a Pre log, so its absence isn't a real
+    version-mismatch finding. Only a node that HAD a log but still
+    couldn't yield a version (status not SKIPPED, sw_version still None/
+    'NOT FOUND') counts as missing."""
     if not sw_version_results:
         return "unknown", "No Pre kget-all logs loaded."
-    missing = [r.get("node") for r in sw_version_results if r.get("sw_version") in (None, "NOT FOUND")]
-    versions = {r.get("sw_version") for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND")}
+    checked = [r for r in sw_version_results if r.get("status") != "SKIPPED"]
+    missing = [r.get("node") for r in checked if r.get("sw_version") in (None, "NOT FOUND")]
+    versions = {r.get("sw_version") for r in checked if r.get("sw_version") not in (None, "NOT FOUND")}
     bad = []
     if missing:
         bad.append(f"No SW version detected for: {', '.join(missing)}")
     if len(versions) > 1:
-        detail = "; ".join(f"{r.get('node')}={r.get('sw_version')}" for r in sw_version_results if r.get("sw_version") not in (None, "NOT FOUND"))
+        detail = "; ".join(f"{r.get('node')}={r.get('sw_version')}" for r in checked if r.get("sw_version") not in (None, "NOT FOUND"))
         bad.append(f"Mixed SW versions across Pre nodes: {detail}")
     if bad:
         return "mismatch", " | ".join(bad)
     if versions:
         return "match", f"All Pre nodes show a SW version, all on {versions.pop()}."
     return "unknown", "No SW version captured from any Pre kget-all log."
+
+
+def _nsa_sa_status(nr_tac_results):
+    """Row 45 ('NSA/SA'): a per-SITE summary, not per-cell pass/fail — a
+    node counts as SA in Pre if ANY of its cells report a 7-digit Pre
+    nRTAC (check_nr_tac's own SA signal). Distinct from row 48 (Pre vs
+    CIQ nRTAC value agreement), which still uses the per-cell result."""
+    if not nr_tac_results:
+        return "unknown", "No data (check did not run for this site)."
+    sa_nodes = sorted({r.get("node") for r in nr_tac_results
+                        if r.get("pre_nrtac") and str(r.get("pre_nrtac")).isdigit()
+                        and len(str(r.get("pre_nrtac"))) == 7})
+    if sa_nodes:
+        return "info", f"{', '.join(sa_nodes)} {'is' if len(sa_nodes) == 1 else 'are'} SA config in pre."
+    return "match", "All Nodes are NSA in pre."
 
 
 def _mme_region_status(ciq_wb):
@@ -336,32 +849,51 @@ def _mme_region_status(ciq_wb):
 
 
 def _nr_sa_tac_status(ciq_wb):
+    """NR_SA tab declares, per NODE, the exact nRTAC value expected if that
+    node is SA-converted ('Node Name' + 'nrTAC' columns, confirmed real
+    CIQ structure). Checked at CELL level — each 5G Info row's own nRTAC
+    is compared individually against its node's expected value, not
+    collapsed into a per-node set first (a single divergent cell must be
+    named, not just inferred from the node showing more than one value)."""
     has_nr_sa = "NR_SA" in ciq_wb.sheetnames
     if not has_nr_sa:
         return "na", "No NR_SA tab in this CIQ — SA-carrier TAC rule does not apply."
     if "5G Info" not in ciq_wb.sheetnames:
         return "unknown", "NR_SA tab present but no 5G Info sheet found."
-    rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"])
+
+    sa_tac_by_node = {_norm(r.get("Node Name")).upper(): _norm(r.get("nrTAC"))
+                      for r in cer.sheet_rows_as_dicts(ciq_wb["NR_SA"]) if _norm(r.get("Node Name"))}
+
+    fiveg_rows = [r for r in cer.sheet_rows_as_dicts(ciq_wb["5G Info"]) if _norm(r.get("gNB Name"))]
+    if not fiveg_rows:
+        return "unknown", "NR_SA tab present but no nRTAC values read from 5G Info."
+
     bad = []
-    checked = 0
-    for r in rows:
-        nsa_sa = _norm(r.get("NSA/SA")).upper()
+    node_tacs = {}
+    for r in fiveg_rows:
+        node = _norm(r.get("gNB Name")).upper()
+        cell = _norm(r.get("NRCellDU")) or node
         tac = _norm(r.get("nRTAC"))
-        cell = _norm(r.get("NRCellDU"))
-        if not nsa_sa or not cell:
-            continue
-        checked += 1
-        is_sa = "SA" in nsa_sa and "NSA" not in nsa_sa
-        is_nsa = "NSA" in nsa_sa
-        if is_sa and len(tac) != 7:
-            bad.append(f"{cell}: NSA/SA=SA but nRTAC='{tac}' (expected 7 digits)")
-        elif is_nsa and tac not in ("", "0"):
-            bad.append(f"{cell}: NSA/SA=NSA but nRTAC='{tac}' (expected blank/0)")
-    if not checked:
-        return "unknown", "NR_SA tab present but no NSA/SA values read from 5G Info."
+        expected = sa_tac_by_node.get(node)
+        if expected is not None:
+            if tac != expected:
+                bad.append(f"{cell}: nRTAC='{tac}' does not match NR_SA value '{expected}' for {node}")
+            else:
+                node_tacs.setdefault(node, ("sa", expected))
+        else:
+            if tac != "0":
+                bad.append(f"{cell}: nRTAC='{tac}' expected 0 ({node} not in NR_SA tab)")
+            else:
+                node_tacs.setdefault(node, ("nsa", "0"))
+
     if bad:
         return "mismatch", "; ".join(bad[:6])
-    return "match", f"{checked} 5G Info row(s): nRTAC digit-count matches NSA/SA."
+    sa_lines = [f"NR TAC: {tac}: {node}" for node, (kind, tac) in node_tacs.items() if kind == "sa"]
+    nsa_nodes = sorted(node for node, (kind, _) in node_tacs.items() if kind == "nsa")
+    lines = list(sa_lines)
+    if nsa_nodes:
+        lines.append(f"NR TAC: 0: {', '.join(nsa_nodes)}")
+    return "match", " | ".join(lines) if lines else "No 5G nodes to check."
 
 
 def _fa_code_status(site_details, ciq_wb):
@@ -521,7 +1053,7 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (29, "RFDS Checks", None, "JobDetail", "Radio", None),
         (30, "RFDS Checks", None, "NonRFInventoryDetails(Final)", "Radio", None),
         (31, "RFDS Checks", None, "CellDetails(Final) -- CellID / RCN /RRH", "Radio",
-         lambda: _agg(results.get("cells_vs_rfds", []) + results.get("radio_type", []))),
+         lambda: _agg_cell_details(results.get("cells_vs_rfds", []), results.get("cell_id_vs_rfds", []), results.get("radio_type", []))),
         (32, "RFDS Checks", None, "AntennaPositionDetails -- Model / LinkedCells / Azimuth(Design)  / Total Postions", "Radio", None),
         (33, "RFDS Checks", None, "Plumbing Diagram -- TxRx / TMA / Radio - RET Controller / Total Postions", "Radio", None),
 
@@ -530,46 +1062,52 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
         (37, "CIQ tabs checks", "Mixed Mode Info Tab", "MME Region [N2E site MME Regionn should be with N-RAN,if its E-RAN,raise PI to design team]", "NR/Radio", lambda: _mme_region_status(ciq_wb)),
         (38, "CIQ tabs checks", "Mixed Mode Info Tab", "Make sure Primary & secondary node is matching with RFDS-Non RF Inventory Details (Final)", "Radio", lambda: _agg(results.get("primary_secondary", []))),
 
-        (39, "CIQ tabs checks", "5g info", "NRCellDU/ NRCellCU  ENM vs CIQ ", "NR/Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (40, "CIQ tabs checks", "5g info", "nRTAC/ cellLocalId ENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
-        (41, "CIQ tabs checks", "5g info", "arfcnDL/ arfcnUL and bSChannelBwDL/ bSChannelBwDL\nENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
-        (42, "CIQ tabs checks", "5g info", "RBB Type vs no.ofrx and tx from ENM", "Radio", lambda: _agg(results.get("params_5g", []))),
-        (43, "CIQ tabs checks", "5g info", "DSS check", "NR/Radio", lambda: _agg(results.get("dss", []))),
-        (44, "CIQ tabs checks", "5g info", "ssbFrequency /ssbOffset/ ssbDuration ", "NR/Radio", lambda: _agg(results.get("params_5g", []))),
-        (45, "CIQ tabs checks", "5g info", "NSA/SA", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
+        (39, "CIQ tabs checks", "5g info", "NRCellDU/ NRCellCU  ENM vs CIQ ", "NR/Radio", lambda: _agg(results.get("nrcelldu_nrcellcu", []))),
+        (40, "CIQ tabs checks", "5g info", "nRTAC/ cellLocalId ENM Vs CIQ", "NR/Radio", lambda: _agg_cell_id(results.get("cell_id_vs_rfds", []))),
+        (41, "CIQ tabs checks", "5g info", "arfcnDL/ arfcnUL and bSChannelBwDL/ bSChannelBwDL\nENM Vs CIQ", "NR/Radio", lambda: _agg(results.get("arfcn_bw_5g", []))),
+        (42, "CIQ tabs checks", "5g info", "RBB Type vs no.ofrx and tx from ENM", "Radio",
+         lambda: _agg_rbb_5g([r for r in results.get("sector_swap", []) if r.get("kind") == "5g"])),
+        (43, "CIQ tabs checks", "5g info", "DSS check", "NR/Radio", lambda: _agg_passthrough(results.get("dss", []))),
+        (44, "CIQ tabs checks", "5g info", "ssbFrequency /ssbOffset/ ssbDuration ", "NR/Radio", lambda: _agg_ssb_5g(results.get("ssb_5g", []))),
+        (45, "CIQ tabs checks", "5g info", "NSA/SA", "NR/Radio", lambda: _nsa_sa_status(results.get("nr_tac", []))),
         (46, "CIQ tabs checks", "5g info", "Make sure  BBU Type should match with RFDS and CIQ - BBU Type", "NR/Radio", lambda: _agg(board_type)),
-        (47, "CIQ tabs checks", "5g info", "NRCellDU/NRCellCU/cellLocalId/RRU Type/ BeamDirection (Azimuth) /Antenna Type /Electrical Tilt must same as RFDS ", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (48, "CIQ tabs checks", "5g info", "NR TAC - Existing sectors - ENM", "NR/Radio", lambda: _agg(results.get("nr_tac", []))),
+        (47, "CIQ tabs checks", "5g info", "NRCellDU/NRCellCU/cellLocalId/RRU Type/ BeamDirection (Azimuth) /Antenna Type /Electrical Tilt must same as RFDS ", "Radio",
+         lambda: _agg_row47(results.get("cells_vs_rfds", []), results.get("cell_id_vs_rfds", []), results.get("radio_type", []),
+                             results.get("nrcelldu_nrcellcu", []), [r for r in results.get("antenna_type_rfds", []) if r.get("rule") == "#47"])),
+        (48, "CIQ tabs checks", "5g info", "NR TAC - Existing sectors - ENM", "NR/Radio", lambda: _nsa_sa_status(results.get("nr_tac", []))),
         (49, "CIQ tabs checks", "5g info", " NR TAC   - For newly added Carriers-  NSA= 0 & SA =7 digit value", "NR/Radio", lambda: _nr_sa_tac_status(ciq_wb)),
         (50, "CIQ tabs checks", "5g info", "6472 / AIR-6449 - C Band / AIR6419 - DOD - Check for the SEF/FRU -- Check for the SEF/FRU", "Radio", lambda: _agg(results.get("sef_fru", []))),
-        (51, "CIQ tabs checks", "5g info", "Unique Port for 5G and LTE incase of Separate Radio - Ports and data ports ", "Radio", lambda: _agg(results.get("port_uniqueness", []))),
+        (51, "CIQ tabs checks", "5g info", "Unique Port for 5G and LTE incase of Separate Radio - Ports and data ports ", "Radio", lambda: _agg_port_uniqueness(results.get("port_uniqueness", []))),
 
-        (52, "CIQ tabs checks", "gNB Info", "gNBId/gNodeB Name must should with  Mixed Mode Info tab ", "NR/Radio", lambda: _agg(identity)),
-        (53, "CIQ tabs checks", "gNB Info", "DU type should be same as 5G Info tab - BBU Type", "NR/Radio", lambda: _agg(board_type)),
+        (52, "CIQ tabs checks", "gNB Info", "gNBId/gNodeB Name must should with  Mixed Mode Info tab ", "NR/Radio", lambda: _agg(results.get("gnb_identity", []))),
+        (53, "CIQ tabs checks", "gNB Info", "DU type should be same as 5G Info tab - BBU Type", "NR/Radio", lambda: _agg(results.get("gnb_du_type", []))),
 
-        (54, "CIQ tabs checks", "eNB Info", "eNBId/eNodeB Name should match with Mixed Mode Info tab - eNBId/eNodeB", "NR/Radio", lambda: _agg(identity)),
+        (54, "CIQ tabs checks", "eNB Info", "eNBId/eNodeB Name should match with Mixed Mode Info tab - eNBId/eNodeB", "NR/Radio", lambda: _agg(results.get("enb_identity", []))),
         (55, "CIQ tabs checks", "eNB Info", "BBU Type should match with RFDS - BBU Type", "Radio", lambda: _agg(board_type)),
         (56, "CIQ tabs checks", "eNB Info", "TAC Value", "NR/Radio", lambda: _agg(results.get("tac", []))),
 
-        (57, "CIQ tabs checks", "eUtran Parameters Tab", "earfcnDl/ dlChannelBandwidth ENM vs CIQ", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
-        (58, "CIQ tabs checks", "eUtran Parameters Tab", "RBB type/ noOfTx/noOfRx\nIdentify  ISDLONLY carrier", "NR/Radio", lambda: _agg(results.get("params_4g", []))),
-        (59, "CIQ tabs checks", "eUtran Parameters Tab", "cellId ENM vs CIQ \nIdentify cellid change SOW", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
-        (60, "CIQ tabs checks", "eUtran Parameters Tab", "EutranCellFDDId/beamDirection should match with RFDS - EutranCell", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (61, "CIQ tabs checks", "eUtran Parameters Tab", "electricalAntennaTilt should be integer value not character - Tilt", "Radio", lambda: _agg(results.get("params_4g", []))),
+        (57, "CIQ tabs checks", "eUtran Parameters Tab", "earfcnDl/ dlChannelBandwidth ENM vs CIQ", "NR/Radio", lambda: _agg_params_4g(results.get("params_4g", []))),
+        (58, "CIQ tabs checks", "eUtran Parameters Tab", "RBB type/ noOfTx/noOfRx\nIdentify  ISDLONLY carrier", "NR/Radio", lambda: _agg_rbb_tx_isdlonly_4g(results.get("rbb_tx_isdlonly_4g", []))),
+        (59, "CIQ tabs checks", "eUtran Parameters Tab", "cellId ENM vs CIQ \nIdentify cellid change SOW", "NR/Radio", lambda: _agg_cell_id(results.get("cell_id_vs_rfds", []))),
+        (60, "CIQ tabs checks", "eUtran Parameters Tab", "EutranCellFDDId/beamDirection should match with RFDS - EutranCell", "Radio", lambda: _agg_row60(results.get("cells_vs_rfds", []))),
+        (61, "CIQ tabs checks", "eUtran Parameters Tab", "electricalAntennaTilt should be integer value not character - Tilt", "Radio", lambda: _agg_electrical_tilt_type(results.get("electrical_tilt_type", []))),
         (62, "CIQ tabs checks", "eUtran Parameters Tab", "configuredOutputPower depends on RRU type (Ericsson 4490, 4890, or 4472 radios (e.g., NSB or Allagi projects, New Carrier Adds, Radio Swaps) will be Configured with maximum allowed power of 160W.) - configuredOutputPower", "Radio", None),
-        (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx / RBB Type Need to be checked with - Single / Double RILink - RRU type & RBB type", "Radio", lambda: _agg(results.get("params_4g", []))),
-        (64, "CIQ tabs checks", "eUtran Parameters Tab", "1)Compare Sectorid With Carrier Progression - sectorId / Carrier", "Radio", lambda: _agg(results.get("carrier_progression", []))),
+        (63, "CIQ tabs checks", "eUtran Parameters Tab", "TxRx / RBB Type Need to be checked with - Single / Double RILink - RRU type & RBB type", "Radio",
+         lambda: _agg_row63(results.get("rbb_tx_isdlonly_4g", []), results.get("rilink_vs_rbb_4g", []))),
+        (64, "CIQ tabs checks", "eUtran Parameters Tab", "1)Compare Sectorid With Carrier Progression - sectorId / Carrier", "Radio", lambda: _agg_carrier_progression(results.get("carrier_progression", []))),
         (65, "CIQ tabs checks", "eUtran Parameters Tab", "PhysicalLayerCellIdGroup and physicalLayerSubCellId should be unique - PCI", "Radio", lambda: _agg(results.get("pci_4g", []) + results.get("pci_5g", []))),
-        (66, "CIQ tabs checks", "eUtran Parameters Tab", "Pre-existing node cellId must be same as ENM & N2E/NSB site CellId should be match with RFDS - Cellid", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
-        (67, "CIQ tabs checks", "eUtran Parameters Tab", "Riport should be unique", "Radio", lambda: _agg(results.get("xmu_port_overlap", []))),
+        (66, "CIQ tabs checks", "eUtran Parameters Tab", "Pre-existing node cellId must be same as ENM & N2E/NSB site CellId should be match with RFDS - Cellid", "NR/Radio",
+         lambda: _agg_row66(results.get("cell_id_vs_rfds", []), results.get("cellid_uniqueness_4g", []))),
+        (67, "CIQ tabs checks", "eUtran Parameters Tab", "Riport should be unique", "Radio", lambda: _agg_port_uniqueness(results.get("port_uniqueness", []))),
         (68, "CIQ tabs checks", "eUtran Parameters Tab", "tmaType / tmaConfiguration", "Radio", None),
-        (69, "CIQ tabs checks", "eUtran Parameters Tab", "antenna model", "Radio", lambda: _agg(results.get("cells_vs_rfds", []))),
-        (70, "CIQ tabs checks", "eUtran Parameters Tab", " XMU Validation - Need to check with RFDS - XMU", "Radio", lambda: _xmu_vs_rfds_status(enb_rows_all, node_ids, rfds_pages)),
+        (69, "CIQ tabs checks", "eUtran Parameters Tab", "antenna model", "Radio",
+         lambda: _agg([r for r in results.get("antenna_type_rfds", []) if r.get("rule") == "#69"])),
+        (70, "CIQ tabs checks", "eUtran Parameters Tab", " XMU Validation - Need to check with RFDS - XMU", "Radio", lambda: _agg(results.get("xmu", []))),
         (71, "CIQ tabs checks", "eUtran Parameters Tab", "ENM Validation - Need to check with site locator or ENM sheet (B2E) - ENM", "Radio", None),
 
-        (72, "CIQ tabs checks", "Losses and delay", "Check for Losses delay matches to FDD and TxRx", "Radio", lambda: _agg(results.get("losses_vs_antenna", []))),
+        (72, "CIQ tabs checks", "Losses and delay", "Check for Losses delay matches to FDD and TxRx", "Radio", lambda: _agg_passthrough(results.get("losses_vs_antenna", []))),
         (73, "CIQ tabs checks", "Antenna Information", "AntennaUnit/AntennaSubunit should unique for the band wise", "Radio", lambda: _agg(results.get("antenna", []))),
-        (74, "CIQ tabs checks", "Sector Movement / Deletion sheet", "All source cells cellid/SSB/ BW matching with ENM and all target cells with eUtan tab", "NR/Radio", lambda: _agg(results.get("cell_id_vs_rfds", []))),
+        (74, "CIQ tabs checks", "Sector Movement / Deletion sheet", "All source cells cellid/SSB/ BW matching with ENM and all target cells with eUtan tab", "NR/Radio", lambda: _agg_cell_id(results.get("cell_id_vs_rfds", []))),
 
         # Rows 75-76 are new in the updated template (they pushed the old
         # "Pre checks" block from 75-79 down to 77-81). Both are EDP/ENM IP
@@ -629,6 +1167,48 @@ _FPB_CONTENT_TYPE = "application/vnd.ms-excel.featurepropertybag+xml"
 _FPB_REL_TYPE = "http://schemas.microsoft.com/office/2022/11/relationships/FeaturePropertyBag"
 
 
+def _template_checkbox_xf(template_path):
+    """(index, extLst_xml) of the cellXfs <xf> in the template that carries
+    the checkbox xfComplement extension, or (None, None)."""
+    import zipfile
+    with zipfile.ZipFile(template_path) as tz:
+        if "xl/styles.xml" not in tz.namelist():
+            return None, None
+        st = tz.read("xl/styles.xml").decode("utf-8")
+    m = re.search(r"<cellXfs[^>]*>(.*?)</cellXfs>", st, re.S)
+    if not m:
+        return None, None
+    for i, xf in enumerate(re.findall(r"<xf [^>]*/>|<xf .*?</xf>", m.group(1), re.S)):
+        ext = re.search(r"<extLst>.*?</extLst>", xf, re.S)
+        if ext and "xfComplement" in ext.group(0):
+            return i, ext.group(0)
+    return None, None
+
+
+def _inject_xf_complement(styles_bytes, xf_index, ext_xml):
+    """Put ext_xml back onto cellXfs entry #xf_index of a saved styles.xml,
+    converting a self-closing <xf .../> into an open/close pair so the
+    extension can live inside it."""
+    if xf_index is None or not ext_xml:
+        return styles_bytes
+    st = styles_bytes.decode("utf-8")
+    m = re.search(r"(<cellXfs[^>]*>)(.*?)(</cellXfs>)", st, re.S)
+    if not m:
+        return styles_bytes
+    xfs = re.findall(r"<xf [^>]*/>|<xf .*?</xf>", m.group(2), re.S)
+    if xf_index >= len(xfs):
+        return styles_bytes
+    target = xfs[xf_index]
+    if "xfComplement" in target:
+        return styles_bytes
+    if target.endswith("/>"):
+        rebuilt = target[:-2] + ">" + ext_xml + "</xf>"
+    else:
+        rebuilt = target[: target.rindex("</xf>")] + ext_xml + "</xf>"
+    xfs[xf_index] = rebuilt
+    return (st[: m.start(2)] + "".join(xfs) + st[m.end(2):]).encode("utf-8")
+
+
 def _restore_native_checkboxes(filled_bytes, template_path):
     """openpyxl's save() silently drops xl/featurePropertyBag/featurePropertyBag.xml
     - the part that marks C-column cells as Excel's native interactive
@@ -646,11 +1226,29 @@ def _restore_native_checkboxes(filled_bytes, template_path):
             return filled_bytes  # template has no native checkboxes to restore
         fpb_xml = tz.read(_FPB_PART)
 
+    # The bag alone is NOT what renders a checkbox. The binding lives in
+    # xl/styles.xml: the checkbox cells use a specific <xf> that carries
+    #   <extLst><ext uri="{C7286773-...}"><xfpb:xfComplement i="0"/></ext></extLst>
+    # openpyxl rewrites styles.xml from its own object model and drops that
+    # extension (confirmed by a real round-trip: the template has 2 <extLst>
+    # blocks, the saved copy none) — which is why the download showed bare
+    # TRUE/FALSE.
+    #
+    # The extension is re-injected into the xf that the checkbox cells
+    # actually use, rather than copying the template's styles.xml wholesale:
+    # openpyxl APPENDS style entries when it saves, so the saved sheet
+    # references xf indices beyond the template's table and swapping the
+    # whole part produces a workbook Excel/openpyxl cannot open
+    # (IndexError: list index out of range — verified).
+    ck_xf_idx, ck_ext = _template_checkbox_xf(template_path)
+
     out = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(filled_bytes)) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
         for item in src.infolist():
             data = src.read(item.filename)
-            if item.filename == "[Content_Types].xml":
+            if item.filename == "xl/styles.xml" and ck_ext is not None:
+                data = _inject_xf_complement(data, ck_xf_idx, ck_ext)
+            elif item.filename == "[Content_Types].xml":
                 text = data.decode("utf-8")
                 if _FPB_PART.split("xl/")[1] not in text and "featurePropertyBag" not in text:
                     text = text.replace(
@@ -695,16 +1293,37 @@ def fill_checklist_xlsx(checklist, site_id_fa, engineer_name=None, sow=None, dat
 
     for entry in checklist:
         r = entry["row"]
-        override = manual_overrides.get(r)
-        if entry["status"] == "manual" and override is not None:
-            ws[f"C{r}"] = bool(override.get("done"))
-            comment = (override.get("comment") or "").strip()
-            ws[f"E{r}"] = f"[MANUAL — user-confirmed] {comment}" if comment else "[MANUAL — marked done, no comment]" if override.get("done") else "[MANUAL] Not yet reviewed."
-            continue
-        ws[f"C{r}"] = (entry["status"] == "match")
+        override = manual_overrides.get(r) or {}
+        # The UI widget writes 'checked'; older callers passed 'done'. Accept
+        # both — a key mismatch here is why edits made in the app never
+        # reached the downloaded file.
+        user_checked = override.get("checked", override.get("done"))
+        user_comment = (override.get("comment") or "").strip()
+
+        # The tick means "this check was carried out", NOT "it passed" — so
+        # an automated row is ticked even when the check found a mismatch
+        # (the finding itself is reported in the Comments column).
+        #
+        # MANUAL rows are the exception: nothing was verified
+        # automatically, so they default to UNTICKED and only the engineer
+        # can tick them, in the UI. Ticking them here would assert a review
+        # that never happened.
+        #
+        # An explicit choice from the UI always wins, either way.
+        ws[f"C{r}"] = (bool(user_checked) if user_checked is not None
+                       else entry["status"] != "manual")
+
         label, _ = STATUS_META.get(entry["status"], ("", False))
-        comment = entry["detail"] or ""
-        ws[f"E{r}"] = f"[{label}] {comment}" if label else comment
+        if user_comment:
+            # User's own words win, but keep the status label so a failure
+            # is never silently downgraded to a clean-looking row.
+            ws[f"E{r}"] = f"[{label}] {user_comment}" if label else user_comment
+        elif entry["status"] == "manual":
+            ws[f"E{r}"] = ("[MANUAL — marked done, no comment]" if user_checked
+                           else "[MANUAL] Not yet reviewed.")
+        else:
+            comment = entry["detail"] or ""
+            ws[f"E{r}"] = f"[{label}] {comment}" if label else comment
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -721,9 +1340,28 @@ EDP_FIELD_TABLE_COLUMNS = [
 
 
 def build_primary_secondary_node_list(ciq_wb):
-    """One {node, role} entry per PHYSICAL node declared in Mixed Mode
-    Info — both the Primary (whichever of eNodeB/gNodeB Name matches 'Node
-    to be built as') and the Secondary (the other one), when both exist.
+    """One {node, role, tech, log_alias} entry per identity declared in
+    Mixed Mode Info — both the Primary (whichever of eNodeB/gNodeB Name
+    matches 'Node to be built as') and the Secondary (the other one),
+    when both exist.
+
+    Each Mixed Mode Info ROW stands alone: 'Node to be built as' is
+    always the real log/AMOS node id for that row, and the row's OTHER
+    identity (Secondary) lives inside that SAME log — a Secondary is
+    never a separately uploaded log. log_alias on a Secondary entry
+    names which key to use against node_logs_text (always the Primary on
+    the same row).
+
+    tech is 'LTE' if that entry came from eNodeB Name, 'NR' if from
+    gNodeB Name — this is a TECHNOLOGY tag, not a role tag. On a TMBB
+    node both identities' bearer VLAN/IP/default-router live under the
+    same log's 'Router=LTE', split only by an InterfaceIPv6/NextHop
+    suffix ('1' for LTE-tech, 'NR' for NR-tech) — see
+    pre_extract.extract_bearer_oam_ipv6. WHICH identity (LTE or NR) is
+    Primary varies by site — confirmed opposite on two real sites
+    (FCL04120: eNodeB/LTE is Primary; OKTN000082: gNodeB/NR is Primary)
+    — so tech must be read off the actual identity, never assumed from
+    role.
 
     This does NOT reuse checked_nodes (run_validation.py's own node list):
     checked_nodes only ever holds the PRIMARY name ('Node to be built as'),
@@ -748,9 +1386,11 @@ def build_primary_secondary_node_list(ciq_wb):
         else:
             primary, secondary = (e_name or g_name), (g_name if e_name else "")
         if primary:
-            out.append({"node": primary, "role": "Primary"})
+            primary_tech = "LTE" if primary == e_name else ("NR" if primary == g_name else None)
+            out.append({"node": primary, "role": "Primary", "tech": primary_tech})
         if secondary and bbu_mode != "SMBB":
-            out.append({"node": secondary, "role": "Secondary"})
+            secondary_tech = "NR" if secondary == g_name else ("LTE" if secondary == e_name else None)
+            out.append({"node": secondary, "role": "Secondary", "tech": secondary_tech, "log_alias": primary})
     return out
 
 
@@ -817,14 +1457,14 @@ def build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows):
     out = []
     for entry in node_role_list:
         nid = entry["node"]
-        log_text = (node_logs_text or {}).get(nid)
+        log_text = _log_text_for(entry, node_logs_text)
         if not log_text:
             continue
         pre_vals = pe.extract_bearer_oam_ipv6(log_text)
         rows = cer.edp_rows_for_site(edp_rows, nid)
         edp_rec = rows[0] if rows else None
         for pre_key, edp_key, label, is_ipv6 in field_map:
-            pre_v = pre_vals.get(pre_key)
+            pre_v = _bearer_pre_value(pre_vals, pre_key, entry)
             edp_v = _norm(edp_rec.get(edp_key)) if edp_rec else None
             if pre_v is None and not edp_v:
                 continue  # neither side has data - nothing to show
@@ -843,7 +1483,22 @@ def build_pre_vs_edp_ipv6_table(node_logs_text, node_role_list, edp_rows):
     return out
 
 
-def build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows):
+def _same_ipv6(a, b):
+    """Compare two IPv6 values ignoring cosmetic differences: the '/prefix'
+    suffix, zero-padding and '::' compression. Same rule the long-form
+    Pre-vs-EDP check uses (_pre_vs_edp_field_status._ipv6_eq) — shared here
+    so the pivot table and that check can never disagree on what counts as
+    a mismatch. Falls back to a plain string compare if a value isn't a
+    parseable address."""
+    import ipaddress
+    a, b = str(a or "").strip(), str(b or "").strip()
+    try:
+        return ipaddress.IPv6Address(a.split("/")[0]) == ipaddress.IPv6Address(b.split("/")[0])
+    except Exception:
+        return a.split("/")[0] == b.split("/")[0]
+
+
+def build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows, ciq_wb=None):
     """One row per (node, role): Bearer/OAM VLAN, IPv6, Default Router,
     pre + EDP side by side — wide layout (Node ID + 2-col-per-field),
     replacing the long one-row-per-field format from
@@ -861,18 +1516,51 @@ def build_pre_vs_edp_pivot_rows(node_logs_text, node_role_list, edp_rows):
         ("oam_router_ip", "IPV6_SIAD_OAM_IP_DEF_ROUTER", "oam_router"),
     ]
     role_short = {"Primary": "P", "Secondary": "S"}
+    du_type = _du_type_by_node(ciq_wb) if ciq_wb is not None else {}
 
     out = []
     for entry in node_role_list:
         nid = entry["node"]
-        log_text = (node_logs_text or {}).get(nid)
+        log_text = _log_text_for(entry, node_logs_text)
         pre_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
         rows = cer.edp_rows_for_site(edp_rows, nid)
         edp_rec = rows[0] if rows else None
         row = {"label": f"{nid} ({role_short.get(entry['role'], entry['role'][:1])})"}
         for pre_key, edp_key, out_key in field_map:
-            row[f"{out_key}_pre"] = pre_vals.get(pre_key) or "—"
+            row[f"{out_key}_pre"] = _bearer_pre_value(pre_vals, pre_key, entry) or "—"
             row[f"{out_key}_edp"] = _norm(edp_rec.get(edp_key)) if edp_rec else "—"
+
+        # SIAD port size: Pre side is the transport EthernetPort's
+        # admOperatingMode ('10G_FULL'/'1G_FULL' -> 10GE/1GE). Which port
+        # holds it depends on the board generation, so the DU type is read
+        # from the CIQ first — same source _siad_port_size_pre_status uses,
+        # so the pivot and that check can't disagree. node_role_list
+        # entries carry only {node, role}, no board model.
+        # SIAD port size is a physical-node property, same as OAM — a
+        # Secondary identity has no port of its own (confirmed: it's the
+        # SAME physical transport port the Primary already reports),
+        # so it's suppressed here rather than repeating the Primary's
+        # own port size under the Secondary's row.
+        if entry.get("role") == "Secondary":
+            board, pre_size = None, None
+        else:
+            board = du_type.get(nid) if ciq_wb is not None else None
+            _, pre_size = pe.extract_transport_port_mode(log_text, board) if (log_text and board) else (None, None)
+        row["siad_port_size_pre"] = pre_size or "—"
+        row["siad_port_size_edp"] = _norm(edp_rec.get("SIAD_PORT_SIZE_BBU")) if edp_rec else "—"
+
+        # Per-field verdict, so the UI can colour each pair independently.
+        # IPv6 is normalised before comparing (zero-padding / '::'
+        # compression are cosmetic, not mismatches); a '—' on either side
+        # means "not captured", which is unknown, never a mismatch.
+        for out_key in [k for _, _, k in field_map] + ["siad_port_size"]:
+            pv, ev = row[f"{out_key}_pre"], row[f"{out_key}_edp"]
+            if pv in ("—", "") or ev in ("—", ""):
+                row[f"{out_key}_status"] = "unknown"
+            elif "ipv6" in out_key or "router" in out_key:
+                row[f"{out_key}_status"] = "match" if _same_ipv6(pv, ev) else "mismatch"
+            else:
+                row[f"{out_key}_status"] = "match" if _norm(pv).upper() == _norm(ev).upper() else "mismatch"
         out.append(row)
     return out
 
@@ -1086,13 +1774,13 @@ def _pre_vs_edp_field_status(node_logs_text, node_role_list, edp_rows, pre_key, 
     bad, checked, no_pre = [], 0, []
     for entry in node_role_list:
         nid = entry["node"]
-        log_text = (node_logs_text or {}).get(nid)
+        log_text = _log_text_for(entry, node_logs_text)
         rows = cer.edp_rows_for_site(edp_rows, nid)
         edp_v = _norm(rows[0].get(edp_col)) if rows else ""
         if not log_text:
             no_pre.append(nid)
             continue
-        pre_v = pe.extract_bearer_oam_ipv6(log_text).get(pre_key) or ""
+        pre_v = _bearer_pre_value(pe.extract_bearer_oam_ipv6(log_text), pre_key, entry) or ""
         if not pre_v or not edp_v:
             continue
         checked += 1
@@ -1163,7 +1851,7 @@ def build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb
     out = []
     for entry in node_role_list:
         nid, role = entry["node"], entry["role"]
-        log_text = (node_logs_text or {}).get(nid)
+        log_text = _log_text_for(entry, node_logs_text)
         pre_net_vals = pe.extract_bearer_oam_ipv6(log_text) if log_text else {}
         rows = cer.edp_rows_for_site(edp_rows, nid)
         edp_rec = rows[0] if rows else None
@@ -1185,7 +1873,7 @@ def build_checklist_field_table(node_role_list, node_logs_text, edp_rows, ciq_wb
                     pre_v = ""
                     status = "unknown"
             elif edp_col in _PRE_NETWORK_FIELD_MAP:
-                pre_v = pre_net_vals.get(_PRE_NETWORK_FIELD_MAP[edp_col]) or ""
+                pre_v = _bearer_pre_value(pre_net_vals, _PRE_NETWORK_FIELD_MAP[edp_col], entry) or ""
                 status = "unknown" if not pre_v or not edp_v else (
                     "match" if pre_v == edp_v else "mismatch")
             else:
