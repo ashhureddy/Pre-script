@@ -17,7 +17,7 @@ import pdf_report as pr
 import warnings_text as wt
 
 
-def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
+def run(ciq_path, edp_path, rfds_path, node_logs_text, out_pdf):
     ciq_wb = cer.load_ciq(ciq_path)
     edp_ws = cer.load_edp(edp_path)
     _, edp_rows = cer.build_edp_index(edp_ws)
@@ -26,7 +26,7 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
     rfds_pages = rf.load_rfds_pages(rfds_bytes) if rfds_bytes else None
     site_details = cn.build_site_details(ciq_wb, rfds_pages)
 
-    node_logs = {nid: (open(p).read() if p else None) for nid, p in node_log_paths.items()}
+    node_logs = dict(node_logs_text)
 
     mm_rows = cer.mixed_mode_rows(ciq_wb)
     ciq_nodes = [str(r.get('Node to be built as')).strip() for r in mm_rows if r.get('Node to be built as')]
@@ -56,10 +56,12 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
 
     results = {k: [] for k in (
         'sw_version', 'identity', 'primary_secondary', 'board_type', 'xmu',
-        'cells_vs_rfds', 'cell_id_vs_rfds', 'params_4g', 'params_5g',
+        'cells_vs_rfds', 'cell_id_vs_rfds', 'cellid_uniqueness_4g', 'nrcelldu_nrcellcu', 'antenna_type_rfds', 'gnb_identity', 'gnb_du_type', 'enb_identity',
+        'params_4g', 'rbb_tx_isdlonly_4g', 'rilink_vs_rbb_4g', 'electrical_tilt_type', 'params_5g', 'arfcn_bw_5g', 'ssb_5g',
         'pci_4g', 'pci_5g', 'radio_type', 'sector_swap', 'radio_sharing',
         'port_uniqueness', 'xmu_port_overlap', 'antenna', 'nbiot', 'nr_tac', 'tac', 'sef_fru',
-        'dss', 'sector_id_4890', 'rfbranch_per_aug', 'ptp_matrix',
+        'dss', 'sector_id_4890', 'rfbranch_per_aug', 'ptp_matrix', 'losses_vs_antenna',
+        'tilt', 'mmwave_rach', 'radio_port_conflict', 'carrier_progression',
     )}
     sa_note_nodes = []
     unavailable_notes = [
@@ -93,11 +95,22 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
             results['tac'].append(by_rule['#16'])
 
         results['cells_vs_rfds'] += cs.check_cells_vs_rfds(node_id, ciq_wb, rfds_pages, e_name, g_name)
+        results['nrcelldu_nrcellcu'] += cs.check_nrcelldu_nrcellcu_match(node_id, ciq_wb, g_name)
+        results['antenna_type_rfds'] += cs.check_antenna_type_vs_rfds(node_id, ciq_wb, rfds_pages, g_name, e_name)
+        results['gnb_identity'] += cs.check_gnb_identity_consistency(node_id, ciq_wb, g_name)
+        results['enb_identity'] += cs.check_enb_identity_consistency(node_id, ciq_wb, e_name)
+        results['gnb_du_type'] += cs.check_gnb_du_type_vs_5g_bbu_type(node_id, ciq_wb, g_name, e_name)
         results['cell_id_vs_rfds'] += cs.check_cell_id_vs_rfds(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node_logs, moved_map)
-        results['params_4g'] += cs.check_rf_params_4g(node_id, log_text, ciq_wb, has_pre, retuned_cells, node_logs, moved_map)
+        results['cellid_uniqueness_4g'] += cs.check_cellid_uniqueness_4g(node_id, ciq_wb, e_name)
+        results['params_4g'] += cs.check_rf_params_4g(node_id, log_text, ciq_wb, has_pre, retuned_cells, node_logs, moved_map, e_name)
+        results['rbb_tx_isdlonly_4g'] += cs.check_rbb_tx_isdlonly_4g(node_id, ciq_wb, e_name)
+        results['electrical_tilt_type'] += cs.check_electrical_tilt_type(node_id, ciq_wb, e_name)
+        results['rilink_vs_rbb_4g'] += cs.check_rilink_vs_rbb_4g(node_id, log_text, ciq_wb, e_name, node_logs, moved_map)
         import log_parser as lp
         parsed = lp.parse_log(log_text) if log_text else []
-        results['params_5g'] += cs.check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre, retuned_cells, node_logs, moved_map)
+        results['params_5g'] += cs.check_rf_params_5g(node_id, parsed, log_text, ciq_wb, has_pre, retuned_cells, node_logs, moved_map, g_name)
+        results['arfcn_bw_5g'] += cs.check_arfcn_bw_5g(node_id, parsed, log_text, ciq_wb, has_pre, node_logs, moved_map, g_name)
+        results['ssb_5g'] += cs.check_ssb_5g(node_id, parsed, log_text, ciq_wb, has_pre, node_logs, moved_map, g_name)
         results['pci_4g'] += cs.check_pci_uniqueness(node_id, ciq_wb, e_name)
         results['pci_5g'] += cs.check_nr_pci_uniqueness(node_id, ciq_wb, g_name)
         results['radio_type'] += cs.check_radio_type(node_id, log_text, ciq_wb, rfds_pages, e_name, g_name, node_logs, moved_map)
@@ -109,6 +122,13 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
         results['dss'] += cs.check_dss_pre_existing(node_id, log_text, ciq_wb)
         results['sector_id_4890'] += cs.check_sector_id_4890(node_id, ciq_wb, e_name)
         results['rfbranch_per_aug'] += cs.check_rfbranch_per_aug(node_id, log_text)
+        results['losses_vs_antenna'] += cs.check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name, g_name)
+        results['tilt'] += cs.check_tilt_integer(node_id, ciq_wb, e_name, g_name)
+        results['carrier_progression'] += cs.check_carrier_progression(node_id, ciq_wb, e_name, g_name)
+        # CIQ-only checks that existed in checks_sector.py but were
+        # never wired into the pipeline, so they never ran.
+        results['mmwave_rach'] += cs.check_mmwave_rach(node_id, ciq_wb)
+        results['radio_port_conflict'] += cs.check_radio_port_conflict(node_id, ciq_wb)
         results['ptp_matrix'] += cn.check_ptp_matrix(node_id, log_text, edp_rows, is_new_node=not has_pre)
 
         gnb_row = None
@@ -118,6 +138,7 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
                     gnb_row = r
                     break
         results['xmu_port_overlap'] += cs.check_xmu_port_overlap(node_id, enb_row, gnb_row, ciq_wb)
+        results['port_uniqueness'] += cs.check_riport_uniqueness(node_id, enb_row, gnb_row, ciq_wb, e_name, g_name)
         results['nbiot'] += cs.check_nbiot(node_id, log_text, ciq_wb)
 
         nr_tac_rows = cs.check_nr_tac(node_id, log_text, ciq_wb, has_pre, False, g_name, node_logs, moved_map)
@@ -165,8 +186,9 @@ def run(ciq_path, edp_path, rfds_path, node_log_paths, out_pdf):
         if r.get('pending'):
             scope_lines.append(f"Port speed 1G to 10G conversion with MPST: {r['node']}.")
 
-    pr.build_report(out_pdf, site_details, pre_text, post_text, scope_lines, results,
-                     skipped_deleted=sorted(deleted_nodes))
+    if out_pdf:
+        pr.build_report(out_pdf, site_details, pre_text, post_text, scope_lines, results,
+                         skipped_deleted=sorted(deleted_nodes))
     return (out_pdf, results, site_details, ciq_wb, edp_rows, checked_nodes, rfds_pages,
             pre_text, post_text, scope_lines, sow)
 
