@@ -397,7 +397,13 @@ def render_cell_pre_post_table(rows, field_columns):
             else:
                 color = "#059669" if ok else "#dc2626"
                 cells += f'<td style="color:{color};font-weight:700;">{esc(r.get(val_key, "-"))}</td>'
-        cells += f"<td>{esc(r.get('link', '-'))}</td><td>{esc(r.get('comment', ''))}</td>"
+        link_ok = r.get("_link_ok")
+        if link_ok is None:
+            link_cell = f"<td>{esc(r.get('link', '-'))}</td>"
+        else:
+            link_color = "#059669" if link_ok else "#dc2626"
+            link_cell = f'<td style="color:{link_color};font-weight:700;">{esc(r.get("link", "-"))}</td>'
+        cells += link_cell + f"<td>{esc(r.get('comment', ''))}</td>"
         body.append(f'<tr style="background:{row_bg};">{cells}</tr>')
     return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
