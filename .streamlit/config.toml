@@ -1,0 +1,24 @@
+# Forces the app to always render in light theme, regardless of the
+# viewer's browser/OS dark-mode setting or Streamlit's own theme toggle.
+#
+# Root cause of the dark-mode bug: every custom color in this app (topbar,
+# status chips, qkx-table/qkx-cat-banner/qkx-chk-cell backgrounds, etc.) is
+# a hardcoded light-theme hex value in the <style> block - .stApp's own
+# background is pinned light the same way (see the .stApp rule near the
+# top of the <style> block). None of that flips with theme. Streamlit's
+# NATIVE widget chrome (buttons, checkboxes, text inputs, tabs, file
+# uploader, st.error/success boxes, the RRNRBL Tick/Remarks boxes) is not
+# covered by that custom CSS at all - it's styled straight from Streamlit's
+# active theme, so when a viewer's system/browser prefers dark, only the
+# native widgets switch to dark colors while every hand-styled qkx-* block
+# around them stays light - producing dark-on-dark or light-on-light text
+# depending on the widget. This file removes the mismatch by pinning the
+# whole app (native + custom) to one theme, matching what the CSS already
+# hardcodes everywhere else - rather than hand-writing a dark-mode variant
+# for every one of the dozens of hardcoded colors in "Streamlit app.py".
+[theme]
+base = "light"
+primaryColor = "#101F90"
+backgroundColor = "#f7f9fc"
+secondaryBackgroundColor = "#eef1fb"
+textColor = "#0f1720"
