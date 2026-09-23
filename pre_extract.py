@@ -1047,10 +1047,21 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
                 link_type = data_ports[0]
             else:
                 link_type = {1: "Single Link", 2: "Double Link"}.get(len(links), f"{len(links)} Links")
+            # link_count_type: the OLD RiLink-row-count classification
+            # ('Single Link'/'Double Link'), kept separate from the DATA1/
+            # DATA2 display value above. pre_post_audit.py's Pre-vs-Post
+            # Link comparison matches this against ciq_checks.py's CIQ-side
+            # 'link' field, which is STILL 'Single Link'/'Double Link' (by
+            # design - the CIQ Checks tab wasn't changed to DATA1/DATA2) -
+            # comparing rilink_type there instead would falsely mismatch
+            # every single cell the moment the two sides' vocabularies
+            # diverged (confirmed: this broke pre_post_audit.py's Link
+            # column the same day rilink_type was changed to DATA1/DATA2).
             result[cell] = {
                 "rilink_id": "+".join(i for i, _, _ in links),
                 "rilink_port": "+".join(p for _, p, _ in links),
                 "rilink_type": link_type,
+                "link_count_type": {1: "Single Link", 2: "Double Link"}.get(len(links), f"{len(links)} Links"),
             }
     return result
 
