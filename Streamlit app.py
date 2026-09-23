@@ -1217,13 +1217,23 @@ def build_consolidated_mismatches(grouped_rows, results, pre_edp_rows=None, edp_
     # same finding isn't invisible everywhere except the checklist.
     _sw_checked = [r for r in results.get("sw_version", []) if r.get("status") != "SKIPPED"]
     _sw_missing = [r.get("node") for r in _sw_checked if r.get("sw_version") in (None, "NOT FOUND")]
-    _sw_versions = {r.get("sw_version") for r in _sw_checked if r.get("sw_version") not in (None, "NOT FOUND")}
     if _sw_missing:
         rows.append({"cell": ", ".join(_sw_missing), "source": "CIQ check", "param": "SW Version",
                      "comments": f"No SW version detected for: {', '.join(_sw_missing)}"})
-    if len(_sw_versions) > 1:
+    # Same board-hardware-family grouping as the checklist's own row 13
+    # verdict (rc._group_sw_by_family / rc._sw_status_v2) - confirmed real
+    # bug: this table used to compare raw sw_version strings flat across
+    # EVERY node on the site, so a routine CRAN/mixed-hardware site (G2
+    # boards reporting 'RCG123.8', G3/G4 boards reporting '26.Q2' for the
+    # identical release) always showed a false mismatch here even while
+    # the checklist itself correctly passed row 13. Comparing per family
+    # instead keeps this table and the checklist verdict in agreement.
+    _sw_by_family = rc._group_sw_by_family(_sw_checked)
+    _sw_bad_families = {fam: sorted(vers) for fam, vers in _sw_by_family.items() if len(vers) > 1}
+    if _sw_bad_families:
+        _parts = [f"{fam}: {vers}" for fam, vers in sorted(_sw_bad_families.items())]
         rows.append({"cell": "site", "source": "CIQ check", "param": "SW Version",
-                     "comments": f"SW versions disagree across nodes: {sorted(_sw_versions)}"})
+                     "comments": f"SW versions disagree within board family - {'; '.join(_parts)}"})
 
     # one fixed bucket. Routed to whichever source(s) actually disagree
     # with CIQ, same comparison check_primary_secondary itself already
