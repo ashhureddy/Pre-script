@@ -95,6 +95,41 @@ def is_wll_node_name(name):
     return bool(name) and str(name).strip().upper().endswith("L")
 
 
+_BAND_NUMBER_RE = re.compile(r'(?:E-?UTRA|NR)?\s*Band\s*(\d+)', re.IGNORECASE)
+
+
+def underlying_band_number(band_str):
+    """Extract the real numeric band (e.g. '30' from 'WCS MHz B (5 MHz)
+    E-UTRA Band 30') out of a raw CIQ 'eUTRA operating band'/'Operating
+    Band' cell value.
+
+    Confirmed real: the CIQ's dropdown for WCS (Band 30) spells out the
+    sub-block and channel width in the SAME string as the band number -
+    'WCS MHz A (5 MHz) E-UTRA Band 30' vs 'WCS MHz A+B (10 MHz) E-UTRA
+    Band 30' vs 'WCS MHz B (5 MHz) E-UTRA Band 30'. Those are the SAME
+    physical band (30) at different bandwidths, not different bands, so
+    any check comparing raw band strings must key on this number instead
+    or it false-flags a legitimate same-band/different-bandwidth carrier
+    as 'Carrier Reused Across Bands'. Returns None if no band number is
+    found in the string (caller should then fail safe and not suppress)."""
+    if not band_str:
+        return None
+    m = _BAND_NUMBER_RE.search(str(band_str))
+    return m.group(1) if m else None
+
+
+def same_underlying_band(band_values):
+    """True only when every value in band_values resolves to the SAME
+    real band number via underlying_band_number() - i.e. the apparent
+    'multiple bands' are really one band split by bandwidth/sub-block
+    text. False (fail safe, still flag) if any value's band number can't
+    be determined or if the numbers genuinely differ."""
+    numbers = [underlying_band_number(b) for b in band_values]
+    if any(n is None for n in numbers):
+        return False
+    return len(set(numbers)) == 1
+
+
 def dedupe_labels(cell_names, lte_first=True):
     """Classify a list of cell names into unique band labels, LTE group first
     then 5G group, preserving first-seen order within each group."""
