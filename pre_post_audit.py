@@ -17,22 +17,33 @@ module's ("show me every Pre value beside its Post value").
 
 Link (Single/Double) PRE vs POST: NOT the HTML's original "Dual Link in
 AMOS, Single Link in CIQ" comment addendum, which depended on a Pre-side
-RadioPort (DATA1/DATA2) signal — confirmed absent from every kget-all log
-this project has seen, and confirmed NOT reconstructable from a shared-FRU
-heuristic either (tested against a real CIQ: two cells sharing one physical
-RRU in kget-all were both CIQ RadioPort=DATA1, while a single-fed cell
-elsewhere was RadioPort=DATA1/DATA2 — the opposite of what that heuristic
-would predict, so it was dropped rather than shipped as a false signal).
+'RadioPort' field signal — confirmed absent from every kget-all log this
+project has seen (that specific attribute), and confirmed NOT
+reconstructable from a shared-FRU heuristic either (tested against a real
+CIQ: two cells sharing one physical RRU in kget-all were both CIQ
+RadioPort=DATA1, while a single-fed cell elsewhere was RadioPort=DATA1/
+DATA2 — the opposite of what that heuristic would predict, so it was
+dropped rather than shipped as a false signal). A genuine DATA1/DATA2
+value WAS later confirmed real, from a different command
+(pe.extract_cell_to_rilink_detail()'s 'rilink=' parsing, riPortRef2's own
+RiPort) - it now drives the Pre checks (AMOS) tab's RiLink column, but is
+deliberately NOT what this comparison uses (see below), since the CIQ
+side has no equivalent DATA1/DATA2 signal to compare it against.
 
-Instead this reuses the two Single/Double Link values THIS PROJECT ALREADY
-COMPUTES independently on each side, from confirmed sources:
-  - Pre:  pe.extract_cell_to_rilink_detail()'s 'rilink_type' (the same
-    value the Pre checks (AMOS) tab's own RiLink column shows) — RiLink
-    row count per FRU, a genuinely different (and confirmed-extractable)
-    physical signal from the DATA1/DATA2 one above.
+Instead this compares the two Single/Double Link CLASSIFICATIONS (not the
+DATA1/DATA2 display values) THIS PROJECT ALREADY COMPUTES independently
+on each side, from confirmed sources:
+  - Pre:  pe.extract_cell_to_rilink_detail()'s 'link_count_type' (RiLink
+    row count per FRU: 1 row -> 'Single Link', 2 -> 'Double Link') - a
+    DIFFERENT field from that same function's 'rilink_type' (the DATA1/
+    DATA2 display value the Pre checks tab's own RiLink column shows).
+    Comparing 'rilink_type' here instead would falsely mismatch every
+    single cell the moment its vocabulary diverges from the CIQ side's
+    Single/Double Link wording below (confirmed: this broke on the day
+    'rilink_type' was changed to show DATA1/DATA2 for the Pre checks tab).
   - Post: ciq_checks.apply_link_and_sharing()'s 'link' (the same value the
-    CIQ Checks tab's own Link (Single/Doublelink) column shows) —
-    DATA1/DATA2 RadioPort grouping.
+    CIQ Checks tab's own Link (Single/Doublelink) column shows) — RadioPort
+    grouping count, 'Single Link'/'Double Link'.
 Comparing these two existing, already-displayed-elsewhere values is a
 different question from the dropped HTML feature above (which needed ONE
 signal present on BOTH sides) - here each side keeps its own real source,
@@ -195,7 +206,7 @@ def _amos_lte_index(node_logs_text):
                 "Model": pe._short_radio_name(radio_by_cell.get(cell)) or "",
                 "CellRange": cell_range_by_cell.get(cell, ""),
                 "DSS": bool(dss_by_cell.get(cell, False)),
-                "RiLink": (rilink_by_cell.get(cell) or {}).get("rilink_type") or "",
+                "RiLink": (rilink_by_cell.get(cell) or {}).get("link_count_type") or "",
             })
     return flat
 
@@ -228,7 +239,7 @@ def _amos_nr_index(node_logs_text):
                 "Model": pe._short_radio_name(radio_by_cell.get(cell)) or "",
                 "CellRange": cell_range_by_cell.get(cell, ""),
                 "DSS": bool(dss_by_cell.get(cell, False)),
-                "RiLink": (rilink_by_cell.get(cell) or {}).get("rilink_type") or "",
+                "RiLink": (rilink_by_cell.get(cell) or {}).get("link_count_type") or "",
             })
     return flat
 
