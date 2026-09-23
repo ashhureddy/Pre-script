@@ -1545,10 +1545,24 @@ def extract_bearer_oam_ipv6(text):
             # ULCoMP/ERAN in this command's own output order.
             router_iface_to_vlan.setdefault(rb_m.group(1), vlan_m.group(1))
 
+    # Confirmed real bug (HXIN090065F, a pure-5G F-node): the bearer
+    # Router MO itself is named 'Router=NR' there (not 'Router=LTE'),
+    # and its InterfaceIPv6 is a site-specific name ('TN_IDL_B_NR'),
+    # never the bare literal 'NR' — so the old rule (LTE-or-NR router,
+    # split only by an exact InterfaceIPv6=='NR' suffix) put this
+    # node's whole bearer under the _lte bucket, and _bearer_pre_value's
+    # no-fallback rule then surfaced it as missing. Confirmed dual-tech
+    # (TMBB) case (HXL04403/HXIN010403) is unaffected: there both
+    # identities live under 'Router=LTE', split by the literal
+    # InterfaceIPv6=1 (LTE) vs InterfaceIPv6=NR (NR) suffix - 'Router=NR'
+    # never appears on a TMBB node. So: Router=NR alone (any interface
+    # name) is NR-tech; Router=LTE is NR-tech only on the literal
+    # InterfaceIPv6=NR suffix, LTE-tech otherwise.
     bearer_key_lte = next((k for k in router_iface_to_vlan
-                           if re.match(r'Router=(?:LTE|NR),InterfaceIPv6=(?!NR\b)\S+', k)), None)
+                           if re.match(r'Router=LTE,InterfaceIPv6=(?!NR\b)\S+', k)), None)
     bearer_key_nr = next((k for k in router_iface_to_vlan
-                          if re.match(r'Router=(?:LTE|NR),InterfaceIPv6=NR$', k)), None)
+                          if re.match(r'Router=NR,InterfaceIPv6=\S+', k)
+                          or re.match(r'Router=LTE,InterfaceIPv6=NR$', k)), None)
     oam_key = next((k for k in router_iface_to_vlan if re.match(r'Router=(?:vr_OAM|OAM),InterfaceIPv6=', k)), None)
     bearer_vlan_lte = router_iface_to_vlan.get(bearer_key_lte)
     bearer_vlan_nr = router_iface_to_vlan.get(bearer_key_nr)
@@ -1582,7 +1596,10 @@ def extract_bearer_oam_ipv6(text):
         return m.group(1) if m else None
 
     bearer_router_ip_lte = _nexthop_address('LTE', '1') or _nexthop_address('NR', '1')
-    bearer_router_ip_nr = _nexthop_address('LTE', 'NR') or _nexthop_address('NR', 'NR')
+    # Router=NR's default-router NextHop is suffix '1' on the confirmed
+    # F-node case (HXIN090065F), not 'NR' - added as a fallback alongside
+    # the existing TMBB 'NR' suffix, not a replacement.
+    bearer_router_ip_nr = _nexthop_address('LTE', 'NR') or _nexthop_address('NR', 'NR') or _nexthop_address('NR', '1')
     oam_router_ip = _nexthop_address('vr_OAM', '1') or _nexthop_address('OAM', '1')
 
     return {
