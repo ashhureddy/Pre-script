@@ -9,7 +9,21 @@ import xlrd
 
 
 def sheet_rows_as_dicts(ws):
-    """First row = header. Returns a list of dicts, one per data row."""
+    """First row = header. Returns a list of dicts, one per data row.
+
+    Confirmed real on an uploaded CIQ ('eUtran Parameters', columns AZ/BA):
+    the sheet's OWN header row had "DUS / XMU Port" typed twice instead of
+    "DUS / XMU Port" + "DUS / XMU Port Expansion" - a data-entry defect in
+    the source file, not a parsing choice. A naive {header[i]: row[i]}
+    dict build lets the LATER duplicate silently overwrite the earlier one,
+    so every row's "DUS / XMU Port" secretly returned the (usually blank)
+    Expansion column's value instead of the real port letter - which fed
+    straight into the Sharing Radio / Link checks as a false "no port on
+    this row" and produced false cross-sector-sharing flags. First
+    occurrence now wins for a duplicate header name, since the template's
+    real, intended column is always the first of the two - silently
+    dropping real data on the floor is worse than keeping the first
+    column's values under a name a later duplicate also claims."""
     rows_iter = ws.iter_rows(values_only=True)
     header = next(rows_iter)
     header = [str(h).strip() if h is not None else '' for h in header]
@@ -17,7 +31,13 @@ def sheet_rows_as_dicts(ws):
     for row in rows_iter:
         if all(v is None for v in row):
             continue
-        out.append({header[i]: row[i] for i in range(min(len(header), len(row)))})
+        row_dict = {}
+        for i in range(min(len(header), len(row))):
+            name = header[i]
+            if name in row_dict and row_dict[name] not in (None, ''):
+                continue  # keep the first occurrence's real value
+            row_dict[name] = row[i]
+        out.append(row_dict)
     return out
 
 
@@ -108,12 +128,9 @@ def load_edp(path):
 
 
 def locate_edp_header_row(ws):
-    # Case varies by EDP export type - confirmed real data: CISCO EDP
-    # exports use 'EDP_SITE_ID' (uppercase), ALU EDP exports use
-    # 'edp_site_id' (lowercase). Match case-insensitively so both work.
     for r in range(ws.nrows):
         first_cell = ws.cell_value(r, 0)
-        if str(first_cell).strip().upper() == 'EDP_SITE_ID':
+        if str(first_cell).strip() == 'EDP_SITE_ID':
             return r
     raise ValueError("Could not locate EDP header row (expected 'EDP_SITE_ID' in column A)")
 
@@ -121,18 +138,9 @@ def locate_edp_header_row(ws):
 def build_edp_index(ws):
     """Returns (header_list, rows) where rows is a list of dicts keyed by
     header name, one per EDP data row (there can be several rows per site,
-    e.g. one per SIAD port entry).
-
-    Header names are uppercased here - confirmed real data: CISCO EDP
-    exports use UPPERCASE headers ('SITE_NAME', 'CABINET_USID', ...) but
-    ALU EDP exports use lowercase ('site_name', 'cabinet_usid', ...) for
-    most columns (a few, like 'COMPLEX_NAME', are already uppercase).
-    Every downstream .get() call (edp_rows_for_site, edp_discover_secondary,
-    etc.) looks up the uppercase key, so without this normalization an ALU
-    file parses with an empty/wrong row dict even after the header row is
-    found."""
+    e.g. one per SIAD port entry)."""
     header_row = locate_edp_header_row(ws)
-    header = [str(ws.cell_value(header_row, c)).strip().upper() for c in range(ws.ncols)]
+    header = [str(ws.cell_value(header_row, c)).strip() for c in range(ws.ncols)]
     rows = []
     for r in range(header_row + 1, ws.nrows):
         rows.append({header[c]: ws.cell_value(r, c) for c in range(ws.ncols)})
@@ -165,24 +173,15 @@ def _norm_cabinet(v):
 
 def edp_discover_secondary(edp_rows, primary_id):
     """Finds whatever EDP itself thinks the Secondary is for primary_id,
-    WITHOUT relying on CIQ having told us its name.
-
-    Scoping key is CABINET_USID, not SITE_USID — confirmed real EDP
-    structure/naming (per Akshatha): CABINET_USID is the site's OWN USID,
-    the same value the CIQ's own USID field carries (e.g. 15907 for
-    HXL05262/HXL06262/HXIN015262) — this is the correct per-physical-site
-    key. SITE_USID is the shared HUB USID (e.g. 193165 on a CRAN hub
-    export) and can span 50+ rows across a dozen physically distinct
-    sites that all sit on the same hub — confirmed real bug matching on
-    it alone: HXL06262's Secondary was resolved as HXIN005075, a
-    different physical site on the same hub that happened to reuse the
-    same 'BBU 05V' cabinet number, instead of the real pair, HXIN015262
-    (CABINET_USID 15907 on both, matching CIQ). A site can also host
-    SEVERAL primary/secondary pairs at once (confirmed real case, SITE_
-    USID 64921: FCL04120/FCON094120 AND FCL09220R AND FCL07900R/
-    FCON097900 all on one site) — matching on 'any blank-port BBU row in
-    the group' picked whichever one came first in iteration order for
-    EVERY primary at that site, regardless of whose it actually was.
+    WITHOUT relying on CIQ having told us its name. Confirmed real EDP
+    structure: every row belonging to one physical site — Primary,
+    Secondary, and any ancillary-equipment rows — shares the same
+    SITE_USID (and EDP_SITE_ID). A site can host SEVERAL primary/secondary
+    pairs at once (confirmed real case, SITE_USID 64921: FCL04120/
+    FCON094120 AND FCL09220R AND FCL07900R/FCON097900 all on one site) —
+    matching on 'any blank-port BBU row in the group' picked whichever one
+    came first in iteration order for EVERY primary at that site,
+    regardless of whose it actually was.
 
     A Secondary's own CABINET is its Primary's cabinet number with a
     trailing 'V' (confirmed convention, same one _cabinet_pairing_map in
@@ -193,31 +192,18 @@ def edp_discover_secondary(edp_rows, primary_id):
     02', with no 'BBU 02V' row at this site at all) genuinely has no EDP
     Secondary — returns None rather than guessing.
 
-    Falls back to SITE_USID (+ EDP_SITE_ID, a tighter grouping than
-    SITE_USID alone) only when a row genuinely has no CABINET_USID
-    (older/partial export), so this never regresses a file where that
-    column is absent.
-
     Returns the Secondary's own SITE_NAME, or None."""
     prim_rows = edp_rows_for_site(edp_rows, primary_id)
     if not prim_rows:
         return None
-    cabinet_usid = str(prim_rows[0].get('CABINET_USID', '')).strip()
     site_usid = str(prim_rows[0].get('SITE_USID', '')).strip()
-    edp_site_id = str(prim_rows[0].get('EDP_SITE_ID', '')).strip()
     prim_cab = _norm_cabinet(prim_rows[0].get('CABINET'))
-    if not (cabinet_usid or site_usid) or not prim_cab:
+    if not site_usid or not prim_cab:
         return None
     expected_cab = prim_cab if prim_cab.endswith('V') else prim_cab + 'V'
     for r in edp_rows:
-        if cabinet_usid:
-            if str(r.get('CABINET_USID', '')).strip() != cabinet_usid:
-                continue
-        else:
-            if str(r.get('SITE_USID', '')).strip() != site_usid:
-                continue
-            if edp_site_id and str(r.get('EDP_SITE_ID', '')).strip() != edp_site_id:
-                continue
+        if str(r.get('SITE_USID', '')).strip() != site_usid:
+            continue
         site_name = str(r.get('SITE_NAME', '')).strip()
         if not site_name or site_name.upper() == str(primary_id).strip().upper():
             continue
