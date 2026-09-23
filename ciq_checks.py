@@ -63,6 +63,25 @@ def _clean_ports(*vals):
     return ",".join(out)
 
 
+# Confirmed real format across every CIQ checked: a RIPORT token is always
+# either a single letter (A-Z) or a plain, digits-only number (single or
+# multi-digit — "5" through "15" all seen), comma-separated when a
+# position carries more than one. Anything else (multi-letter text,
+# letter+digit combos, symbols) is a garbled/mistyped port value in the
+# CIQ, not a valid one — flagged rather than silently displayed or fed
+# into the Sharing Radio / Link comparison as if it were real.
+_RIPORT_TOKEN_RE = re.compile(r'^[A-Z]$|^\d+$')
+
+
+def _riport_format_warning(riport):
+    if not riport or riport == "-":
+        return None
+    bad = [t.strip() for t in riport.split(",") if t.strip() and not _RIPORT_TOKEN_RE.match(t.strip())]
+    if bad:
+        return f'RIPORT value(s) not a single letter or number: {", ".join(bad)}'
+    return None
+
+
 # ── Corrective actions, verbatim from QUICKIX's ciqCorrectiveAction() ──
 def _corrective_action(warning):
     if warning.startswith("PCI Clash"):
@@ -321,6 +340,9 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
     for i, r in enumerate(rows):
         node_name = node_by_enb.get(str(r.get("eNBId") or "").strip(), "")
         riport = _clean_ports(r.get("DUS / XMU Port"), r.get("DUS / XMU Port Expansion")) or "-"
+        riport_warn = _riport_format_warning(riport)
+        if riport_warn:
+            add(i, riport_warn)
         cell_comments = comments[i]
         out.append({
             "node": node_name, "cell": r.get("EutranCellFDDId"), "pci": r.get("PCI"),
@@ -459,6 +481,9 @@ def build_nr_ciq_rows(ciq_wb):
     for i, r in enumerate(rows):
         node_name = node_by_gnb.get(str(r.get("gNBId") or "").strip(), "")
         riport = _clean_ports(r.get("Port 1"), r.get("Port 2")) or "-"
+        riport_warn = _riport_format_warning(riport)
+        if riport_warn:
+            add(i, riport_warn)
         cell_comments = comments[i]
         out.append({
             "node": node_name, "cell": r.get("NRCellDU"), "sef": r.get("SectorEquipmentFunction"),
@@ -532,7 +557,19 @@ def apply_link_and_sharing(lte_rows, nr_rows):
         for r in rows:
             cell = r.get(cell_key)
             band, sector = bl.band_label(cell) if cell else (None, None)
-            rru = r.get("_fru") or r.get("_rru_type")
+            # _fru ONLY - no "or r.get('_rru_type')" fallback. _rru_type is
+            # a shared MODEL NAME (e.g. "RRUS 4449"), not a physical radio
+            # identity - every normal 3-sector site uses the same model on
+            # all 3 sectors, so falling back to it here re-introduces the
+            # exact false positive build_lte_ciq_rows()'s own "_fru" comment
+            # says it fixed (confirmed real: HXL04468_7A_1/7B_1/7C_1, three
+            # SEPARATE physical RRUs sharing model "RRUS 4449" with RIPORT
+            # "-"/blank on all three - fell back to _rru_type and was
+            # flagged as cross-sector sharing on every row, when nothing is
+            # actually shared). A row with no usable physical identifier
+            # (_fru is None) has nothing reliable to compare and is
+            # skipped, not assumed-shared.
+            rru = r.get("_fru")
             node = r.get("node")
             if not (band and sector and rru and node):
                 continue
@@ -541,7 +578,7 @@ def apply_link_and_sharing(lte_rows, nr_rows):
         for r in rows:
             cell = r.get(cell_key)
             band, sector = bl.band_label(cell) if cell else (None, None)
-            rru = r.get("_fru") or r.get("_rru_type")
+            rru = r.get("_fru")
             node = r.get("node")
             if not (band and sector and rru and node):
                 continue
