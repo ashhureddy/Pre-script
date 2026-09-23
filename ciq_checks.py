@@ -63,6 +63,19 @@ def _clean_ports(*vals):
     return ",".join(out)
 
 
+def _clean_link_name(radio_port_raw):
+    """CIQ's own scripted link name (DATA1/DATA2/...) for display, straight
+    off the sheet's 'Radio Port' column - e.g. 'DATA1' or 'DATA1/DATA2' for
+    a dual-carrier row. Purely a display value; does NOT feed the existing
+    'link' (Single/Doublelink) field or apply_link_and_sharing() at all -
+    that field's own node+RRU aggregation logic is unchanged."""
+    s = str(radio_port_raw or "").strip().upper()
+    if not s or s in ("N/A", "NOT USED"):
+        return "-"
+    parts = [p.strip() for p in re.split(r'[/,]', s) if p.strip()]
+    return "/".join(parts) if parts else "-"
+
+
 # Confirmed real format across every CIQ checked: a RIPORT token is always
 # either a single letter (A-Z) or a plain, digits-only number (single or
 # multi-digit — "5" through "15" all seen), comma-separated when a
@@ -364,6 +377,7 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
             "electrical_tilt": r.get("electricalAntennaTilt"), "rbb_type": r.get("RBB type"),
             "tx": r.get("noOfTxAntennas"), "rx": r.get("noOfRxAntennas"),
             "riport": riport, "link": "-",  # filled in by build_link_map()
+            "link_name": _clean_link_name(r.get("Radio Port")),
             "comments": cell_comments,
             "comments_html": _format_warnings(cell_comments),
             "status": "MISMATCH" if cell_comments else "MATCH",
@@ -507,6 +521,7 @@ def build_nr_ciq_rows(ciq_wb):
             "cell_id": r.get("cellLocalId"),
             "electrical_tilt": r.get("Electrical Tilt"), "rbb_type": r.get("RBB Type"),
             "riport": riport, "link": "-",
+            "link_name": _clean_link_name(r.get("Radio Port")),
             "comments": cell_comments,
             "comments_html": _format_warnings(cell_comments),
             "status": "MISMATCH" if cell_comments else "MATCH",
