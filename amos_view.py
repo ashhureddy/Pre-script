@@ -132,7 +132,11 @@ def _freq_check_html(entry):
 def build_lte_cell_rows(node_id, text):
     """Node, Cell, Sector Carrier, RRUs, Radio type, Sharing Radio, TX, RX,
     RFBRANCHTXREF, RFBRANCHRXREF, SEF RFBRANCHES, Pre Existing DSS — matches
-    QUICKIX HTML's LTE Cells table column-for-column."""
+    QUICKIX HTML's LTE Cells table column-for-column.
+
+    'ulcomp' (UL COMP): the UlCompGroup scripted for that cell's
+    SectorCarrier, from 'get ulcompgroup' (extract_cell_to_ulcomp) — '-'
+    when the command isn't in this log or the carrier isn't in any group."""
     cells = sorted(c for c in pci.extract_pre_cells_for_node(text) if not bl.is_5g_cell(c))
     radio_by_cell = pe.extract_cell_to_radio(text)
     fru_by_cell = pe.extract_cell_to_fru(text)
@@ -140,6 +144,7 @@ def build_lte_cell_rows(node_id, text):
     branch_refs = pe.extract_rf_branch_refs(text)
     sector_carrier_by_cell = _extract_sector_carrier_numbers(text)
     dss_by_cell = pe.extract_dss_status(text)
+    ulcomp_by_cell = pe.extract_cell_to_ulcomp(text)
     rilink_by_cell = pe.extract_cell_to_rilink_detail(text, fru_by_cell)
     ailg_by_cell = pe.extract_ailg_ref(text)
     freqcheck_by_cell = pe.extract_eutranfreqcheck(text)
@@ -188,6 +193,7 @@ def build_lte_cell_rows(node_id, text):
             "sef": sef_by_cell.get(cell) or "-",
             "sef_rfbranches": refs.get("sef_branches") or "-",
             "pre_existing_dss": "DSS Active" if dss_by_cell.get(cell) else "No",
+            "ulcomp": ulcomp_by_cell.get(cell) or "-",
             "rilink_id": rilink.get("rilink_id") or "-", "rilink_port": rilink.get("rilink_port") or "-",
             "rilink_type": rilink.get("rilink_type") or "-",
             "air_if_load_profile": (ailg_val or "NOT FOUND") if is_wcs else "-",
