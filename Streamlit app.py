@@ -735,34 +735,27 @@ def render_checklist_grid(rows, manual_values):
 
 
 def render_rrnrbl_checklist(rows):
-    """Checklist grid: one qkx-cat-banner per category, each followed by a
-    small st.dataframe of just that category's Check/Tick/Scope/Remarks
-    rows — category shown once, not repeated per row (matches the
-    Checklist_RRNRBL.xlsx flat layout: category banner row, then item
-    rows).
+    """Checklist grid, rendered with st.data_editor.
 
-    Confirmed against Streamlit's own docs and a currently-open platform
-    issue (streamlit/streamlit#10953): st.data_editor does NOT apply
-    background styling to its EDITABLE columns — only disabled ones. A
-    single editable grid with real whole-row colour is therefore not
-    possible on this platform, not a bug in this code. Every previous CSS
-    attempt to fake it by targeting internal DOM nodes was fighting a
-    losing battle against Streamlit's own layout updates, which is why
-    alignment kept breaking.
+    This used to be hand-built from st.columns + st.markdown + widgets,
+    styled with CSS targeting Streamlit's internal data-testid nodes. That
+    approach never held together: the wrapper div didn't wrap anything, the
+    :has() scoping leaked to the whole page and collapsed unrelated
+    sections, and the Tick/Remarks widget columns kept their own chrome no
+    matter what was overridden -- so rows drifted out of alignment on every
+    Streamlit update. data_editor is a real grid: columns line up by
+    construction, the checkbox and text cells are native and editable, and
+    no CSS is involved at all.
 
-    So the two jobs are split, each using the API actually built for it:
-      - DISPLAY: st.dataframe/Styler-driven background+color tint on the
-        disabled columns (Check, Scope) — real whole-row-ish colour via a
-        first-class documented Streamlit feature, guaranteed column
-        alignment (glide-data-grid), bold headers, fixed row_height.
-      - EDIT: Tick and Remarks are both live-editable cells in this same
-        grid (st.data_editor) — no separate review section. Editable
-        cells can't carry the Styler tint (streamlit#10953), which is why
-        Check carries a status icon + bold color instead, so status still
-        reads even with a plain white Tick/Remarks cell next to it.
-    """
+    Reverted back to this (from the colored-bar/qkx-cat-banner version)
+    per explicit user request -- the trade-off, already disclosed and
+    accepted, is that data_editor can't wrap cell text, so long Check text
+    truncates instead of wrapping.
+
+    Status colour is carried in the Indication column as a coloured square
+    plus a word, which survives sorting and needs no row styling (per-row
+    background isn't supported by data_editor)."""
     import pandas as pd
-    from itertools import groupby
 
     if not rows:
         st.markdown('<div class="qkx-empty">Run validation to populate the checklist.</div>',
@@ -779,104 +772,67 @@ def render_rrnrbl_checklist(rows):
         for k in sorted(counts, key=lambda x: (order.index(x) if x in order else 99, x))
     )
     st.markdown(f'<div style="margin:2px 0 10px 0;">{pills}</div>', unsafe_allow_html=True)
+    st.caption("Automated checks are pre-ticked; manual ones start unticked. "
+               "Edit Tick/Remarks as needed, then download.")
 
-    overrides = st.session_state.get("rrnrbl_overrides", {})
+    INDICATION = {"match": "\U0001F7E9 Pass", "mismatch": "\U0001F7E5 Fail", "manual": "\U0001F7E8 Manual",
+                  "unknown": "⬜ Unknown", "info": "\U0001F7E6 Info", "na": "⬜ N/A"}
 
-    def _checked_for(r):
-        ov = overrides.get(r["row"])
-        return ov["checked"] if ov is not None else (r["status"] != "manual")
+    df = pd.DataFrame([{
+        "Indication": INDICATION.get(r["status"], r["status"]),
+        "Section": r["cat"] + (f' — {r["sub"]}' if r.get("sub") else ""),
+        "Check": r["item"],
+        "Tick": r["status"] != "manual",
+        "Scope": r.get("tag", ""),
+        "Remarks": "" if r["status"] == "manual" else (r.get("detail") or ""),
+        "_row": r["row"],
+    } for r in rows])
 
-    def _remarks_for(r):
-        ov = overrides.get(r["row"])
-        if ov is not None and ov.get("comment"):
-            return ov["comment"]
-        detail = r.get("detail") or ""
-        # A manual row's detail is blanked ONLY when it's the generic
-        # placeholder from a genuinely-unautomated item (check=None in
-        # build_checklist) — some rows (e.g. Script Generation 104-109)
-        # are deliberately kept manual (still unticked, still the pencil
-        # icon) while their check() computes a REAL informational comment
-        # to show here; that real text must not be swallowed by the same
-        # blanking rule that hides the generic placeholder.
-        if r["status"] == "manual" and detail == "No automated check exists for this item.":
-            return ""
-        return detail
-
-    def _tint_row(styler_row, cat_df):
-        # styler_row is the visible-column row Styler passes in for THIS
-        # category's own df (Tick is disabled here, so it's still tinted
-        # too — only truly editable columns lose background per
-        # streamlit/streamlit#10953); status is looked up from that same
-        # cat_df, so the index always lines up even though every
-        # category's df restarts at 0. Foreground color is applied too
-        # (not just background) so status still reads at a glance even
-        # on the Tick column, which can't carry any color at all since
-        # it's the one editable cell.
-        status = cat_df.loc[styler_row.name, "_status"]
-        color, bg = STATUS_COLORS.get(status, DEFAULT_COLOR)
-        return [f"background-color:{bg};color:{color};font-weight:600"] * len(styler_row)
-
-    STATUS_ICON = {"match": "\u2713 ", "mismatch": "\u2717 ", "manual": "\u270e ",
-                   "unknown": "\u2013 ", "info": "\u2139 ", "na": "\u2013 "}
-
-    new_overrides = dict(overrides)
-    for cat_idx, (cat, group) in enumerate(groupby(rows, key=lambda r: r["cat"])):
-        group = list(group)
-        st.markdown(f'<div class="qkx-cat-banner"><span>{esc(cat)}</span></div>',
-                    unsafe_allow_html=True)
-
-        head_l, head_tick, head_rem = st.columns([6, 0.6, 3])
-        head_tick.markdown('<div style="font-size:11px;font-weight:800;color:#64748b;'
-                            'text-transform:uppercase;">Tick</div>', unsafe_allow_html=True)
-        head_rem.markdown('<div style="font-size:11px;font-weight:800;color:#64748b;'
-                           'text-transform:uppercase;">Remarks</div>', unsafe_allow_html=True)
-
-        for r in group:
-            color, bg = STATUS_COLORS.get(r["status"], DEFAULT_COLOR)
-            icon = STATUS_ICON.get(r["status"], "")
-            scope = r.get("tag", "")
-            scope_html = f'<span class="qkx-chk-scope">{esc(scope)}</span>' if scope else ""
-
-            c_chk, c_tick, c_rem = st.columns([6, 0.6, 3], vertical_alignment="center")
-            with c_chk:
-                st.markdown(
-                    f'<div class="qkx-chk-cell" style="background:{bg};color:{color};">'
-                    f'{icon}{esc(r["item"])}{scope_html}</div>',
-                    unsafe_allow_html=True,
-                )
-            with c_tick:
-                new_checked = st.checkbox(
-                    "Tick", value=_checked_for(r), key=f"rrnrbl_tick_{r['row']}",
-                    label_visibility="collapsed",
-                )
-            with c_rem:
-                new_comment = st.text_input(
-                    "Remarks", value=_remarks_for(r), key=f"rrnrbl_remark_{r['row']}",
-                    label_visibility="collapsed",
-                )
-            new_overrides[r["row"]] = {"checked": new_checked, "comment": new_comment}
-
-    st.session_state["rrnrbl_overrides"] = new_overrides
-
+    edited = st.data_editor(
+        df,
+        key="rrnrbl_editor",
+        hide_index=True,
+        use_container_width=True,
+        height=min(len(df) * 36 + 40, 780),
+        column_config={
+            "Indication": st.column_config.TextColumn("Indication", width="small"),
+            "Section": st.column_config.TextColumn("Section", width="medium"),
+            "Check": st.column_config.TextColumn("Check", width="large"),
+            "Tick": st.column_config.CheckboxColumn("Tick", width="small"),
+            "Scope": st.column_config.TextColumn("Scope", width="small"),
+            "Remarks": st.column_config.TextColumn("Remarks", width="large"),
+            "_row": None,
+        },
+        disabled=["Indication", "Section", "Check", "Scope"],
+    )
+    st.session_state["rrnrbl_edited"] = edited
 
 
 def collect_manual_overrides(checklist):
-    """What the user has set directly in the checklist grid (Tick/Remarks),
-    keyed by checklist row. Untouched rows (never edited, or match/skip
-    rows nobody touched) fall back to the same default the display grid
-    itself shows, so the export can never disagree with what was on screen."""
-    overrides = st.session_state.get("rrnrbl_overrides", {})
-    out = {}
-    for row in checklist:
-        ov = overrides.get(row["row"])
-        if ov is not None:
-            out[row["row"]] = {"checked": bool(ov.get("checked")), "comment": (ov.get("comment") or "").strip()}
-        else:
-            out[row["row"]] = {
-                "checked": row["status"] != "manual",
-                "comment": "" if row["status"] == "manual" else (row.get("detail") or ""),
+    """What the user actually has on screen, keyed by checklist row.
+
+    Read from the edited data_editor frame rather than per-widget session
+    keys -- with a real grid there is one frame holding every row's current
+    Tick/Remarks, so the export can't drift from what is displayed."""
+    edited = st.session_state.get("rrnrbl_edited")
+    overrides = {}
+    if edited is not None and len(edited):
+        for rec in edited.to_dict("records"):
+            r = rec.get("_row")
+            if r is None:
+                continue
+            overrides[int(r)] = {
+                "checked": bool(rec.get("Tick")),
+                "comment": (rec.get("Remarks") or "").strip(),
             }
-    return out
+        return overrides
+
+    for row in checklist:
+        overrides[row["row"]] = {
+            "checked": row["status"] != "manual",
+            "comment": "" if row["status"] == "manual" else (row.get("detail") or ""),
+        }
+    return overrides
 
 
 
