@@ -1560,7 +1560,7 @@ with tab_pre:
             ("node", "Node"), ("cell", "Cell"), ("sector_carrier", "Sector Carries"), ("rru", "RRUs"),
             ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
             ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
-            ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
+            ("sef", "SEF"), ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
             ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"), ("rilink_type", "RiLink"),
             ("air_if_load_profile", "AirIfLoadProfile"),
             ("eutranfreqcheck", "EutranFreqCheck"),
@@ -1568,8 +1568,9 @@ with tab_pre:
 
         section_title("5G NR Cells", badge=f"{len(nr_rows)} CELLS")
         st.markdown(render_table(nr_rows, status_key=None, columns=[
-            ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("tx", "TX"), ("rx", "RX"),
-            ("sef_rfbranches", "SEF RFBRANCHES"),
+            ("node", "Node"), ("cell", "Cell"), ("rru", "RRUs"), ("radio_type", "Radio Type"),
+            ("tx", "TX"), ("rx", "RX"),
+            ("sef", "SEF"), ("sef_rfbranches", "SEF RFBRANCHES"),
             ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"), ("rilink_type", "RiLink"),
         ]), unsafe_allow_html=True)
 
@@ -1599,36 +1600,25 @@ with tab_ciq:
             ("xmu", "XMU"), ("ports", "Ports"),
         ]), unsafe_allow_html=True)
 
-    # LTE has no SectorEquipmentFunction column on the CIQ ('eUtran
-    # Parameters' sheet) in any real template checked - it's a Pre-log-only
-    # concept there, so it's derived from the site's own Pre kget-all logs
-    # (Cell -> SectorCarrier -> SEF chain) instead, same way every other
-    # Pre-log-sourced value on this page already is.
-    cell_to_sef = {}
-    for _log_text in (node_logs_text or {}).values():
-        cell_to_sef.update(pe.extract_cell_to_sef(_log_text))
-
-    ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb, rbb_results=results.get("rbb_tx_isdlonly_4g", []),
-                                          cell_to_sef=cell_to_sef)
+    ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb, rbb_results=results.get("rbb_tx_isdlonly_4g", []))
     ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
     cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows)
 
     section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
     st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
-        ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("cell_id", "Cell ID"), ("sef", "SEF"),
+        ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("cell_id", "Cell ID"),
         ("electrical_tilt", "Electrical Tilt"),
         ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
         ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
-        ("link", "Link"), ("comments_html", "Comments/Warning"),
+        ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
     section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
     st.markdown(render_table(ciq_nr_rows, status_key="status", columns=[
-        ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("radio_type", "Radio Type"),
-        ("fru", "FRU"), ("nr_pci", "NR PCI"),
+        ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
         ("cell_id", "Cell ID"),
         ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-        ("sharing_radio", "Sharing Radio"), ("link", "Link"), ("comments_html", "Comments/Warning"),
+        ("sharing_radio", "Sharing Radio"), ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
     antenna_rows = cs.check_antenna_uniqueness(node_id="", ciq_wb=ciq_wb)
