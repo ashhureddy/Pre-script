@@ -734,6 +734,46 @@ def render_checklist_grid(rows, manual_values):
             f'<thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>')
 
 
+@st.fragment
+def _render_rrnrbl_checklist_section(state):
+    """Isolates the RRNRBL checklist editor's rerun scope to just this
+    fragment (Streamlit 1.60.0's st.fragment). Confirmed real perf bug:
+    without this, editing a single Tick/Remarks cell reran the ENTIRE
+    script - every table build, every _memo lookup's signature check,
+    every markdown render on the page - taking ~5s per edit on a full
+    site. st.data_editor's own edits already persist to
+    st.session_state["rrnrbl_overrides"] directly (see
+    render_rrnrbl_checklist below), which fragments share with the main
+    script, so scoping the rerun here changes nothing about what gets
+    saved - only how much work a single edit triggers."""
+    with st.expander("RRNRBL Checklist", expanded=False):
+        checklist = state["checklist"]
+        render_rrnrbl_checklist(checklist)
+
+
+@st.fragment
+def _render_rrnrbl_download_section(state):
+    """Same isolation as _render_rrnrbl_checklist_section, for the
+    'Download filled RRNRBL Checklist' button - clicking Download (or the
+    checklist edits it reads via collect_manual_overrides) no longer
+    reruns the whole page either."""
+    manual_overrides = collect_manual_overrides(state["checklist"])
+    # Keyed on the overrides themselves: reruns that don't touch a tick or
+    # a remark reuse the built workbook instead of rebuilding it (this ran
+    # unconditionally on every rerun, including every checklist tick).
+    _ov_sig = tuple(sorted((r, bool(v.get("checked")), str(v.get("comment") or ""))
+                            for r, v in manual_overrides.items()))
+    checklist_xlsx = _memo("checklist_xlsx",
+                           lambda: rc.fill_checklist_xlsx(state["checklist"], state["site_id_fa"],
+                                                          manual_overrides=manual_overrides),
+                           _ov_sig)
+    st.download_button("⬇️ Download filled RRNRBL Checklist (.xlsx)", data=checklist_xlsx,
+                        file_name="Checklist_RRNRBL_filled.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True, key="cr_checklist_dl")
+    st.caption("Edit Tick/Remarks in the checklist above, then click Download again to bake it into the file.")
+
+
 def render_rrnrbl_checklist(rows):
     """Checklist grid: one qkx-cat-banner per category, each followed by a
     small st.dataframe of just that category's Check/Tick/Scope/Remarks
@@ -1543,7 +1583,6 @@ with tab_rfds:
             unsafe_allow_html=True,
         )
         st.markdown(render_rfds_grouped_table(grouped_rows), unsafe_allow_html=True)
-        st.caption('"Losses & Delays" has no extractor in this backend yet — always shows NOT AVAILABLE, not a fabricated pass.')
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 2 — Audit: Pre checks (AMOS) / CIQ Checks / Audit (Pre vs CIQ) / CR Desc
@@ -1804,9 +1843,7 @@ with tab_consolidated:
     else:
         st.caption("Nothing to report.")
 
-    with st.expander("RRNRBL Checklist", expanded=False):
-        checklist = state["checklist"]
-        render_rrnrbl_checklist(checklist)
+    _render_rrnrbl_checklist_section(state)
 
     # ── Every mismatch in one place, grouped by comparison family ──────
     # One section (not three separate expanders to hunt through), but the
@@ -1851,18 +1888,4 @@ with tab_consolidated:
             ]), unsafe_allow_html=True)
 
     st.divider()
-    manual_overrides = collect_manual_overrides(state["checklist"])
-    # Keyed on the overrides themselves: reruns that don't touch a tick or
-    # a remark reuse the built workbook instead of rebuilding it (this ran
-    # unconditionally on every rerun, including every checklist tick).
-    _ov_sig = tuple(sorted((r, bool(v.get("checked")), str(v.get("comment") or ""))
-                            for r, v in manual_overrides.items()))
-    checklist_xlsx = _memo("checklist_xlsx",
-                           lambda: rc.fill_checklist_xlsx(state["checklist"], state["site_id_fa"],
-                                                          manual_overrides=manual_overrides),
-                           _ov_sig)
-    st.download_button("⬇️ Download filled RRNRBL Checklist (.xlsx)", data=checklist_xlsx,
-                        file_name="Checklist_RRNRBL_filled.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True, key="cr_checklist_dl")
-    st.caption("Edit Tick/Remarks in the checklist above, then click Download again to bake it into the file.")
+    _render_rrnrbl_download_section(state)
