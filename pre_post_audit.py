@@ -26,9 +26,18 @@ DATA2 — the opposite of what that heuristic would predict, so it was
 dropped rather than shipped as a false signal). A genuine DATA1/DATA2
 value WAS later confirmed real, from a different command
 (pe.extract_cell_to_rilink_detail()'s 'rilink=' parsing, riPortRef2's own
-RiPort) - it now drives the Pre checks (AMOS) tab's RiLink column, but is
-deliberately NOT what this comparison uses (see below), since the CIQ
-side has no equivalent DATA1/DATA2 signal to compare it against.
+RiPort) - it now drives the Pre checks (AMOS) tab's RiLink column, and was
+originally NOT used in this comparison (see below) since the CIQ side had
+no equivalent DATA1/DATA2 signal to compare it against.
+
+UPDATE: the CIQ side's own 'Radio Port' column (already read into
+'_radio_port' by ciq_checks.py) IS that missing DATA1/DATA2 signal - it
+was just never surfaced as a display field. ciq_checks.build_lte_ciq_rows()/
+build_nr_ciq_rows() now also emit 'link_name' from it (see
+_clean_link_name()), so this module's compare_lte_cell_level()/
+compare_nr_cell_level() now ALSO compare rilink_type (Pre) against
+link_name (Post/CIQ) as a second, additive 'link_name'/'_link_name_ok'
+field pair - alongside, not replacing, the Single/Double comparison below.
 
 Instead this compares the two Single/Double Link CLASSIFICATIONS (not the
 DATA1/DATA2 display values) THIS PROJECT ALREADY COMPUTES independently
@@ -207,6 +216,7 @@ def _amos_lte_index(node_logs_text):
                 "CellRange": cell_range_by_cell.get(cell, ""),
                 "DSS": bool(dss_by_cell.get(cell, False)),
                 "RiLink": (rilink_by_cell.get(cell) or {}).get("link_count_type") or "",
+                "RiLinkName": (rilink_by_cell.get(cell) or {}).get("rilink_type") or "",
             })
     return flat
 
@@ -240,6 +250,7 @@ def _amos_nr_index(node_logs_text):
                 "CellRange": cell_range_by_cell.get(cell, ""),
                 "DSS": bool(dss_by_cell.get(cell, False)),
                 "RiLink": (rilink_by_cell.get(cell) or {}).get("link_count_type") or "",
+                "RiLinkName": (rilink_by_cell.get(cell) or {}).get("rilink_type") or "",
             })
     return flat
 
@@ -254,6 +265,25 @@ def _ciq_link_map(ciq_wb):
     nr_rows = cc.build_nr_ciq_rows(ciq_wb)
     cc.apply_link_and_sharing(lte_rows, nr_rows)
     return {r.get("cell"): r.get("link") for r in lte_rows + nr_rows if r.get("cell")}
+
+
+def _ciq_link_name_map(ciq_wb):
+    """{cell: 'DATA1'/'DATA2'/'DATA1/DATA2'} for every LTE+NR cell in the
+    CIQ, from ciq_checks.build_lte_ciq_rows()/build_nr_ciq_rows()'s
+    'link_name' field (CIQ's own scripted Radio Port value) — the same
+    value the CIQ Checks tab's own 'Link Name (DATA1/DATA2)' column shows.
+
+    Separate from _ciq_link_map()/the existing 'link' Single/Double
+    comparison above: this is the DATA1/DATA2-vs-DATA1/DATA2 comparison
+    that module's docstring originally said couldn't be done because the
+    CIQ side had no DATA1/DATA2 signal — 'link_name' (added alongside this
+    same fix) is that signal, so this compares it against the Pre side's
+    already-existing rilink_type (pe.extract_cell_to_rilink_detail's
+    'RiLinkName' field above), independently of the Single/Double
+    comparison, which is untouched."""
+    lte_rows = cc.build_lte_ciq_rows(ciq_wb)
+    nr_rows = cc.build_nr_ciq_rows(ciq_wb)
+    return {r.get("cell"): r.get("link_name") for r in lte_rows + nr_rows if r.get("cell")}
 
 
 def _extract_sector_carrier_index(text):
@@ -285,6 +315,7 @@ def compare_lte_cell_level(node_logs_text, ciq_wb):
     ciq_rows = cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]) if "eUtran Parameters" in ciq_wb.sheetnames else []
     enb_tac_by_id = {str(r.get("eNBId") or "").strip(): r.get("tac") for r in cer.enb_info_rows(ciq_wb)}
     ciq_link_by_cell = _ciq_link_map(ciq_wb)
+    ciq_link_name_by_cell = _ciq_link_name_map(ciq_wb)
 
     # CIQ/Post-side DSS signal: '5G Info' tab's own 'DSS' column names the
     # LTE cell it's paired with ('NO' when not paired) — confirmed real CIQ
@@ -340,6 +371,11 @@ def compare_lte_cell_level(node_logs_text, ciq_wb):
         # confirmed signals - see this module's docstring for why they're
         # compared as-is rather than one being re-derived from the other.
         link_text, link_ok = _cmp(_nz(match["RiLink"]) if match else "", ciq_link_by_cell.get(cell_full))
+        # DATA1/DATA2 name comparison, ADDITIVE to the Single/Double
+        # comparison above (does not replace or affect it) — see
+        # _ciq_link_name_map()'s docstring.
+        link_name_text, link_name_ok = _cmp(_nz(match["RiLinkName"]) if match else "",
+                                             ciq_link_name_by_cell.get(cell_full))
 
         result.append({
             "node": c.get("Node") or final_pfx, "cell": cell_full,
@@ -350,7 +386,9 @@ def compare_lte_cell_level(node_logs_text, ciq_wb):
             "rx": rx_text, "_rx_ok": rx_ok, "rru": rru_text, "_rru_ok": rru_ok,
             "cellrange": cellrange_text, "_cellrange_ok": cellrange_ok,
             "dss": dss_text, "_dss_ok": dss_ok,
-            "link": link_text, "_link_ok": link_ok, "comment": comment, "row_type": row_type,
+            "link": link_text, "_link_ok": link_ok,
+            "link_name": link_name_text, "_link_name_ok": link_name_ok,
+            "comment": comment, "row_type": row_type,
         })
     return result
 
@@ -377,6 +415,7 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
     amos = _amos_nr_index(node_logs_text)
     ciq_rows = cer.sheet_rows_as_dicts(ciq_wb["5G Info"]) if "5G Info" in ciq_wb.sheetnames else []
     ciq_link_by_cell = _ciq_link_map(ciq_wb)
+    ciq_link_name_by_cell = _ciq_link_name_map(ciq_wb)
 
     # Primary (LTE-paired) node name per gNBId, from Mixed Mode Info - same
     # source ciq_checks._node_name_maps() reads. A gNBId with no Mixed Mode
@@ -425,6 +464,8 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
             dss_text, dss_ok = "-", None  # no Pre match - nothing to compare (new cell)
 
         link_text, link_ok = _cmp(_nz(match["RiLink"]) if match else "", ciq_link_by_cell.get(cell_full))
+        link_name_text, link_name_ok = _cmp(_nz(match["RiLinkName"]) if match else "",
+                                             ciq_link_name_by_cell.get(cell_full))
 
         result.append({
             "node": final_pfx, "cell": cell_full,
@@ -434,7 +475,9 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
             "ssb": ssb_text, "_ssb_ok": ssb_ok, "rru": rru_text, "_rru_ok": rru_ok,
             "cellrange": cellrange_text, "_cellrange_ok": cellrange_ok,
             "dss": dss_text, "_dss_ok": dss_ok,
-            "link": link_text, "_link_ok": link_ok, "comment": comment, "row_type": row_type,
+            "link": link_text, "_link_ok": link_ok,
+            "link_name": link_name_text, "_link_name_ok": link_name_ok,
+            "comment": comment, "row_type": row_type,
         })
     return result
 
