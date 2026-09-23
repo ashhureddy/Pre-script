@@ -100,7 +100,7 @@ def _corrective_action(warning):
     return "Verify and correct in the CIQ"
 
 
-def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
+def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None, cell_to_sef=None):
     """One row per eUtran Parameters entry: Node, Cell, PCI, Cell ID,
     Electrical Tilt, RBB Type Verification, RIPORT, Comments — matches
     QUICKIX HTML's LTE E-UTRAN Parameters card (Link column is built by
@@ -111,7 +111,16 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
     (already the canonical RBB-vs-TX/RX/ISDLONLY/Radio-Port check, wired
     into Consolidated Report's CIQ Sanity Check and Checklist row 71) —
     passed in and matched by cell rather than re-implemented here, so
-    this table and that check can never silently drift apart."""
+    this table and that check can never silently drift apart.
+
+    cell_to_sef: Cell -> SectorEquipmentFunction string, from
+    pre_extract.extract_cell_to_sef() run over the site's Pre logs and
+    merged by the caller across every node's log text. LTE's CIQ sheet
+    ('eUtran Parameters') has NO SectorEquipmentFunction column in any
+    real template checked (that column only exists on '5G Info') -
+    SEF is a Pre-log-only concept for LTE, hence this comes from the
+    logs rather than the CIQ like every other column here. None/missing
+    when no Pre log covers that cell."""
     rows = cer.sheet_rows_as_dicts(ciq_wb["eUtran Parameters"]) if "eUtran Parameters" in ciq_wb.sheetnames else []
     if not rows:
         return []
@@ -358,9 +367,11 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
         if riport_warn:
             add(i, riport_warn)
         cell_comments = comments[i]
+        cell_name = r.get("EutranCellFDDId")
+        sef_val = (cell_to_sef or {}).get(cell_name)
         out.append({
-            "node": node_name, "cell": r.get("EutranCellFDDId"), "pci": r.get("PCI"),
-            "cell_id": r.get("cellId"),
+            "node": node_name, "cell": cell_name, "pci": r.get("PCI"),
+            "cell_id": r.get("cellId"), "sef": sef_val or "-",
             "electrical_tilt": r.get("electricalAntennaTilt"), "rbb_type": r.get("RBB type"),
             "tx": r.get("noOfTxAntennas"), "rx": r.get("noOfRxAntennas"),
             "riport": riport, "link": "-",  # filled in by build_link_map()
@@ -503,6 +514,7 @@ def build_nr_ciq_rows(ciq_wb):
         cell_comments = comments[i]
         out.append({
             "node": node_name, "cell": r.get("NRCellDU"), "sef": r.get("SectorEquipmentFunction"),
+            "radio_type": r.get("RRU Type"),
             "fru": r.get("RRU FieldReplaceableUnit"), "nr_pci": r.get("nRPCI"),
             "cell_id": r.get("cellLocalId"),
             "electrical_tilt": r.get("Electrical Tilt"), "rbb_type": r.get("RBB Type"),
@@ -560,8 +572,16 @@ def apply_link_and_sharing(lte_rows, nr_rows):
     for r in lte_rows + nr_rows:
         node = r.get("node") or r.get("_enb_id") or r.get("_gnb_id")
         rru = r.get("_fru") or r.get("_rru_type")
-        ports = rru_ports.get((node, rru), set())
-        r["link"] = "Double Link" if len(ports) > 1 else "Single Link"
+        ports = sorted(rru_ports.get((node, rru), set()))
+        # Show the actual RadioPort value(s) instead of the generic
+        # Single/Double wording - "DATA1" or "DATA2" alone for a single
+        # link, "(DATA1/DATA2)" when the RRU carries both.
+        if len(ports) > 1:
+            r["link"] = f"({'/'.join(ports)})"
+        elif len(ports) == 1:
+            r["link"] = ports[0]
+        else:
+            r["link"] = "-"
 
     # ── Sharing Radio: same RRU + same band, DIFFERENT sector letters.
     # Exposed as its OWN column (r["sharing_radio"]) as well as folded into
