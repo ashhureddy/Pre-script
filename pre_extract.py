@@ -258,21 +258,35 @@ def extract_cell_range_5g(text):
 
 
 def extract_cell_to_sef(text):
-    """Cell -> SectorEquipmentFunction number, via the
-    SectorCarrier=|SectorEquipmentFunction hget block's reservedBy
-    cross-references (Cell -> SectorCarrier -> SEF chain). No confirmed
-    link from SEF number to a specific RRU product name exists in Pre
-    kget-all data, so this stops at the SEF number - callers needing the
-    Pre-side radio product should treat it as NOT AVAILABLE rather than
-    guess further down this chain."""
+    """Cell -> SectorEquipmentFunction string (e.g.
+    'SectorEquipmentFunction=1'), via the SectorCarrier=|SectorEquipment
+    Function hget block's reservedBy cross-references (Cell ->
+    SectorCarrier -> SEF chain). No confirmed link from SEF number to a
+    specific RRU product name exists in Pre kget-all data, so this stops
+    at the SEF itself - callers needing the Pre-side radio product should
+    use extract_cell_to_radio() instead of guessing further down this
+    chain.
+
+    Covers BOTH LTE (SectorCarrier=/EUtranCellFDD=) and NR
+    (NRSectorCarrier=/NRCellDU=) - an earlier version only matched the LTE
+    MO names, so it silently returned nothing for every NR cell. Also
+    reads EVERY SectorCarrier/NRSectorCarrier token on a
+    SectorEquipmentFunction's reservedBy line, not just the first - one
+    SEF real-world confirmed to serve multiple carriers at once (e.g. an
+    NR carrier co-sited with 2 LTE carriers under one shared SEF; the
+    single-match version silently dropped every carrier after the
+    first)."""
     block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction')
     if block:
         cell_to_sc = {}
-        for m in re.finditer(r'^(SectorCarrier=\S+)\s.*?EUtranCellFDD=(\S+)', block, re.M):
+        for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s.*?(?:EUtranCellFDD|NRCellDU)=(\S+)',
+                              block, re.M):
             cell_to_sc[m.group(2)] = m.group(1)
         sc_to_sef = {}
-        for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s.*?SectorCarrier=(\S+)', block, re.M):
-            sc_to_sef[f'SectorCarrier={m.group(2)}'] = m.group(1)
+        for m in re.finditer(r'^(SectorEquipmentFunction=\S+)\s+(.*)$', block, re.M):
+            sef_mo, rest = m.group(1), m.group(2)
+            for sc in re.findall(r'(?:SectorCarrier|NRSectorCarrier)=\S+', rest):
+                sc_to_sef[sc] = sef_mo
         result = {cell: sc_to_sef.get(sc) for cell, sc in cell_to_sc.items() if sc_to_sef.get(sc)}
         if result:
             return result
@@ -981,12 +995,16 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
     port.
 
     A cell whose radio FRU is linked via more than one RiLink row (dual-
-    link radio) gets both ids/ports joined with '+', and 'rilink_type' is
-    set from that same count: 'Single Link' (1 RiLink row), 'Double Link'
-    (2 - the normal dual-link case), or 'N Links' for anything else seen
-    (defensive - not confirmed real, but reported honestly rather than
-    mislabeled as Single/Double if it ever occurs). Returns {} if the
-    rilink= command isn't present in this log."""
+    link radio) gets both ids/ports joined with '+'. 'rilink_type' is now
+    the actual radio-side riPortRef2 RiPort value(s) instead of a generic
+    Single/Double Link label - 'DATA1' or 'DATA2' alone for one RiLink
+    row, '(DATA1/DATA2)' when the two rows carry different DATA ports
+    (confirmed real values: RiPort=DATA_1/DATA_2, normalized here by
+    dropping the underscore). Falls back to the old 'N Links'/'Single
+    Link' wording only if a RiLink row's radio-side port isn't a DATA_n
+    value at all (not confirmed real, but reported honestly rather than
+    guessed). Returns {} if the rilink= command isn't present in this
+    log."""
     if not text or not fru_by_cell:
         return {}
     fru_to_links = {}
@@ -998,7 +1016,7 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
         pairs = re.findall(r'FieldReplaceableUnit=(\S+?),RiPort=(\S+)', rest)
         if len(pairs) < 2:
             continue
-        (ref1_fru, ref1_port), (ref2_fru, _ref2_port) = pairs[0], pairs[1]
+        (ref1_fru, ref1_port), (ref2_fru, ref2_port) = pairs[0], pairs[1]
         # riPortRef1 is on the board slot (FRU='1', no bracket needed) OR on
         # an XMU expansion unit — when it's an XMU, the unit itself isn't
         # otherwise shown anywhere in this table, so it's appended in
@@ -1007,7 +1025,7 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
         # ALL01748: XMU03-1-1 and XMU03-1-2 both use overlapping port
         # numbers, so the bare port number alone is ambiguous).
         port_display = f"{ref1_port} ({ref1_fru})" if ref1_fru.upper().startswith("XMU") else ref1_port
-        fru_to_links.setdefault(ref2_fru, []).append((rilink_id, port_display))
+        fru_to_links.setdefault(ref2_fru, []).append((rilink_id, port_display, ref2_port))
 
     result = {}
     for cell, fru_str in fru_by_cell.items():
@@ -1017,10 +1035,21 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
         for fru in (f.strip() for f in fru_str.split(",")):
             links += fru_to_links.get(fru, [])
         if links:
-            link_type = {1: "Single Link", 2: "Double Link"}.get(len(links), f"{len(links)} Links")
+            # DATA1/DATA2 - the actual radio-side RiPort value(s), not a
+            # generic Single/Double Link label. 'DATA_1'/'DATA_2' ->
+            # 'DATA1'/'DATA2'; both shown as '(DATA1/DATA2)' when the
+            # radio's RiLink rows carry different DATA ports.
+            data_ports = sorted({dp.replace("_", "").upper() for _, _, dp in links
+                                  if dp and dp.upper().startswith("DATA")})
+            if len(data_ports) > 1:
+                link_type = f"({'/'.join(data_ports)})"
+            elif len(data_ports) == 1:
+                link_type = data_ports[0]
+            else:
+                link_type = {1: "Single Link", 2: "Double Link"}.get(len(links), f"{len(links)} Links")
             result[cell] = {
-                "rilink_id": "+".join(i for i, _ in links),
-                "rilink_port": "+".join(p for _, p in links),
+                "rilink_id": "+".join(i for i, _, _ in links),
+                "rilink_port": "+".join(p for _, p, _ in links),
                 "rilink_type": link_type,
             }
     return result
@@ -1464,28 +1493,10 @@ def extract_bearer_oam_ipv6(text):
             # ULCoMP/ERAN in this command's own output order.
             router_iface_to_vlan.setdefault(rb_m.group(1), vlan_m.group(1))
 
-    # Which bucket a bearer interface belongs to is decided by ROUTER name
-    # first, THEN by the InterfaceIPv6 suffix - confirmed against real logs
-    # of all three node shapes:
-    #   - LTE-only:  Router=LTE, InterfaceIPv6=1            -> LTE bucket
-    #   - 5G-only:   Router=NR,  InterfaceIPv6=<name>_NR    -> NR bucket
-    #     (the interface name is a real board-port name, e.g.
-    #     'TN_IDL_B_NR' - NOT the bare literal 'NR' the old regex required,
-    #     so a 5G-only node's bearer interface fell through to the LTE
-    #     bucket every time, tagging its real values bearer_vlan_lte
-    #     instead of _nr - confirmed real bug, HXIN090035F: bearer/OAM
-    #     VLAN 212/211 extracted correctly but exposed only under the
-    #     _lte keys, so a caller keying off this node's own tech='NR'
-    #     (5G-only) found nothing and reported Pre VLAN/IPv6 as missing.)
-    #   - TMBB dual: BOTH identities live under Router=LTE, distinguished
-    #     only by the bare InterfaceIPv6 suffix: '=1' (LTE) vs '=NR' (NR).
-    # So: Router=NR is unconditionally the NR bucket; Router=LTE splits on
-    # whether InterfaceIPv6 is exactly the bare literal 'NR'.
     bearer_key_lte = next((k for k in router_iface_to_vlan
-                           if re.match(r'Router=LTE,InterfaceIPv6=(?!NR$)\S+', k)), None)
+                           if re.match(r'Router=(?:LTE|NR),InterfaceIPv6=(?!NR\b)\S+', k)), None)
     bearer_key_nr = next((k for k in router_iface_to_vlan
-                          if re.match(r'Router=LTE,InterfaceIPv6=NR$', k)
-                          or re.match(r'Router=NR,InterfaceIPv6=\S+', k)), None)
+                          if re.match(r'Router=(?:LTE|NR),InterfaceIPv6=NR$', k)), None)
     oam_key = next((k for k in router_iface_to_vlan if re.match(r'Router=(?:vr_OAM|OAM),InterfaceIPv6=', k)), None)
     bearer_vlan_lte = router_iface_to_vlan.get(bearer_key_lte)
     bearer_vlan_nr = router_iface_to_vlan.get(bearer_key_nr)
@@ -1518,15 +1529,8 @@ def extract_bearer_oam_ipv6(text):
         m = re.search(pat, text)
         return m.group(1) if m else None
 
-    # Same Router-name-first rule as the bearer VLAN split above: a 5G-only
-    # node's NextHop lives under 'Router=NR,...,NextHop=1' (suffix '1',
-    # same as LTE - a 5G-only node has only one bearer interface at all,
-    # so it never gets a distinct 'NR'-suffixed NextHop) - confirmed real
-    # log, HXIN090035F. The old code tried this exact pattern as an LTE
-    # fallback, tagging a 5G-only node's own default-router IP as
-    # bearer_router_ip_lte instead of _nr.
-    bearer_router_ip_lte = _nexthop_address('LTE', '1')
-    bearer_router_ip_nr = _nexthop_address('LTE', 'NR') or _nexthop_address('NR', '1')
+    bearer_router_ip_lte = _nexthop_address('LTE', '1') or _nexthop_address('NR', '1')
+    bearer_router_ip_nr = _nexthop_address('LTE', 'NR') or _nexthop_address('NR', 'NR')
     oam_router_ip = _nexthop_address('vr_OAM', '1') or _nexthop_address('OAM', '1')
 
     return {
