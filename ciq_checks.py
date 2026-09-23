@@ -63,6 +63,25 @@ def _clean_ports(*vals):
     return ",".join(out)
 
 
+# Confirmed real format across every CIQ checked: a RIPORT token is always
+# either a single letter (A-Z) or a plain, digits-only number (single or
+# multi-digit — "5" through "15" all seen), comma-separated when a
+# position carries more than one. Anything else (multi-letter text,
+# letter+digit combos, symbols) is a garbled/mistyped port value in the
+# CIQ, not a valid one — flagged rather than silently displayed or fed
+# into the Sharing Radio / Link comparison as if it were real.
+_RIPORT_TOKEN_RE = re.compile(r'^[A-Z]$|^\d+$')
+
+
+def _riport_format_warning(riport):
+    if not riport or riport == "-":
+        return None
+    bad = [t.strip() for t in riport.split(",") if t.strip() and not _RIPORT_TOKEN_RE.match(t.strip())]
+    if bad:
+        return f'RIPORT value(s) not a single letter or number: {", ".join(bad)}'
+    return None
+
+
 # ── Corrective actions, verbatim from QUICKIX's ciqCorrectiveAction() ──
 def _corrective_action(warning):
     if warning.startswith("PCI Clash"):
@@ -321,6 +340,9 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
     for i, r in enumerate(rows):
         node_name = node_by_enb.get(str(r.get("eNBId") or "").strip(), "")
         riport = _clean_ports(r.get("DUS / XMU Port"), r.get("DUS / XMU Port Expansion")) or "-"
+        riport_warn = _riport_format_warning(riport)
+        if riport_warn:
+            add(i, riport_warn)
         cell_comments = comments[i]
         out.append({
             "node": node_name, "cell": r.get("EutranCellFDDId"), "pci": r.get("PCI"),
@@ -459,6 +481,9 @@ def build_nr_ciq_rows(ciq_wb):
     for i, r in enumerate(rows):
         node_name = node_by_gnb.get(str(r.get("gNBId") or "").strip(), "")
         riport = _clean_ports(r.get("Port 1"), r.get("Port 2")) or "-"
+        riport_warn = _riport_format_warning(riport)
+        if riport_warn:
+            add(i, riport_warn)
         cell_comments = comments[i]
         out.append({
             "node": node_name, "cell": r.get("NRCellDU"), "sef": r.get("SectorEquipmentFunction"),
