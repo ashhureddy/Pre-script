@@ -256,6 +256,19 @@ def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None, nod
             pre_ri = rilink.get(cell, 'NA')
             cfg5g = fiveg_config.get(cell)
             pre_txrx = f"{cfg5g['tx']}x{cfg5g['rx']}" if cfg5g else 'NOT AVAILABLE'
+            label, sector = band_label(cell)
+            # RBBAIR_* codes don't follow the RBB<TX><RX> naming convention
+            # at all (confirmed real data, integrated AIR-radio CBAND/DOD
+            # cells) - parse_rbb_txrx/parse_rbb_link correctly return None
+            # for them, but that's not a real mismatch to flag, it's just
+            # not this naming scheme. NA, not MISMATCH.
+            if str(rbb or '').strip().upper().startswith('RBBAIR'):
+                results.append({'rule': '#21/#22/#32', 'kind': '5g', 'node': node_id, 'cell': cell, 'label': label, 'sector': sector,
+                                 'sec_id': 'NA', 'pre_sec_id': 'NA',
+                                 'pre_txrx': pre_txrx, 'ciq_txrx': ciq_txrx or 'NOT FOUND',
+                                 'pre_power': 'NA', 'ciq_power': str(row.get('configuredMaxTxPower', '')).strip(),
+                                 'status': 'NA', 'note': f"RBB Type '{rbb}' is an AIR-radio code - RBB<TX><RX> naming does not apply."})
+                continue
             mismatches = []
             if ciq_txrx is None or ciq_ri is None:
                 mismatches.append(f"RBB Type '{rbb}' does not match the expected RBB<TX><RX>_<link><letter> "
@@ -265,7 +278,6 @@ def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None, nod
                     mismatches.append(f'RILink Pre={pre_ri} vs CIQ={ciq_ri}')
                 if pre_txrx != 'NOT AVAILABLE' and pre_txrx != ciq_txrx:
                     mismatches.append(f'TX/RX Pre={pre_txrx} vs CIQ={ciq_txrx} (RBB Type {rbb})')
-            label, sector = band_label(cell)
             results.append({'rule': '#21/#22/#32', 'kind': '5g', 'node': node_id, 'cell': cell, 'label': label, 'sector': sector,
                              'sec_id': 'NA', 'pre_sec_id': 'NA',
                              'pre_txrx': pre_txrx, 'ciq_txrx': ciq_txrx or 'NOT FOUND',
@@ -1383,7 +1395,14 @@ def check_electrical_tilt_type(node_id, ciq_wb, e_name):
     float), which is what actually distinguishes a text-formatted Excel
     cell from a number-formatted one — not re-parsed from a string, since
     a re-parse would accept '0' just as happily as 0 and miss the bug
-    entirely."""
+    entirely.
+
+    Confirmed decision: only flag when the text ISN'T even a valid
+    number ('N/A', blank-ish junk, non-numeric garbage). A text cell
+    holding a genuine numeric value ('0', '50', '-3') is a real-world CIQ
+    formatting quirk, not a data-quality bug worth flagging — Excel cell
+    formatting (text vs number) has no operational effect once the value
+    is read and used downstream."""
     if not e_name:
         return []
     results = []
@@ -1397,9 +1416,11 @@ def check_electrical_tilt_type(node_id, ciq_wb, e_name):
         if val is None:
             continue
         is_character = isinstance(val, str)
-        status = 'MISMATCH' if is_character else 'MATCH'
+        is_valid_numeric_text = is_character and re.fullmatch(r'-?\d+(\.\d+)?', val.strip() or '')
+        flag = is_character and not is_valid_numeric_text
+        status = 'MISMATCH' if flag else 'MATCH'
         note = (f"{where}: electricalAntennaTilt='{val}' is stored as a character, not an integer."
-                if is_character else 'Confirmed integer.')
+                if flag else 'Confirmed integer.')
         results.append({'rule': '#61', 'node': node_id, 'cell': cell, 'label': label, 'sector': sector,
                          'status': status, 'note': note})
     return results
@@ -1962,7 +1983,26 @@ def check_antenna_uniqueness(node_id, ciq_wb):
                     colocation.setdefault(cell, set()).add(other)
                     colocation.setdefault(other, set()).add(cell)
 
-    aug_by_cell = {r.get('EutranCellFDDId'): (r.get('AntennaUnitGroup'), r.get('AntennaUnit'), r.get('AntennaSubunit'))
+    def _norm_asu(v):
+        # AntennaUnitGroup/Unit/Subunit are read straight off openpyxl cell
+        # values with no type coercion - confirmed real bug, a genuine CIQ
+        # where the SAME antenna subunit is entered as text on the 5G row
+        # ('3') and as a number on the LTE row (3): a plain tuple compare
+        # ('1', 1, '3') == ('1', 1, 3) is False in Python even though the
+        # antenna position is identical, so a correctly-shared sector pair
+        # was flagged 'Not shared'. Normalizing every component to a plain
+        # string (and dropping a trailing '.0' from a numeric cell like
+        # 3.0) makes the comparison match on VALUE, not on the source
+        # cell's Excel number/text formatting.
+        if v is None:
+            return ''
+        s = str(v).strip()
+        if re.fullmatch(r'-?\d+\.0+', s):
+            s = s.split('.')[0]
+        return s
+
+    aug_by_cell = {r.get('EutranCellFDDId'): tuple(_norm_asu(v) for v in
+                   (r.get('AntennaUnitGroup'), r.get('AntennaUnit'), r.get('AntennaSubunit')))
                    for r in antenna_rows if r.get('EutranCellFDDId')}
 
     results = []
@@ -2082,7 +2122,10 @@ def check_wcs_slim(node_id, log_text):
         return [{'rule': '#WCS', 'node': node_id, 'cell': ', '.join(sorted(wcs_vals)), 'status': 'MATCH',
                  'note': 'AirIfLoadProfile is WCS_Slim for WCS sectors.'}]
     bad = sorted(c for c, v in wcs_vals.items() if str(v or '').strip().upper() != 'WCS_SLIM')
-    return [{'rule': '#WCS', 'node': node_id, 'cell': ', '.join(bad), 'status': 'MISMATCH',
+    # Info-only, not MISMATCH (confirmed decision): DSS/WCS Slim reflects a
+    # traffic-management profile choice, not a Pre-vs-CIQ config error - a
+    # non-Slim WCS cell is worth surfacing but should not fail the row.
+    return [{'rule': '#WCS', 'node': node_id, 'cell': ', '.join(bad), 'status': 'INFO',
              'note': 'AirIfLoadProfile is non WCS_Slim for WCS sectors.'}]
 
 
@@ -2179,26 +2222,41 @@ def check_vonr_vs_ciq(node_id, log_text, ciq_wb):
     """Row 55: CIQ's 5G Info 'VoNR' column vs the Pre log's own verdict
     (pe.extract_vonr_status) - per confirmed decision, SA cells only
     ('VoNR column is only applicable when the cell is SA'; NSA sites
-    cannot be VoNR at all). NSA cells are skipped outright, not flagged,
-    even when CIQ's own column shows something other than 'N/A' there
-    (confirmed real: HXL00147's NSA cells show 'No', not 'N/A' - a CIQ
-    data-quality question outside this check's scope).
+    cannot be VoNR at all).
+
+    SA gating uses the Pre log's own evidence (AMF present + at least one
+    7-digit nRTAC on this node - same rule as amos_view.sa_nsa_status /
+    QUICKIX's findSaNsaStatus), NOT CIQ's own 'NSA/SA' column - confirmed
+    real bug: a CIQ '5G Info' NSA/SA column showing NSA for every cell
+    while the Pre log itself has AMF + a genuine 7-digit nRTAC (2137137)
+    is a CIQ data-quality gap, not evidence the node is actually NSA. The
+    CIQ column is no longer trusted to decide whether VoNR even applies.
 
     epsFallbackOperation/CXC4012592 are node-wide (not per-cell), so
     pre_vonr is derived once per node and compared against every SA
     cell's own CIQ VoNR value on that node - 'if Pre says Active, CIQ
-    must say Yes' (and the mirror for Not Active), per confirmed rule."""
+    must say Yes' (and the mirror for Not Active). Per confirmed
+    reframing: when the node is genuinely SA (log evidence) but VoNR is
+    simply not switched on yet - pre_vonr is False/None and CIQ agrees
+    (blank/'No'/'N/A') - that's a normal pre-activation state, reported
+    as INFO ('VoNR: Not activated in Pre'), not a MISMATCH against CIQ's
+    NSA/SA column."""
     if not log_text:
         return [{'rule': '#55', 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
                  'note': 'No Pre log for this node - VoNR state unknown.'}]
     pre_cells = set(pci.extract_pre_cells_for_node(log_text))
     pre_vonr = pe.extract_vonr_status(log_text)
+    nr_tac = pe.extract_nr_tac(log_text)
+    has_7digit_tac = any(str(v or '').isdigit() and len(str(v)) == 7 for v in nr_tac.values())
+    has_amf = bool(re.search(r'TermPointToAmf', log_text, re.I))
+    is_sa = has_amf and has_7digit_tac
+    if not is_sa:
+        return [{'rule': '#55', 'node': node_id, 'cell': '-', 'status': 'NA',
+                 'note': 'No SA cells - VoNR not applicable (log shows NSA: AMF/7-digit nRTAC not both present).'}]
     results = []
     for row in _rows(ciq_wb, '5G Info'):
         cell = row.get('NRCellDU')
         if not cell or cell not in pre_cells:
-            continue
-        if str(row.get('NSA/SA', '')).strip().upper() != 'SA':
             continue
         ciq_vonr = str(row.get('VoNR', '') or '').strip()
         if pre_vonr is None:
@@ -2206,7 +2264,10 @@ def check_vonr_vs_ciq(node_id, log_text, ciq_wb):
                              'note': 'epsFallbackOperation/CXC4012592 state not recognized in Pre log - VoNR could not be verified.'})
             continue
         expected = 'Yes' if pre_vonr else 'No'
-        if ciq_vonr.upper() == expected.upper():
+        if not pre_vonr and ciq_vonr.upper() in ('', 'NO', 'N/A'):
+            results.append({'rule': '#55', 'node': node_id, 'cell': cell, 'status': 'INFO',
+                             'note': 'VoNR: Not activated in Pre.'})
+        elif ciq_vonr.upper() == expected.upper():
             results.append({'rule': '#55', 'node': node_id, 'cell': cell, 'status': 'MATCH',
                              'note': f'Pre and CIQ both {expected}.'})
         else:
