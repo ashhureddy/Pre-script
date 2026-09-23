@@ -249,6 +249,23 @@ div[data-testid="stExpander"] summary:hover { background:#f4f7fc; border-radius:
   border-right:2px solid #cbd5e1;
 }
 .qkx-grid-wrap { margin-bottom:16px; }
+/* RRNRBL checklist rows: st.data_editor/st.dataframe (glide-data-grid)
+   clips every cell to one line and never wraps, however tall row_height
+   is set - a documented Streamlit limitation (streamlit/streamlit#5386,
+   #13504), which is why a long check line was only readable by double-
+   clicking into edit mode. Check/Scope are rendered as plain wrapping
+   HTML instead; only Tick/Remarks stay as real input widgets. */
+.qkx-chk-cell {
+  padding:6px 10px; border-radius:6px; font-size:12.8px; font-weight:600;
+  white-space:normal; overflow-wrap:anywhere; line-height:1.35;
+}
+.qkx-chk-scope {
+  display:inline-block; margin-left:8px; font-size:11px; font-weight:700;
+  opacity:.7; white-space:nowrap;
+}
+.qkx-chk-row { margin-bottom:4px; }
+.qkx-chk-row div[data-testid="stTextInput"] input,
+.qkx-chk-row div[data-testid="stCheckbox"] { margin-top:0; }
 </style>
 <div class="qkx-topbar">
   <div><span class="qkx-logo">MAS<span>TEC</span></span><span class="qkx-title">QUICK IX — Pre-Script Validation</span></div>
@@ -397,13 +414,7 @@ def render_cell_pre_post_table(rows, field_columns):
             else:
                 color = "#059669" if ok else "#dc2626"
                 cells += f'<td style="color:{color};font-weight:700;">{esc(r.get(val_key, "-"))}</td>'
-        link_ok = r.get("_link_ok")
-        if link_ok is None:
-            link_cell = f"<td>{esc(r.get('link', '-'))}</td>"
-        else:
-            link_color = "#059669" if link_ok else "#dc2626"
-            link_cell = f'<td style="color:{link_color};font-weight:700;">{esc(r.get("link", "-"))}</td>'
-        cells += link_cell + f"<td>{esc(r.get('comment', ''))}</td>"
+        cells += f"<td>{esc(r.get('link', '-'))}</td><td>{esc(r.get('comment', ''))}</td>"
         body.append(f'<tr style="background:{row_bg};">{cells}</tr>')
     return (f'<div class="qkx-table-wrap"><table class="qkx-table"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
@@ -814,41 +825,36 @@ def render_rrnrbl_checklist(rows):
         st.markdown(f'<div class="qkx-cat-banner"><span>{esc(cat)}</span></div>',
                     unsafe_allow_html=True)
 
-        cat_df = pd.DataFrame([{
-            "Check": STATUS_ICON.get(r["status"], "") + r["item"],
-            "Tick": _checked_for(r),
-            "Scope": r.get("tag", ""),
-            "Remarks": _remarks_for(r),
-            "_row": r["row"],
-            "_status": r["status"],
-        } for r in group])
+        head_l, head_tick, head_rem = st.columns([6, 0.6, 3])
+        head_tick.markdown('<div style="font-size:11px;font-weight:800;color:#64748b;'
+                            'text-transform:uppercase;">Tick</div>', unsafe_allow_html=True)
+        head_rem.markdown('<div style="font-size:11px;font-weight:800;color:#64748b;'
+                           'text-transform:uppercase;">Remarks</div>', unsafe_allow_html=True)
 
-        styled = cat_df.drop(columns=["_row", "_status"]).style.apply(
-            lambda row: _tint_row(row, cat_df), axis=1
-        )
+        for r in group:
+            color, bg = STATUS_COLORS.get(r["status"], DEFAULT_COLOR)
+            icon = STATUS_ICON.get(r["status"], "")
+            scope = r.get("tag", "")
+            scope_html = f'<span class="qkx-chk-scope">{esc(scope)}</span>' if scope else ""
 
-        edited = st.data_editor(
-            styled,
-            hide_index=True,
-            use_container_width=True,
-            row_height=34,
-            height=len(cat_df) * 34 + 38,
-            column_order=["Check", "Tick", "Scope", "Remarks"],
-            column_config={
-                "Check": st.column_config.TextColumn("Check", width="large"),
-                "Tick": st.column_config.CheckboxColumn("Tick", width=56),
-                "Scope": st.column_config.TextColumn("Scope", width="small"),
-                "Remarks": st.column_config.TextColumn("Remarks", width="large"),
-            },
-            disabled=["Check", "Scope"],
-            key=f"rrnrbl_grid_{cat_idx}",
-        )
-
-        for i in range(len(cat_df)):
-            rid = int(cat_df.loc[i, "_row"])
-            new_checked = bool(edited.loc[i, "Tick"])
-            new_comment = str(edited.loc[i, "Remarks"] or "")
-            new_overrides[rid] = {"checked": new_checked, "comment": new_comment}
+            c_chk, c_tick, c_rem = st.columns([6, 0.6, 3], vertical_alignment="center")
+            with c_chk:
+                st.markdown(
+                    f'<div class="qkx-chk-cell" style="background:{bg};color:{color};">'
+                    f'{icon}{esc(r["item"])}{scope_html}</div>',
+                    unsafe_allow_html=True,
+                )
+            with c_tick:
+                new_checked = st.checkbox(
+                    "Tick", value=_checked_for(r), key=f"rrnrbl_tick_{r['row']}",
+                    label_visibility="collapsed",
+                )
+            with c_rem:
+                new_comment = st.text_input(
+                    "Remarks", value=_remarks_for(r), key=f"rrnrbl_remark_{r['row']}",
+                    label_visibility="collapsed",
+                )
+            new_overrides[r["row"]] = {"checked": new_checked, "comment": new_comment}
 
     st.session_state["rrnrbl_overrides"] = new_overrides
 
@@ -1158,31 +1164,18 @@ def build_consolidated_mismatches(grouped_rows, results, pre_edp_rows=None, edp_
     # SW version (rule #1) never carries MISMATCH on its own raw entries
     # (only INFO/SKIPPED per node) - checklist row 13's "Major showstopper"
     # verdict comes from a cross-node comparison done only inside the
-    # checklist builder (_sw_status_v2). Reused here so this same finding
-    # isn't invisible everywhere except the checklist.
-    #
-    # Must be FAMILY-aware (rc._group_sw_by_family / rc._sw_package_family),
-    # not a flat set-of-all-versions compare - confirmed real false positive
-    # this exact form used to produce: a routine mixed-hardware/CRAN site
-    # (G2 boards on 'RCG123.8', G3/G4 boards on '26.Q1' for the SAME
-    # quarterly release - different board generations never share a
-    # sw_version STRING) showed a green MATCH on the checklist (which
-    # already went family-aware) while this Consolidated Report mismatch
-    # list still flagged 'SW versions disagree across nodes' for the exact
-    # same site, from the flat len(_sw_versions) > 1 check. Only a real
-    # disagreement WITHIN one board family is an actual finding now.
+    # checklist builder (_sw_status_v2: every node's own version must be
+    # detected, and all detected versions must agree). Reused here so this
+    # same finding isn't invisible everywhere except the checklist.
     _sw_checked = [r for r in results.get("sw_version", []) if r.get("status") != "SKIPPED"]
     _sw_missing = [r.get("node") for r in _sw_checked if r.get("sw_version") in (None, "NOT FOUND")]
+    _sw_versions = {r.get("sw_version") for r in _sw_checked if r.get("sw_version") not in (None, "NOT FOUND")}
     if _sw_missing:
         rows.append({"cell": ", ".join(_sw_missing), "source": "CIQ check", "param": "SW Version",
                      "comments": f"No SW version detected for: {', '.join(_sw_missing)}"})
-    _sw_have = [r for r in _sw_checked if r.get("sw_version") not in (None, "NOT FOUND")]
-    _sw_by_family = rc._group_sw_by_family(_sw_have)
-    _sw_mixed = {fam: vers for fam, vers in _sw_by_family.items() if len(vers) > 1}
-    if _sw_mixed:
-        detail = "; ".join(f"{r.get('node')}={r.get('sw_version')}" for r in _sw_have)
+    if len(_sw_versions) > 1:
         rows.append({"cell": "site", "source": "CIQ check", "param": "SW Version",
-                     "comments": f"Mixed SW versions WITHIN the same board family: {detail}"})
+                     "comments": f"SW versions disagree across nodes: {sorted(_sw_versions)}"})
 
     # one fixed bucket. Routed to whichever source(s) actually disagree
     # with CIQ, same comparison check_primary_secondary itself already
@@ -1322,9 +1315,11 @@ def build_consolidated_mismatches(grouped_rows, results, pre_edp_rows=None, edp_
     for r in pre_edp_rows or []:
         if str(r.get("status", "")).lower() != "mismatch":
             continue
+        pre_val = r.get("pre_value", "\u2014")
+        edp_val = r.get("edp_value", "\u2014")
         rows.append({"cell": r.get("node") or "\u2014", "source": "KGET vs EDP",
                      "param": r.get("field", "\u2014"),
-                     "comments": f"KGET - {r.get('pre_value', '\u2014')} | EDP - {r.get('edp_value', '\u2014')}"})
+                     "comments": f"KGET - {pre_val} | EDP - {edp_val}"})
 
     seen, unique = set(), []
     for r in rows:
@@ -1540,6 +1535,7 @@ with tab_rfds:
             unsafe_allow_html=True,
         )
         st.markdown(render_rfds_grouped_table(grouped_rows), unsafe_allow_html=True)
+        st.caption('"Losses & Delays" has no extractor in this backend yet — always shows NOT AVAILABLE, not a fabricated pass.')
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 2 — Audit: Pre checks (AMOS) / CIQ Checks / Audit (Pre vs CIQ) / CR Desc
@@ -1603,25 +1599,36 @@ with tab_ciq:
             ("xmu", "XMU"), ("ports", "Ports"),
         ]), unsafe_allow_html=True)
 
-    ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb, rbb_results=results.get("rbb_tx_isdlonly_4g", []))
+    # LTE has no SectorEquipmentFunction column on the CIQ ('eUtran
+    # Parameters' sheet) in any real template checked - it's a Pre-log-only
+    # concept there, so it's derived from the site's own Pre kget-all logs
+    # (Cell -> SectorCarrier -> SEF chain) instead, same way every other
+    # Pre-log-sourced value on this page already is.
+    cell_to_sef = {}
+    for _log_text in (node_logs_text or {}).values():
+        cell_to_sef.update(pe.extract_cell_to_sef(_log_text))
+
+    ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb, rbb_results=results.get("rbb_tx_isdlonly_4g", []),
+                                          cell_to_sef=cell_to_sef)
     ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
     cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows)
 
     section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
     st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
-        ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("cell_id", "Cell ID"),
+        ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("cell_id", "Cell ID"), ("sef", "SEF"),
         ("electrical_tilt", "Electrical Tilt"),
         ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
         ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
-        ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
+        ("link", "Link"), ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
     section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
     st.markdown(render_table(ciq_nr_rows, status_key="status", columns=[
-        ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
+        ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("radio_type", "Radio Type"),
+        ("fru", "FRU"), ("nr_pci", "NR PCI"),
         ("cell_id", "Cell ID"),
         ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-        ("sharing_radio", "Sharing Radio"), ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
+        ("sharing_radio", "Sharing Radio"), ("link", "Link"), ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
     antenna_rows = cs.check_antenna_uniqueness(node_id="", ciq_wb=ciq_wb)
@@ -1794,40 +1801,9 @@ with tab_consolidated:
     else:
         st.caption("Nothing to report.")
 
-    # Isolated in its own fragment: Streamlit reruns the WHOLE script (all
-    # 5 tabs, every dataframe/table on screen) on ANY widget interaction,
-    # even just editing one Remarks cell here - _memo already stops the
-    # expensive derived-data RECOMPUTE on that rerun, but it never stopped
-    # the RE-RENDER of everything else on the page, which is real cost too
-    # (confirmed real symptom: ~5s per comment edit). st.fragment scopes a
-    # widget interaction INSIDE it to rerunning only this function, not the
-    # surrounding script - editing a Tick/Remarks cell here no longer
-    # touches the other 4 tabs at all. The download button/xlsx build are
-    # inside the SAME fragment (not left outside it) so the downloaded file
-    # stays live-synced with the grid instead of needing one more, separate
-    # interaction to pick up the latest edit.
-    @st.fragment
-    def _render_rrnrbl_section():
-        with st.expander("RRNRBL Checklist", expanded=False):
-            render_rrnrbl_checklist(state["checklist"])
-
-        st.divider()
-        manual_overrides = collect_manual_overrides(state["checklist"])
-        # Keyed on the overrides themselves: reruns that don't touch a tick
-        # or a remark reuse the built workbook instead of rebuilding it.
-        _ov_sig = tuple(sorted((r, bool(v.get("checked")), str(v.get("comment") or ""))
-                                for r, v in manual_overrides.items()))
-        checklist_xlsx = _memo("checklist_xlsx",
-                               lambda: rc.fill_checklist_xlsx(state["checklist"], state["site_id_fa"],
-                                                              manual_overrides=manual_overrides),
-                               _ov_sig)
-        st.download_button("⬇️ Download filled RRNRBL Checklist (.xlsx)", data=checklist_xlsx,
-                            file_name="Checklist_RRNRBL_filled.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True, key="cr_checklist_dl")
-        st.caption("Edits above are baked into the download automatically.")
-
-    _render_rrnrbl_section()
+    with st.expander("RRNRBL Checklist", expanded=False):
+        checklist = state["checklist"]
+        render_rrnrbl_checklist(checklist)
 
     # ── Every mismatch in one place, grouped by comparison family ──────
     # One section (not three separate expanders to hunt through), but the
@@ -1870,3 +1846,20 @@ with tab_consolidated:
                 ("cell", "Cell / Node"), ("source", "Mismatch on"),
                 ("param", "Parameter"), ("comments", "Comments"),
             ]), unsafe_allow_html=True)
+
+    st.divider()
+    manual_overrides = collect_manual_overrides(state["checklist"])
+    # Keyed on the overrides themselves: reruns that don't touch a tick or
+    # a remark reuse the built workbook instead of rebuilding it (this ran
+    # unconditionally on every rerun, including every checklist tick).
+    _ov_sig = tuple(sorted((r, bool(v.get("checked")), str(v.get("comment") or ""))
+                            for r, v in manual_overrides.items()))
+    checklist_xlsx = _memo("checklist_xlsx",
+                           lambda: rc.fill_checklist_xlsx(state["checklist"], state["site_id_fa"],
+                                                          manual_overrides=manual_overrides),
+                           _ov_sig)
+    st.download_button("⬇️ Download filled RRNRBL Checklist (.xlsx)", data=checklist_xlsx,
+                        file_name="Checklist_RRNRBL_filled.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True, key="cr_checklist_dl")
+    st.caption("Edit Tick/Remarks in the checklist above, then click Download again to bake it into the file.")
