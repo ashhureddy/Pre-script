@@ -85,24 +85,14 @@ def build_node_summary(node_id, text):
     board_model = pe.model_token(boards[0]['model']) if boards else "NOT FOUND"
     secondary = node_secondary_name(node_id, text)
     node_label = f"{node_id} / {secondary}" if secondary else node_id
-    sa_nsa = sa_nsa_status(text, nr_tac) if has_nr else "LTE Only"
-    # VoNR is only ever activated on an SA node - an LTE-only node can
-    # never be SA at all, and an NSA node isn't either, so trying to read
-    # a VoNR verdict off the Pre log for either one and reporting whatever
-    # epsFallbackOperation/CXC4012592 happen to say (usually nothing, since
-    # the feature isn't provisioned there) showed as "Unclear" - confirmed
-    # real case, an LTE-only node - which reads as an unresolved data gap
-    # rather than what it actually is: the check doesn't apply here.
-    vonr_status = ({True: "VoNR Active", False: "Not Active", None: "Unclear"}[pe.extract_vonr_status(text)]
-                   if sa_nsa == "SA" else "Not Applicable")
     return {
         "node": node_label,
         "sw_version": sw.get("sw_version", "NOT FOUND"),
         "sw_package": board_model,
         "type": node_type,
         "ptp_status": ptp_status(text),
-        "sa_nsa_status": sa_nsa,
-        "vonr_status": vonr_status,
+        "sa_nsa_status": sa_nsa_status(text, nr_tac) if has_nr else "LTE Only",
+        "vonr_status": {True: "VoNR Active", False: "Not Active", None: "Unclear"}[pe.extract_vonr_status(text)],
     }
 
 
@@ -153,6 +143,7 @@ def build_lte_cell_rows(node_id, text):
     rilink_by_cell = pe.extract_cell_to_rilink_detail(text, fru_by_cell)
     ailg_by_cell = pe.extract_ailg_ref(text)
     freqcheck_by_cell = pe.extract_eutranfreqcheck(text)
+    sef_by_cell = pe.extract_cell_to_sef(text)
 
     # Sharing radio: same RRU + same band serving DIFFERENT sector letters —
     # same definition as QUICKIX's radioBandMap (cross-sector share only; a
@@ -194,6 +185,7 @@ def build_lte_cell_rows(node_id, text):
             "rru": fru, "radio_type": radio_model, "sharing_radio": sharing,
             "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
             "rfbranch_tx_ref": refs.get("tx_ref") or "-", "rfbranch_rx_ref": refs.get("rx_ref") or "-",
+            "sef": sef_by_cell.get(cell) or "-",
             "sef_rfbranches": refs.get("sef_branches") or "-",
             "pre_existing_dss": "DSS Active" if dss_by_cell.get(cell) else "No",
             "rilink_id": rilink.get("rilink_id") or "-", "rilink_port": rilink.get("rilink_port") or "-",
@@ -237,9 +229,11 @@ def build_nr_cell_rows(node_id, text):
     exactly what was asked for."""
     cells = sorted(c for c in pci.extract_pre_cells_for_node(text) if bl.is_5g_cell(c))
     fru_by_cell = pe.extract_cell_to_fru(text)
+    radio_by_cell = pe.extract_cell_to_radio(text)
     cfg_by_cell = cs._extract_sector_config_5g(text)
     branch_refs = pe.extract_rf_branch_refs(text)
     rilink_by_cell = pe.extract_cell_to_rilink_detail(text, fru_by_cell)
+    sef_by_cell = pe.extract_cell_to_sef(text)
 
     rows = []
     for cell in cells:
@@ -249,7 +243,9 @@ def build_nr_cell_rows(node_id, text):
         rows.append({
             "node": node_id, "cell": cell,
             "rru": fru_by_cell.get(cell, "-"),
+            "radio_type": pe._short_radio_name(radio_by_cell.get(cell)) or "-",
             "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
+            "sef": sef_by_cell.get(cell) or "-",
             "sef_rfbranches": refs.get("sef_branches") or "-",
             "rilink_id": rilink.get("rilink_id") or "-", "rilink_port": rilink.get("rilink_port") or "-",
             "rilink_type": rilink.get("rilink_type") or "-",
