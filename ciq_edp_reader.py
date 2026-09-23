@@ -19,11 +19,22 @@ def sheet_rows_as_dicts(ws):
     so every row's "DUS / XMU Port" secretly returned the (usually blank)
     Expansion column's value instead of the real port letter - which fed
     straight into the Sharing Radio / Link checks as a false "no port on
-    this row" and produced false cross-sector-sharing flags. First
-    occurrence now wins for a duplicate header name, since the template's
-    real, intended column is always the first of the two - silently
-    dropping real data on the floor is worse than keeping the first
-    column's values under a name a later duplicate also claims."""
+    this row" and produced false cross-sector-sharing flags.
+
+    First occurrence now wins for the PLAIN header name, since the
+    template's real, intended column is always the first of the two - so
+    every existing r.get("DUS / XMU Port") call site keeps getting the
+    correct single value exactly as before. But the later duplicate's data
+    is NOT discarded: it's kept under "<name> #2" (then "#3", ...), because
+    on some real CIQs that "duplicate" column is in fact a genuine SECOND
+    physical port (e.g. a dual-RIport cell where the site literally typed
+    "DUS / XMU Port" twice instead of using the "Expansion" column name) -
+    confirmed real on HXL04468_9A_1/9B_1/9C_1/2A_1/2B_1/2C_1/2A_3/2B_3/2C_3,
+    each with a genuine second port letter (K/L/M) sitting in that second
+    "DUS / XMU Port" column. Discarding it silently turned real dual-port
+    cells into single-port ones. Callers that need the second port fall
+    back to the "#2" key when a same-named "Expansion" column isn't
+    present (see ciq_checks.py's RIPORT building)."""
     rows_iter = ws.iter_rows(values_only=True)
     header = next(rows_iter)
     header = [str(h).strip() if h is not None else '' for h in header]
@@ -32,11 +43,13 @@ def sheet_rows_as_dicts(ws):
         if all(v is None for v in row):
             continue
         row_dict = {}
+        seen_count = {}
         for i in range(min(len(header), len(row))):
             name = header[i]
-            if name in row_dict and row_dict[name] not in (None, ''):
-                continue  # keep the first occurrence's real value
-            row_dict[name] = row[i]
+            n = seen_count.get(name, 0) + 1
+            seen_count[name] = n
+            key = name if n == 1 else f"{name} #{n}"
+            row_dict[key] = row[i]
         out.append(row_dict)
     return out
 
