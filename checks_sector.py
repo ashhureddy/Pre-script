@@ -13,7 +13,7 @@ import re
 import pre_extract as pe
 import ciq_edp_reader as cer
 import pre_cell_inventory as pci
-from band_labels import band_label, is_5g_cell, is_mmwave_cell, is_cband_cell, is_dod_cell
+from band_labels import band_label, is_5g_cell, is_mmwave_cell, is_cband_cell, is_dod_cell, same_underlying_band
 
 
 def _rows(ciq_wb, sheet_name):
@@ -257,19 +257,7 @@ def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None, nod
             cfg5g = fiveg_config.get(cell)
             pre_txrx = f"{cfg5g['tx']}x{cfg5g['rx']}" if cfg5g else 'NOT AVAILABLE'
             mismatches = []
-            # RBBAIR_* codes (AIR-radio CBAND/DOD sectors, e.g. 'RBBAIR_1A')
-            # genuinely don't follow the RBB<TX><RX>_<link><letter> naming
-            # convention this pattern check relies on - confirmed real CIQ
-            # data (HXIN090035F, every N077 AIR6449/AIR6419 sector). That's
-            # not a data-entry error to flag; it's a different, valid CIQ
-            # convention for AIR radios that this check has no TX/RX/RILink
-            # signal to validate against, so it's reported as N/A rather
-            # than a MISMATCH.
-            is_air_rbb = bool(re.match(r'RBBAIR', str(rbb or ''), re.I))
-            if is_air_rbb:
-                status = 'NA'
-                note = f'RBB Type {rbb} is an AIR-radio code - TX/RX/RILink pattern check not applicable.'
-            elif ciq_txrx is None or ciq_ri is None:
+            if ciq_txrx is None or ciq_ri is None:
                 mismatches.append(f"RBB Type '{rbb}' does not match the expected RBB<TX><RX>_<link><letter> "
                                    f"pattern — cannot validate TX/RX or link count.")
             else:
@@ -277,15 +265,13 @@ def check_sector_swap_config(node_id, log_text, ciq_wb, e_name, g_name=None, nod
                     mismatches.append(f'RILink Pre={pre_ri} vs CIQ={ciq_ri}')
                 if pre_txrx != 'NOT AVAILABLE' and pre_txrx != ciq_txrx:
                     mismatches.append(f'TX/RX Pre={pre_txrx} vs CIQ={ciq_txrx} (RBB Type {rbb})')
-            if not is_air_rbb:
-                status = 'MISMATCH' if mismatches else 'MATCH'
-                note = '; '.join(mismatches) if mismatches else 'RBB Type/RILink/TX-RX confirmed (standalone 5G radio).'
             label, sector = band_label(cell)
             results.append({'rule': '#21/#22/#32', 'kind': '5g', 'node': node_id, 'cell': cell, 'label': label, 'sector': sector,
                              'sec_id': 'NA', 'pre_sec_id': 'NA',
                              'pre_txrx': pre_txrx, 'ciq_txrx': ciq_txrx or 'NOT FOUND',
                              'pre_power': 'NA', 'ciq_power': str(row.get('configuredMaxTxPower', '')).strip(),
-                             'status': status, 'note': note})
+                             'status': 'MISMATCH' if mismatches else 'MATCH',
+                             'note': '; '.join(mismatches) if mismatches else 'RBB Type/RILink/TX-RX confirmed (standalone 5G radio).'})
     return results
 
 
@@ -583,7 +569,7 @@ def check_port_uniqueness(node_id, ciq_wb):
                    _colo_set(row))
                   for row in fiveg_rows]
     cell_ports += [(row.get('EutranCellFDDId'), str(row.get('DUS / XMU', '')).strip(),
-                    [str(row.get(pc)).strip() for pc in ('DUS / XMU Port', 'DUS / XMU Port Expansion')
+                    [str(row.get(pc)).strip() for pc in ('DUS / XMU Port', 'DUS / XMU Port Expansion', 'DUS / XMU Port #2')
                      if row.get(pc) is not None and str(row.get(pc)).strip().upper() not in ('', 'N/A', 'NOT USED')],
                     _colo_set(row))
                    for row in _rows(ciq_wb, 'eUtran Parameters')]
@@ -1442,7 +1428,6 @@ def check_rbb_tx_isdlonly_4g(node_id, ciq_wb, e_name):
         radio_port = str(row.get('Radio Port', '')).strip()
         rbb_link = pe.parse_rbb_link(rbb)
         radio_port_link = 'Double' if '/' in radio_port else ('Single' if radio_port else None)
-        rru_type = str(row.get('RRU type', '')).strip()
 
         label, sector = band_label(cell)
         where = f"{label or 'unknown band'} {sector or 'unknown sector'}"
@@ -1450,13 +1435,7 @@ def check_rbb_tx_isdlonly_4g(node_id, ciq_wb, e_name):
         if rbb_txrx is None:
             mismatches.append(f"RBB type '{rbb}' does not match the expected RBB<TX><RX> pattern.")
         elif ciq_txrx and rbb_txrx != ciq_txrx:
-            # 4890 radio exception (confirmed): RBB88 implies 8x8, but a 4890
-            # radio legitimately runs 4x8 (TX=4/RX=8) - only flag when the
-            # actual config drops to 4x4 (TX=RX=4) or otherwise still
-            # mismatches beyond the known 4x8 case.
-            is_4890_4x8_ok = ('4890' in rru_type.upper() and rbb_txrx == '8x8' and ciq_txrx == '4x8')
-            if not is_4890_4x8_ok:
-                mismatches.append(f"RBB type {rbb} implies TX/RX {rbb_txrx} but noOfTxAntennas/noOfRxAntennas={ciq_txrx}.")
+            mismatches.append(f"RBB type {rbb} implies TX/RX {rbb_txrx} but noOfTxAntennas/noOfRxAntennas={ciq_txrx}.")
         if ciq_tx == '0' and isdlonly != 'TRUE':
             mismatches.append(f"noOfTxAntennas=0 but ISDLONLY='{isdlonly or 'blank'}' (expected TRUE).")
         if rbb_link and radio_port_link and rbb_link != radio_port_link:
@@ -1624,7 +1603,7 @@ def check_riport_uniqueness(node_id, enb_row, gnb_row, ciq_wb, e_name=None, g_na
     # just because the letter matched, even though physically different
     # hardware can never actually collide.
     cells = (_cells("eUtran Parameters", "EutranCellFDDId", "DUS / XMU",
-                     ["DUS / XMU Port", "DUS / XMU Port Expansion"], "Co-Located Technology Cell",
+                     ["DUS / XMU Port", "DUS / XMU Port Expansion", "DUS / XMU Port #2"], "Co-Located Technology Cell",
                      e_name or node_id)
              + _cells("5G Info", "NRCellDU", "BB/XMU", ["Port 1", "Port 2", "Port 3", "Port 4"],
                       "Co-Located Technology Cell", g_name or node_id))
@@ -1776,7 +1755,7 @@ def check_xmu_port_overlap(node_id, enb_row, gnb_row, ciq_wb):
         cell = str(row4g.get('EutranCellFDDId') or '')
         if not any(cell.startswith(p) for p in own_prefixes):
             continue
-        for pc in ('DUS / XMU Port', 'DUS / XMU Port Expansion'):
+        for pc in ('DUS / XMU Port', 'DUS / XMU Port Expansion', 'DUS / XMU Port #2'):
             v = row4g.get(pc)
             if v is not None and str(v).strip().upper() not in ('', 'N/A', 'NOT USED') and str(v).strip() in xmu_ports:
                 used_elsewhere.add(str(v).strip())
@@ -1971,26 +1950,7 @@ def check_antenna_uniqueness(node_id, ciq_wb):
                     colocation.setdefault(cell, set()).add(other)
                     colocation.setdefault(other, set()).add(cell)
 
-    def _norm_asu(v):
-        # AntennaUnitGroup/Unit/Subunit are read straight off openpyxl cell
-        # values with no type coercion - confirmed real bug, a genuine CIQ
-        # where the SAME antenna subunit is entered as text on the 5G row
-        # ('3') and as a number on the LTE row (3): a plain tuple compare
-        # ('1', 1, '3') == ('1', 1, 3) is False in Python even though the
-        # antenna position is identical, so a correctly-shared sector pair
-        # was flagged 'Not shared'. Normalizing every component to a plain
-        # string (and dropping a trailing '.0' from a numeric cell like
-        # 3.0) makes the comparison match on VALUE, not on the source
-        # cell's Excel number/text formatting.
-        if v is None:
-            return ''
-        s = str(v).strip()
-        if re.fullmatch(r'-?\d+\.0+', s):
-            s = s.split('.')[0]
-        return s
-
-    aug_by_cell = {r.get('EutranCellFDDId'): tuple(_norm_asu(v) for v in
-                   (r.get('AntennaUnitGroup'), r.get('AntennaUnit'), r.get('AntennaSubunit')))
+    aug_by_cell = {r.get('EutranCellFDDId'): (r.get('AntennaUnitGroup'), r.get('AntennaUnit'), r.get('AntennaSubunit'))
                    for r in antenna_rows if r.get('EutranCellFDDId')}
 
     results = []
@@ -2090,17 +2050,13 @@ def check_wcs_slim(node_id, log_text):
     on real logs the DN suffix always equals that profile's own
     airIfLoadProfileId, so no separate MO lookup is needed).
 
-    Three fixed verdicts:
-      no WCS cells at all         -> NA,     'No WCS sectors found.'
-      every WCS cell = WCS_Slim   -> MATCH,  'AirIfLoadProfile is WCS_Slim for WCS sectors.'
-      any WCS cell != WCS_Slim    -> INFO,   'AirIfLoadProfile is non WCS_Slim for WCS sectors.'
-    Non-slim is an informational finding, not a failure - per confirmed
-    correction: DSS being active with non-slim WCS sectors is a valid,
-    currently-expected state on these sites, so it's reported (INFO,
-    blue) rather than flagged red as a MISMATCH. A WCS cell with no
-    ailgRef line at all counts as non-WCS_Slim (not silently ignored) -
-    confirmed real case, HXL00147's three WCS cells all resolve to
-    AirIfLoadProfile=4, not WCS_Slim."""
+    Three fixed verdicts, per confirmed decision:
+      no WCS cells at all         -> NA,       'No WCS sectors found.'
+      every WCS cell = WCS_Slim   -> MATCH,    'AirIfLoadProfile is WCS_Slim for WCS sectors.'
+      any WCS cell != WCS_Slim    -> MISMATCH, 'AirIfLoadProfile is non WCS_Slim for WCS sectors.'
+    A WCS cell with no ailgRef line at all counts as non-WCS_Slim (not
+    silently ignored) - confirmed real case, HXL00147's three WCS cells
+    all resolve to AirIfLoadProfile=4, not WCS_Slim."""
     if not log_text:
         return [{'rule': '#WCS', 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
                  'note': 'No Pre log for this node - WCS Slim state unknown.'}]
@@ -2114,7 +2070,7 @@ def check_wcs_slim(node_id, log_text):
         return [{'rule': '#WCS', 'node': node_id, 'cell': ', '.join(sorted(wcs_vals)), 'status': 'MATCH',
                  'note': 'AirIfLoadProfile is WCS_Slim for WCS sectors.'}]
     bad = sorted(c for c, v in wcs_vals.items() if str(v or '').strip().upper() != 'WCS_SLIM')
-    return [{'rule': '#WCS', 'node': node_id, 'cell': ', '.join(bad), 'status': 'INFO',
+    return [{'rule': '#WCS', 'node': node_id, 'cell': ', '.join(bad), 'status': 'MISMATCH',
              'note': 'AirIfLoadProfile is non WCS_Slim for WCS sectors.'}]
 
 
@@ -2211,29 +2167,10 @@ def check_vonr_vs_ciq(node_id, log_text, ciq_wb):
     """Row 55: CIQ's 5G Info 'VoNR' column vs the Pre log's own verdict
     (pe.extract_vonr_status) - per confirmed decision, SA cells only
     ('VoNR column is only applicable when the cell is SA'; NSA sites
-    cannot be VoNR at all).
-
-    Whether the NODE is SA is decided the SAME way the Node Summary's own
-    SA/NSA Status column decides it (TermPointToAmf MO presence + at
-    least one 7-digit nRTAC - see decisions.md/amos_view.sa_nsa_status),
-    NOT off CIQ's own per-cell 'NSA/SA' column - confirmed real gap: a
-    real site (HXIN090035F) has AMF + a 7-digit nRTAC in its Pre log
-    (genuinely SA, matching the Node Summary's own verdict) while EVERY
-    cell in CIQ's 5G Info still reads 'NSA'. Gating on the CIQ column
-    made every cell skip silently and the whole node report 'No SA cells
-    on this node' even though it plainly is SA.
-
-    This row's own comparison is Pre VoNR vs CIQ VoNR only - CIQ's
-    per-cell 'NSA/SA' column is read for context, never compared here (a
-    stale NSA/SA field with VoNR itself agreeing between Pre and CIQ is
-    not this row's concern). SA being confirmed does NOT mean VoNR is
-    active - confirmed real, correct state: a node can be genuinely SA
-    (AMF + 7-digit TAC provisioned) while VoNR itself is still switched
-    off in Pre, and CIQ's own VoNR column correctly says 'No' to match -
-    that is not a mismatch, it is expected during Pre-script (VoNR isn't
-    turned on until activation), so it's reported INFO ('VoNR: Not
-    activated in Pre'), not MATCH/MISMATCH. A genuine disagreement (Pre
-    says Active but CIQ says No, or vice versa) still flags MISMATCH.
+    cannot be VoNR at all). NSA cells are skipped outright, not flagged,
+    even when CIQ's own column shows something other than 'N/A' there
+    (confirmed real: HXL00147's NSA cells show 'No', not 'N/A' - a CIQ
+    data-quality question outside this check's scope).
 
     epsFallbackOperation/CXC4012592 are node-wide (not per-cell), so
     pre_vonr is derived once per node and compared against every SA
@@ -2244,20 +2181,13 @@ def check_vonr_vs_ciq(node_id, log_text, ciq_wb):
                  'note': 'No Pre log for this node - VoNR state unknown.'}]
     pre_cells = set(pci.extract_pre_cells_for_node(log_text))
     pre_vonr = pe.extract_vonr_status(log_text)
-    nr_tac = pe.extract_nr_tac(log_text)
-    node_is_sa = bool(re.search(r'TermPointToAmf', log_text, re.I)) and any(
-        str(v or '').isdigit() and len(str(v)) == 7 for v in nr_tac.values())
     results = []
-    cells_on_node = [row for row in _rows(ciq_wb, '5G Info')
-                      if row.get('NRCellDU') and row.get('NRCellDU') in pre_cells]
-    if not node_is_sa:
-        if not cells_on_node:
-            return [{'rule': '#55', 'node': node_id, 'cell': '-', 'status': 'NA',
-                     'note': 'No SA cells on this node.'}]
-        return [{'rule': '#55', 'node': node_id, 'cell': '-', 'status': 'NA',
-                 'note': 'Node is NSA (no AMF/7-digit NR TAC in Pre log) - VoNR not applicable.'}]
-    for row in cells_on_node:
-        cell = row['NRCellDU']
+    for row in _rows(ciq_wb, '5G Info'):
+        cell = row.get('NRCellDU')
+        if not cell or cell not in pre_cells:
+            continue
+        if str(row.get('NSA/SA', '')).strip().upper() != 'SA':
+            continue
         ciq_vonr = str(row.get('VoNR', '') or '').strip()
         if pre_vonr is None:
             results.append({'rule': '#55', 'node': node_id, 'cell': cell, 'status': 'SKIPPED',
@@ -2265,12 +2195,8 @@ def check_vonr_vs_ciq(node_id, log_text, ciq_wb):
             continue
         expected = 'Yes' if pre_vonr else 'No'
         if ciq_vonr.upper() == expected.upper():
-            if pre_vonr:
-                results.append({'rule': '#55', 'node': node_id, 'cell': cell, 'status': 'MATCH',
-                                 'note': 'Pre and CIQ both VoNR Active.'})
-            else:
-                results.append({'rule': '#55', 'node': node_id, 'cell': cell, 'status': 'INFO',
-                                 'note': 'VoNR: Not activated in Pre.'})
+            results.append({'rule': '#55', 'node': node_id, 'cell': cell, 'status': 'MATCH',
+                             'note': f'Pre and CIQ both {expected}.'})
         else:
             results.append({'rule': '#55', 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
                              'note': f"Pre log VoNR {expected}, CIQ VoNR {ciq_vonr or 'blank'}."})
@@ -2379,25 +2305,8 @@ def check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name=None, g_name=None):
                 out.add(str(cell).strip())
         return out
 
-    # AIR-radio 5G cells share this node's SITE prefix too (their
-    # 'EutranCellFDDId'-column name still starts with the node id), so
-    # they leak into this LTE-oriented Antenna-vs-Losses diff even though
-    # they're 5G, not LTE - confirmed real bug (HXIN090035F, a 5G-only AIR
-    # site): every N077 AIR6449/AIR6419 cell showed up in Antenna
-    # Information (matched by prefix) but is correctly, intentionally
-    # absent from Losses and Delays (per this function's own docstring),
-    # so the diff below flagged all six as "missing" even though the 5G
-    # block further down already knows to exempt AIR radios. Excluding
-    # them here up front keeps that exemption consistent across both
-    # blocks instead of only the second one.
-    air_5g_cells = set()
-    for row in _rows(ciq_wb, '5G Info'):
-        cell = row.get('NRCellDU')
-        if cell and 'AIR' in str(row.get('RRU Type', '')).upper():
-            air_5g_cells.add(str(cell).strip())
-
-    antenna_cells = _cells("Antenna Information") - air_5g_cells
-    losses_cells = _cells("Losses and Delays") - air_5g_cells
+    antenna_cells = _cells("Antenna Information")
+    losses_cells = _cells("Losses and Delays")
 
     out = []
     if antenna_cells or losses_cells:
@@ -2472,6 +2381,11 @@ def check_carrier_progression(node_id, ciq_wb, e_name=None, g_name=None):
             bands_by_carrier.setdefault(carrier.upper(), {}).setdefault(band, []).append(str(cell))
         for carrier, bands in sorted(bands_by_carrier.items()):
             if len(bands) < 2:
+                continue
+            # Same underlying band split only by bandwidth/sub-block text
+            # (e.g. WCS Band 30 at 5 MHz vs 10 MHz) is not a real carrier
+            # progression violation - see band_labels.same_underlying_band().
+            if same_underlying_band(bands.keys()):
                 continue
             detail = '; '.join(f"{b} ({', '.join(sorted(cells))})" for b, cells in sorted(bands.items()))
             out.append({'rule': '#CARRIER', 'node': node_id,
