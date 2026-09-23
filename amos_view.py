@@ -92,7 +92,12 @@ def build_node_summary(node_id, text):
         "type": node_type,
         "ptp_status": ptp_status(text),
         "sa_nsa_status": sa_nsa_status(text, nr_tac) if has_nr else "LTE Only",
-        "vonr_status": {True: "VoNR Active", False: "Not Active", None: "Unclear"}[pe.extract_vonr_status(text)],
+        # VoNR only means anything on a genuinely SA node - LTE-only (no
+        # NR cells at all) can never be SA, so 'Unclear' there was
+        # misleading (confirmed real bug: an LTE-only node showed
+        # 'Unclear' instead of correctly reporting VoNR doesn't apply).
+        "vonr_status": ({True: "VoNR Active", False: "Not Active", None: "Unclear"}[pe.extract_vonr_status(text)]
+                         if (has_nr and sa_nsa_status(text, nr_tac) == "SA") else "Not Applicable"),
     }
 
 
