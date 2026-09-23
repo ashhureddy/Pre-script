@@ -1066,6 +1066,47 @@ def extract_cell_to_rilink_detail(text, fru_by_cell):
     return result
 
 
+def extract_cell_to_ulcomp(text):
+    """Cell -> UL COMP group label ('UlCompGroup=<id>') scripted for that
+    cell's SectorCarrier, from the 'get ulcompgroup' command.
+
+    Confirmed real block layout: one ENodeBFunction=1,UlCompGroup=<id> MO
+    per '====='-separated section, each listing the SectorCarriers it
+    groups via '>>> sectorCarrierRef = ENodeBFunction=1,SectorCarrier=<n>'
+    lines (id also repeated in the trailing ulCompGroupId attribute, not
+    used here - the MO header id is enough). UlCompGroup membership is
+    per-SectorCarrier, not per-cell, so it's cross-referenced through the
+    same Cell -> SectorCarrier chain (the 'SectorCarrier=|
+    SectorEquipmentFunction' hget block) already used by
+    extract_cell_to_sef()/extract_dss_status(). Returns {} if the
+    ulcompgroup command isn't present in this log (not every node has UL
+    CoMP configured)."""
+    if not text:
+        return {}
+    block = get_command_block(text, 'ulcompgroup')
+    if not block:
+        return {}
+    sc_to_group = {}
+    for grp_m in re.finditer(r'UlCompGroup=(\S+)\s*\n(.*?)(?=UlCompGroup=\S+\s*\n|\Z)', block, re.S):
+        group_id, body = grp_m.group(1), grp_m.group(2)
+        for sc_m in re.finditer(r'SectorCarrier=(\S+)', body):
+            sc_to_group[sc_m.group(1)] = group_id
+    if not sc_to_group:
+        return {}
+
+    id_block = get_command_block(text, 'SectorCarrier=|SectorEquipmentFunction') or ''
+    result = {}
+    for m in re.finditer(r'^((?:SectorCarrier|NRSectorCarrier)=\S+)\s+.*$', id_block, re.M):
+        sc_mo, rest = m.group(1), m.group(0)
+        sc_id = sc_mo.split('=', 1)[1]
+        group = sc_to_group.get(sc_id)
+        if not group:
+            continue
+        for cell in re.findall(r'(?:EUtranCellFDD|NRCellDU)=(\S+)', rest):
+            result[cell] = f"UlCompGroup={group}"
+    return result
+
+
 def parse_rbb_txrx(rbb_type):
     """'RBB44_1D' -> '4x4'. Returns None if not RBB44/42/22-style."""
     if not rbb_type:
