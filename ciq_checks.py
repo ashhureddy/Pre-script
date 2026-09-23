@@ -199,6 +199,11 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
         carrier_idxs.setdefault(key, []).append(i)
     for key, bands in carrier_bands.items():
         if len(bands) > 1:
+            # Same underlying band split only by bandwidth/sub-block text
+            # (e.g. WCS Band 30 at 5 MHz vs 10 MHz) is not a real reuse
+            # across bands - see band_labels.same_underlying_band().
+            if bl.same_underlying_band(bands):
+                continue
             idxs = carrier_idxs[key]
             ref = rows[idxs[0]]
             node_name = node_by_enb.get(str(ref.get("eNBId") or "").strip(), str(ref.get("eNBId") or ""))
@@ -261,7 +266,7 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
         colo = {c.strip().upper() for c in str(r.get("Co-Located Technology Cell") or "").split(",") if c.strip()}
         enb = str(r.get("eNBId") or "").strip()
         node_xmu_ports = xmu_ports_by_enb.get(enb, set())
-        for pc in ("DUS / XMU Port", "DUS / XMU Port Expansion"):
+        for pc in ("DUS / XMU Port", "DUS / XMU Port Expansion", "DUS / XMU Port #2"):
             v = str(r.get(pc) or "").strip().upper()
             if not v or v in ("N/A", "NOT USED"):
                 continue
@@ -339,7 +344,16 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
     out = []
     for i, r in enumerate(rows):
         node_name = node_by_enb.get(str(r.get("eNBId") or "").strip(), "")
-        riport = _clean_ports(r.get("DUS / XMU Port"), r.get("DUS / XMU Port Expansion")) or "-"
+        # "#2" is sheet_rows_as_dicts()'s key for a genuine SECOND
+        # "DUS / XMU Port" column on CIQs that literally typed the header
+        # twice instead of using "DUS / XMU Port Expansion" - confirmed
+        # real dual-RIport cells (e.g. HXL04468_9A_1: D,K) live there.
+        # Including both never double-counts: a file with a real
+        # "Expansion" column has no "#2" key (None, dropped by
+        # _clean_ports), and a file with a genuine duplicate-named column
+        # has no "Expansion" key.
+        riport = _clean_ports(r.get("DUS / XMU Port"), r.get("DUS / XMU Port Expansion"),
+                               r.get("DUS / XMU Port #2")) or "-"
         riport_warn = _riport_format_warning(riport)
         if riport_warn:
             add(i, riport_warn)
@@ -424,6 +438,8 @@ def build_nr_ciq_rows(ciq_wb):
         carrier_idxs.setdefault(key, []).append(i)
     for key, bands in carrier_bands.items():
         if len(bands) > 1:
+            if bl.same_underlying_band(bands):
+                continue
             idxs = carrier_idxs[key]
             ref = rows[idxs[0]]
             node_name = node_by_gnb.get(str(ref.get("gNBId") or "").strip(), str(ref.get("gNBId") or ""))
