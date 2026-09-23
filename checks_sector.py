@@ -1411,7 +1411,13 @@ def check_rbb_tx_isdlonly_4g(node_id, ciq_wb, e_name):
     data ('RBB44_1D' with noOfTxAntennas=4/noOfRxAntennas=4 and Radio
     Port='DATA1' — single port, matching the '_1' Single-link suffix).
     Plus: if noOfTxAntennas is 0 (no transmit antennas — a downlink-only
-    carrier), ISDLONLY must be TRUE in CIQ."""
+    carrier), ISDLONLY must be TRUE in CIQ.
+
+    Confirmed exception (user-provided rule): on a 4890 radio (RRU Type
+    contains '4890'), RBB type 88 (implies 8x8) with noOfTxAntennas=4/
+    noOfRxAntennas=8 is a genuinely valid config, not a mismatch — this
+    radio really does run 4x8 under an '88' RBB type. Only flag it when
+    the actual antenna count is a true 4x4 while RBB type still says 88."""
     if not e_name:
         return []
     results = []
@@ -1428,13 +1434,19 @@ def check_rbb_tx_isdlonly_4g(node_id, ciq_wb, e_name):
         radio_port = str(row.get('Radio Port', '')).strip()
         rbb_link = pe.parse_rbb_link(rbb)
         radio_port_link = 'Double' if '/' in radio_port else ('Single' if radio_port else None)
+        # This sheet's RRU-type column header casing varies by CIQ template
+        # version (confirmed real: 'RRU type' on one, 'RRU Type' on
+        # another) - both are tried rather than assuming one, matching this
+        # same tolerance already used for other case-varying EDP headers.
+        rru_type = str(row.get('RRU Type') or row.get('RRU type') or '').strip()
+        is_4890_88_4x8 = ('4890' in rru_type and rbb_txrx == '8x8' and ciq_tx == '4' and ciq_rx == '8')
 
         label, sector = band_label(cell)
         where = f"{label or 'unknown band'} {sector or 'unknown sector'}"
         mismatches = []
         if rbb_txrx is None:
             mismatches.append(f"RBB type '{rbb}' does not match the expected RBB<TX><RX> pattern.")
-        elif ciq_txrx and rbb_txrx != ciq_txrx:
+        elif ciq_txrx and rbb_txrx != ciq_txrx and not is_4890_88_4x8:
             mismatches.append(f"RBB type {rbb} implies TX/RX {rbb_txrx} but noOfTxAntennas/noOfRxAntennas={ciq_txrx}.")
         if ciq_tx == '0' and isdlonly != 'TRUE':
             mismatches.append(f"noOfTxAntennas=0 but ISDLONLY='{isdlonly or 'blank'}' (expected TRUE).")
