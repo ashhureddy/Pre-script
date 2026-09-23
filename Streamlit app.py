@@ -1569,6 +1569,7 @@ with tab_pre:
             ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
             ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
             ("sef", "SEF"), ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
+            ("ulcomp", "UL COMP"),
             ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"), ("rilink_type", "RiLink"),
             ("air_if_load_profile", "AirIfLoadProfile"),
             ("eutranfreqcheck", "EutranFreqCheck"),
@@ -1618,7 +1619,8 @@ with tab_ciq:
         ("electrical_tilt", "Electrical Tilt"),
         ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
         ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
-        ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
+        ("link", "Link (Single/Doublelink)"), ("link_name", "Link Name (DATA1/DATA2)"),
+        ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
     section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
@@ -1626,7 +1628,8 @@ with tab_ciq:
         ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
         ("cell_id", "Cell ID"),
         ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-        ("sharing_radio", "Sharing Radio"), ("link", "Link (Single/Doublelink)"), ("comments_html", "Comments/Warning"),
+        ("sharing_radio", "Sharing Radio"), ("link", "Link (Single/Doublelink)"),
+        ("link_name", "Link Name (DATA1/DATA2)"), ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
     antenna_rows = cs.check_antenna_uniqueness(node_id="", ciq_wb=ciq_wb)
@@ -1656,7 +1659,8 @@ with tab_auditpvc:
             ("bw", "_bw_ok", "BW"), ("dl", "_dl_ok", "EARFCN DL"), ("ul", "_ul_ok", "EARFCN UL"),
             ("power", "_power_ok", "Power"), ("tx", "_tx_ok", "TX"), ("rx", "_rx_ok", "RX"),
             ("rru", "_rru_ok", "RRU Model"), ("cellrange", "_cellrange_ok", "Cell Range"),
-            ("dss", "_dss_ok", "DSS"),
+            ("dss", "_dss_ok", "DSS"), ("link", "_link_ok", "Link"),
+            ("link_name", "_link_name_ok", "RiLink Name (DATA1/DATA2)"),
         ]), unsafe_allow_html=True)
 
         nr_pp_rows = ppa.compare_nr_cell_level(node_logs_text, ciq_wb)
@@ -1669,6 +1673,7 @@ with tab_auditpvc:
             ("bw_dl", "_bw_dl_ok", "BW DL"), ("bw_ul", "_bw_ul_ok", "BW UL"), ("power", "_power_ok", "TX Power"),
             ("ssb", "_ssb_ok", "SSB Frequency"), ("rru", "_rru_ok", "RRU Model"),
             ("cellrange", "_cellrange_ok", "Cell Range"), ("dss", "_dss_ok", "DSS"),
+            ("link", "_link_ok", "Link"), ("link_name", "_link_name_ok", "RiLink Name (DATA1/DATA2)"),
         ]), unsafe_allow_html=True)
     else:
         st.caption("Upload Pre kget-all logs to see the LTE/5G cell-level Pre vs Post tables.")
