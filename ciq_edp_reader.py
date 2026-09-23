@@ -141,9 +141,11 @@ def load_edp(path):
 
 
 def locate_edp_header_row(ws):
+    # Case-insensitive: CISCO-published EDPs use 'EDP_SITE_ID', ALU-published
+    # EDPs use 'edp_site_id' (confirmed real, same field, different export).
     for r in range(ws.nrows):
         first_cell = ws.cell_value(r, 0)
-        if str(first_cell).strip() == 'EDP_SITE_ID':
+        if str(first_cell).strip().upper() == 'EDP_SITE_ID':
             return r
     raise ValueError("Could not locate EDP header row (expected 'EDP_SITE_ID' in column A)")
 
@@ -151,9 +153,19 @@ def locate_edp_header_row(ws):
 def build_edp_index(ws):
     """Returns (header_list, rows) where rows is a list of dicts keyed by
     header name, one per EDP data row (there can be several rows per site,
-    e.g. one per SIAD port entry)."""
+    e.g. one per SIAD port entry).
+
+    Header names are uppercased here, once, at the source — every consumer
+    in this codebase (rrnrbl_checklist.py, port_conversion.py,
+    pre_post_audit.py, this module) looks columns up by their CISCO-style
+    UPPERCASE name ('SITE_NAME', 'CABINET', 'BEARER_ENODEB_SB_VLAN_ID', ...).
+    ALU-published EDPs use lowercase headers for the identical columns
+    ('site_name', 'cabinet', ...) — without this normalization every one of
+    those .get() calls on an ALU EDP silently returns None instead of
+    raising, which is far worse than the header-row error this fixes: rows
+    would exist, but every field read off them would look blank/missing."""
     header_row = locate_edp_header_row(ws)
-    header = [str(ws.cell_value(header_row, c)).strip() for c in range(ws.ncols)]
+    header = [str(ws.cell_value(header_row, c)).strip().upper() for c in range(ws.ncols)]
     rows = []
     for r in range(header_row + 1, ws.nrows):
         rows.append({header[c]: ws.cell_value(r, c) for c in range(ws.ncols)})
