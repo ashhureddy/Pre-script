@@ -201,22 +201,12 @@ def edp_discover_secondary(edp_rows, primary_id):
     WITHOUT relying on CIQ having told us its name. Confirmed real EDP
     structure: every row belonging to one physical site — Primary,
     Secondary, and any ancillary-equipment rows — shares the same
-    EDP_SITE_ID. A site can host SEVERAL primary/secondary
+    SITE_USID (and EDP_SITE_ID). A site can host SEVERAL primary/secondary
     pairs at once (confirmed real case, SITE_USID 64921: FCL04120/
     FCON094120 AND FCL09220R AND FCL07900R/FCON097900 all on one site) —
     matching on 'any blank-port BBU row in the group' picked whichever one
     came first in iteration order for EVERY primary at that site,
     regardless of whose it actually was.
-
-    SITE_USID is NOT usable for this scoping — confirmed real bug: it's
-    the common CRAN-hub USID, shared across dozens of physically
-    unrelated sites on one EDP export (76-row EDP, one SITE_USID for
-    every row). CABINET_USID is more granular but still genericizes to
-    the hub-wide value for single-cabinet 'F node' ancillary entries
-    (confirmed: HXIN090065F's CABINET_USID == its SITE_USID, identical
-    to unrelated site HXL06988F's). EDP_SITE_ID is the true
-    unique-per-physical-cabinet-group key — confirmed correct across
-    every case tested, including F nodes.
 
     A Secondary's own CABINET is its Primary's cabinet number with a
     trailing 'V' (confirmed convention, same one _cabinet_pairing_map in
@@ -227,18 +217,37 @@ def edp_discover_secondary(edp_rows, primary_id):
     02', with no 'BBU 02V' row at this site at all) genuinely has no EDP
     Secondary — returns None rather than guessing.
 
-    Returns the Secondary's own SITE_NAME, or None."""
+    Returns the Secondary's own SITE_NAME, or None.
+
+    Scoping key is CABINET_USID, not SITE_USID - confirmed real EDP
+    structure/naming: CABINET_USID is the site's OWN USID, the same
+    value the CIQ's own USID field carries for that physical site.
+    SITE_USID is the shared HUB USID and can span many physically
+    distinct sites on the same hub - confirmed real bug matching on it
+    alone: a Secondary got resolved to a different physical site on the
+    same hub that happened to reuse the same cabinet number, instead of
+    the real pair (matching CABINET_USID on both). Falls back to
+    SITE_USID+EDP_SITE_ID only when CABINET_USID itself is blank on this
+    EDP export."""
     prim_rows = edp_rows_for_site(edp_rows, primary_id)
     if not prim_rows:
         return None
+    cabinet_usid = str(prim_rows[0].get('CABINET_USID', '')).strip()
+    site_usid = str(prim_rows[0].get('SITE_USID', '')).strip()
     edp_site_id = str(prim_rows[0].get('EDP_SITE_ID', '')).strip()
     prim_cab = _norm_cabinet(prim_rows[0].get('CABINET'))
-    if not edp_site_id or not prim_cab:
+    if not (cabinet_usid or site_usid) or not prim_cab:
         return None
     expected_cab = prim_cab if prim_cab.endswith('V') else prim_cab + 'V'
     for r in edp_rows:
-        if str(r.get('EDP_SITE_ID', '')).strip() != edp_site_id:
-            continue
+        if cabinet_usid:
+            if str(r.get('CABINET_USID', '')).strip() != cabinet_usid:
+                continue
+        else:
+            if str(r.get('SITE_USID', '')).strip() != site_usid:
+                continue
+            if edp_site_id and str(r.get('EDP_SITE_ID', '')).strip() != edp_site_id:
+                continue
         site_name = str(r.get('SITE_NAME', '')).strip()
         if not site_name or site_name.upper() == str(primary_id).strip().upper():
             continue
