@@ -1082,6 +1082,7 @@ _MM_CIQ_CHECKS = [
     ("sector_id_4890", "SectorID (4890)"),
     ("rfbranch_per_aug", "RfBranch per AUG"),
     ("losses_vs_antenna", "Losses vs Antenna Info"),
+    ("sector_del_movement", "Sector Del_Movement (Source vs Target)"),
     ("tilt", "Tilt not an integer"),
     ("mmwave_rach", "mmWave RACH"),
     ("carrier_progression", "Carrier progression"),
