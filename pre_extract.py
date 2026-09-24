@@ -815,6 +815,27 @@ def extract_dss_status(text):
     return result
 
 
+def extract_catm1_support(parsed):
+    """Cell -> True/False for LTE's catm1SupportEnabled, from a narrow
+    'get . catm1SupportEnabled' command's MO/Attribute/Value rows (one row
+    per EUtranCellFDD, per confirmed real log shape). LTE-only — CAT-M1 has
+    no NR equivalent here. Returns {} if the command isn't in this log."""
+    entry = find_command(parsed, 'catm1SupportEnabled')
+    if not entry:
+        return {}
+    result = {}
+    for row in all_rows(entry):
+        mo = _dn_leaf(row.get('MO') or '')
+        if not mo.startswith('EUtranCellFDD='):
+            continue
+        cell = mo.split('=', 1)[-1]
+        val = _row_value(row, 'catm1SupportEnabled')
+        if val is None:
+            continue
+        result[cell] = str(val).strip().lower() == 'true'
+    return result
+
+
 def extract_nr_used_antennas(text):
     """NRSectorCarrier -> {'tx': str, 'rx': str}, from noOfUsedTxAntennas /
     noOfUsedRxAntennas in the 'SectorCarrier=|SectorEquipmentFunction ...
