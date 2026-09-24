@@ -1670,7 +1670,7 @@ with tab_ciq:
         ("electrical_tilt", "Electrical Tilt"),
         ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
         ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
-        ("link", "Link (Single/Doublelink)"), ("link_name", "Link Name (DATA1/DATA2)"),
+        ("link_name", "Link Name (DATA1/DATA2)"),
         ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
@@ -1679,7 +1679,7 @@ with tab_ciq:
         ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
         ("cell_id", "Cell ID"),
         ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-        ("sharing_radio", "Sharing Radio"), ("link", "Link (Single/Doublelink)"),
+        ("sharing_radio", "Sharing Radio"),
         ("link_name", "Link Name (DATA1/DATA2)"), ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
@@ -1710,7 +1710,7 @@ with tab_auditpvc:
             ("bw", "_bw_ok", "BW"), ("dl", "_dl_ok", "EARFCN DL"), ("ul", "_ul_ok", "EARFCN UL"),
             ("power", "_power_ok", "Power"), ("tx", "_tx_ok", "TX"), ("rx", "_rx_ok", "RX"),
             ("rru", "_rru_ok", "RRU Model"), ("cellrange", "_cellrange_ok", "Cell Range"),
-            ("dss", "_dss_ok", "DSS"), ("link", "_link_ok", "Link"),
+            ("dss", "_dss_ok", "DSS"),
             ("link_name", "_link_name_ok", "RiLink Name (DATA1/DATA2)"),
         ]), unsafe_allow_html=True)
 
@@ -1725,7 +1725,7 @@ with tab_auditpvc:
             ("bw_dl", "_bw_dl_ok", "BW DL"), ("bw_ul", "_bw_ul_ok", "BW UL"), ("power", "_power_ok", "TX Power"),
             ("ssb", "_ssb_ok", "SSB Frequency"), ("rru", "_rru_ok", "RRU Model"),
             ("cellrange", "_cellrange_ok", "Cell Range"), ("dss", "_dss_ok", "DSS"),
-            ("link", "_link_ok", "Link"), ("link_name", "_link_name_ok", "RiLink Name (DATA1/DATA2)"),
+            ("link_name", "_link_name_ok", "RiLink Name (DATA1/DATA2)"),
         ]), unsafe_allow_html=True)
     else:
         st.caption("Upload Pre kget-all logs to see the LTE/5G cell-level Pre vs Post tables.")
