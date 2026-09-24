@@ -255,6 +255,7 @@ def _amos_nr_index(node_logs_text):
         dss_by_cell = pe.extract_dss_status(text)
         fru_by_cell = pe.extract_cell_to_fru(text)
         rilink_by_cell = pe.extract_cell_to_rilink_detail(text, fru_by_cell)
+        nr_tac_by_cell = pe.extract_nr_tac(text)
         for cell in cells:
             p = params.get(cell, {})
             c = cfg.get(cell, {})
@@ -262,6 +263,7 @@ def _amos_nr_index(node_logs_text):
             flat.append({
                 "Cell": cell, "Node": node_id,
                 "CellID": p.get("cellLocalId", ""),
+                "NRTAC": nr_tac_by_cell.get(cell, ""),
                 "DL": p.get("arfcnDL", ""), "UL": p.get("arfcnUL", ""),
                 "BW_DL": p.get("bSChannelBwDL", ""), "BW_UL": p.get("bSChannelBwUL", ""),
                 "Pwr": c.get("power", ""), "SSB": p.get("ssbFrequency", ""),
@@ -468,6 +470,7 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
                 else (f"NR Sector moved: {pre_pfx} -> {final_pfx}", "change")
 
         cellid_text, cellid_ok = _cmp(_nz(match["CellID"]) if match else "", c.get("cellLocalId"))
+        nrtac_text, nrtac_ok = _cmp(_nz(match["NRTAC"]) if match else "", c.get("nRTAC"))
         dl_text, dl_ok = _cmp(_nz(match["DL"]) if match else "", c.get("arfcnDL"))
         ul_text, ul_ok = _cmp(_nz(match["UL"]) if match else "", c.get("arfcnUL"))
         bwdl_text, bwdl_ok = _cmp(_nz(match["BW_DL"]) if match else "", c.get("bSChannelBwDL"))
@@ -492,7 +495,9 @@ def compare_nr_cell_level(node_logs_text, ciq_wb):
 
         result.append({
             "node": final_pfx, "cell": cell_full,
-            "cellid": cellid_text, "_cellid_ok": cellid_ok, "dl": dl_text, "_dl_ok": dl_ok,
+            "cellid": cellid_text, "_cellid_ok": cellid_ok,
+            "nrtac": nrtac_text, "_nrtac_ok": nrtac_ok,
+            "dl": dl_text, "_dl_ok": dl_ok,
             "ul": ul_text, "_ul_ok": ul_ok, "bw_dl": bwdl_text, "_bw_dl_ok": bwdl_ok,
             "bw_ul": bwul_text, "_bw_ul_ok": bwul_ok, "power": pwr_text, "_power_ok": pwr_ok,
             "ssb": ssb_text, "_ssb_ok": ssb_ok, "rru": rru_text, "_rru_ok": rru_ok,
