@@ -1720,7 +1720,8 @@ with tab_auditpvc:
         st.markdown(_pre_post_summary_pills(nr_pp_summary), unsafe_allow_html=True)
         st.caption("Green = Match  Red = Mismatch  Format: PRE | POST")
         st.markdown(render_cell_pre_post_table(nr_pp_rows, [
-            ("cellid", "_cellid_ok", "Cell ID"), ("dl", "_dl_ok", "ARFCN DL"), ("ul", "_ul_ok", "ARFCN UL"),
+            ("cellid", "_cellid_ok", "Cell ID"), ("nrtac", "_nrtac_ok", "NR TAC"),
+            ("dl", "_dl_ok", "ARFCN DL"), ("ul", "_ul_ok", "ARFCN UL"),
             ("bw_dl", "_bw_dl_ok", "BW DL"), ("bw_ul", "_bw_ul_ok", "BW UL"), ("power", "_power_ok", "TX Power"),
             ("ssb", "_ssb_ok", "SSB Frequency"), ("rru", "_rru_ok", "RRU Model"),
             ("cellrange", "_cellrange_ok", "Cell Range"), ("dss", "_dss_ok", "DSS"),
