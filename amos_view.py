@@ -162,7 +162,7 @@ def build_lte_cell_rows(node_id, text):
     ailg_by_cell = pe.extract_ailg_ref(text)
     freqcheck_by_cell = pe.extract_eutranfreqcheck(text)
     sef_by_cell = pe.extract_cell_to_sef(text)
-    catm1_by_cell = pe.extract_catm1_support(_parsed_cache(text))
+    catm1_by_cell = pe.extract_catm1_support(text)
 
     # Sharing radio: same RRU + same band serving DIFFERENT sector letters —
     # same definition as QUICKIX's radioBandMap (cross-sector share only; a
