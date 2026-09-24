@@ -1391,10 +1391,30 @@ def extract_nr_tac(text):
     every node checked - rather than the 'nrsectorcarrier|nrcelldu' combo
     command, whose column set varies by node. A blank nRTAC there is a real
     value (NSA cells report nothing), so it maps to None, not a parse
-    failure."""
+    failure.
+
+    Falls back to the 'nrsectorcarrier|nrcelldu' combo command's own NRCellDU
+    table when the NRCellCU command wasn't run on this node at all - confirmed
+    real case (HXIN090468F): no 'NRCell|syncsignal sectorCarrierRef' command
+    anywhere in the log, so this returned {} for every cell and the node's
+    genuine 7-digit nRTAC (2137132, real SA) was invisible, making a real SA
+    node report as NSA everywhere downstream (amos_view.sa_nsa_status,
+    check_nr_tac, VoNR applicability). The combo command's NRCellDU table
+    carries nRTAC as its own column on nodes like this one - already parsed
+    by extract_5g_sector_params() via the same _parse_nrcell_block() helper,
+    but that caller only ever read ssbFrequency/ssbOffset/ssbDuration/
+    cellLocalId off it and discarded nRTAC. Only used when the primary
+    source is completely empty, so a node that genuinely has no NRCellCU
+    command AND no nRTAC in the combo table (a true NSA node) still
+    correctly returns {}."""
     block = get_command_block(text, 'NRCell|syncsignal sectorCarrierRef')
     rows = _parse_nrcell_block(block, 'NRCellCU')
-    return {cell: vals['nRTAC'] for cell, vals in rows.items() if vals.get('nRTAC')}
+    result = {cell: vals['nRTAC'] for cell, vals in rows.items() if vals.get('nRTAC')}
+    if result:
+        return result
+    combo_block = get_command_block(text, 'nrsectorcarrier|nrcelldu')
+    du_rows = _parse_nrcell_block(combo_block, 'NRCellDU')
+    return {cell: vals['nRTAC'] for cell, vals in du_rows.items() if vals.get('nRTAC')}
 
 
 def extract_lte_sector_params(text):
