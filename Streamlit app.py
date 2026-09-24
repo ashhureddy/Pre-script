@@ -1614,14 +1614,16 @@ with tab_pre:
         section_title(f"LTE Cells — {', '.join(summary_rows and [r['node'] for r in summary_rows] or sorted(node_logs_text))}",
                       badge=f"{len(lte_rows)} CELLS")
         st.markdown(render_table(lte_rows, status_key=None, columns=[
-            ("node", "Node"), ("cell", "Cell"), ("sector_carrier", "Sector Carries"), ("rru", "RRUs"),
+            ("node", "Node"), ("cell", "Cell"), ("sector_carrier", "Sector Carries"), ("sef", "SEF"),
+            ("rru", "RRUs"),
             ("radio_type", "Radio Type"), ("sharing_radio", "Sharing Radio"), ("tx", "TX"), ("rx", "RX"),
             ("rfbranch_tx_ref", "RFBRANCHTXREF"), ("rfbranch_rx_ref", "RFBRANCHRXREF"),
-            ("sef", "SEF"), ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
+            ("sef_rfbranches", "SEF RFBRANCHES"), ("pre_existing_dss", "Pre Existing DSS"),
             ("ulcomp", "UL COMP"),
             ("rilink_id", "RiLink ID"), ("rilink_port", "RiLink Port"), ("rilink_type", "RiLink"),
             ("air_if_load_profile", "AirIfLoadProfile"),
             ("eutranfreqcheck", "EutranFreqCheck"),
+            ("catm1_support_enabled", "catm1SupportEnabled"),
         ], html_cols={"eutranfreqcheck"}), unsafe_allow_html=True)
 
         section_title("5G NR Cells", badge=f"{len(nr_rows)} CELLS")
