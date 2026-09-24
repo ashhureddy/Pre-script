@@ -2381,15 +2381,32 @@ def check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name=None, g_name=None):
     antenna_cells = _cells("Antenna Information")
     losses_cells = _cells("Losses and Delays")
 
+    # AIR-radio CBAND/DOD/DOD_BWE NR cells are legitimately absent from
+    # Losses and Delays (integrated antenna, no separate feeder/connector
+    # losses to declare - confirmed decision, see the g_name block below)
+    # but DO appear on the Antenna Information sheet under this same
+    # EutranCellFDDId-named column. Without this exemption, every such cell
+    # was falsely flagged 'In Antenna Information but missing from Losses
+    # and Delays' just below - confirmed real case (HXIN090468F/
+    # HXIN090035F's N077 AIR cells).
+    air_5g_cells = set()
+    if g_name:
+        for row in _rows(ciq_wb, '5G Info'):
+            cell = row.get('NRCellDU')
+            if not (cell and str(cell).startswith(g_name)):
+                continue
+            if (is_dod_cell(cell) or is_cband_cell(cell)) and 'AIR' in str(row.get('RRU Type', '')).upper():
+                air_5g_cells.add(cell)
+
     out = []
     if antenna_cells or losses_cells:
-        for cell in sorted(antenna_cells - losses_cells):
+        for cell in sorted(antenna_cells - losses_cells - air_5g_cells):
             out.append({'rule': None, 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
                         'note': 'In Antenna Information but missing from Losses and Delays.'})
         for cell in sorted(losses_cells - antenna_cells):
             out.append({'rule': None, 'node': node_id, 'cell': cell, 'status': 'MISMATCH',
                         'note': 'In Losses and Delays but missing from Antenna Information.'})
-        if not (antenna_cells - losses_cells) and not (losses_cells - antenna_cells):
+        if not (antenna_cells - losses_cells - air_5g_cells) and not (losses_cells - antenna_cells):
             out.append({'rule': None, 'node': node_id, 'cell': '-', 'status': 'MATCH',
                         'note': f'{len(antenna_cells)} sector(s) present on both sheets.'})
 
