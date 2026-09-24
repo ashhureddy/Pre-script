@@ -171,6 +171,17 @@ def _cmp(pre, post, is_rru=False):
     return text, is_match
 
 
+def _bw_wcs_slim_exception(pre_bw, post_bw, is_wcs_slim):
+    """WCS Slim confirmed exception: a WCS Slim sector legitimately reports
+    dlChannelBandwidth=10000 in Pre but '10000/6400' in CIQ (Post) — that
+    specific pairing is not a real mismatch and must not be flagged, even
+    though the raw strings differ. Any other BW difference (WCS Slim or
+    not) is still flagged normally."""
+    return (is_wcs_slim
+            and str(pre_bw or "").strip() == "10000"
+            and str(post_bw or "").strip() == "10000/6400")
+
+
 def _cmp_sector_id(pre, post):
     """cmpSectorId(): AMOS gives a raw SectorCarrier index ('1'); CIQ gives a
     compound sectorId ('1_1'). They match when the AMOS value equals the
@@ -202,9 +213,16 @@ def _amos_lte_index(node_logs_text):
         # from what that tab already shows for the same cell.
         fru_by_cell = pe.extract_cell_to_fru(text)
         rilink_by_cell = pe.extract_cell_to_rilink_detail(text, fru_by_cell)
+        # WCS Slim flag (AirIfLoadProfile=WCS_Slim on a WCS-band sector) —
+        # only used to gate the BW mismatch exception below (a WCS Slim
+        # sector legitimately reports '10000' in Pre but '10000/6400' in
+        # CIQ; that pairing must not flag as a mismatch).
+        ailg_by_cell = pe.extract_ailg_ref(text)
         for cell in cells:
             p = params.get(cell, {})
             c = cfg.get(cell, {})
+            is_wcs_slim = (bl.band_label(cell)[0] == "WCS"
+                           and str(ailg_by_cell.get(cell) or "").strip().upper() == "WCS_SLIM")
             flat.append({
                 "Cell": cell, "Node": node_id,
                 "SC": sc_by_cell.get(cell, ""),
@@ -217,6 +235,7 @@ def _amos_lte_index(node_logs_text):
                 "DSS": bool(dss_by_cell.get(cell, False)),
                 "RiLink": (rilink_by_cell.get(cell) or {}).get("link_count_type") or "",
                 "RiLinkName": (rilink_by_cell.get(cell) or {}).get("rilink_type") or "",
+                "WCSSlim": is_wcs_slim,
             })
     return flat
 
@@ -346,7 +365,11 @@ def compare_lte_cell_level(node_logs_text, ciq_wb):
         sc_text, sc_ok = _cmp_sector_id(_nz(match["SC"]) if match else "", c.get("sectorId"))
         cellid_text, cellid_ok = _cmp(_nz(match["CellID"]) if match else "", c.get("cellId"))
         tac_text, tac_ok = _cmp(_nz(match["TAC"]) if match else "", ciq_tac)
-        bw_text, bw_ok = _cmp(_nz(match["BW"]) if match else "", c.get("dlChannelBandwidth"))
+        pre_bw = _nz(match["BW"]) if match else ""
+        post_bw = c.get("dlChannelBandwidth")
+        bw_text, bw_ok = _cmp(pre_bw, post_bw)
+        if not bw_ok and match and _bw_wcs_slim_exception(pre_bw, post_bw, match.get("WCSSlim")):
+            bw_ok = True
         dl_text, dl_ok = _cmp(_nz(match["EARFCN_DL"]) if match else "", c.get("earfcnDl"))
         ul_text, ul_ok = _cmp(_nz(match["EARFCN_UL"]) if match else "", c.get("earfcnUl"))
         pwr_text, pwr_ok = _cmp(_nz(match["Pwr"]) if match else "", c.get("configuredOutputPower"))
