@@ -134,6 +134,14 @@ def _freq_check_html(entry):
     return f'<span style="color:#065f46;font-weight:600;">{n} additional</span>'
 
 
+def _sef_number(sef_value):
+    """Display value for the SEF column: just the numeric/ID suffix
+    ('SectorEquipmentFunction=13' -> '13'), not the full MO name."""
+    if not sef_value or sef_value == "-":
+        return "-"
+    return sef_value.split("=", 1)[-1] if "=" in sef_value else sef_value
+
+
 def build_lte_cell_rows(node_id, text):
     """Node, Cell, Sector Carrier, RRUs, Radio type, Sharing Radio, TX, RX,
     RFBRANCHTXREF, RFBRANCHRXREF, SEF RFBRANCHES, Pre Existing DSS — matches
@@ -154,6 +162,7 @@ def build_lte_cell_rows(node_id, text):
     ailg_by_cell = pe.extract_ailg_ref(text)
     freqcheck_by_cell = pe.extract_eutranfreqcheck(text)
     sef_by_cell = pe.extract_cell_to_sef(text)
+    catm1_by_cell = pe.extract_catm1_support(_parsed_cache(text))
 
     # Sharing radio: same RRU + same band serving DIFFERENT sector letters —
     # same definition as QUICKIX's radioBandMap (cross-sector share only; a
@@ -195,7 +204,7 @@ def build_lte_cell_rows(node_id, text):
             "rru": fru, "radio_type": radio_model, "sharing_radio": sharing,
             "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
             "rfbranch_tx_ref": refs.get("tx_ref") or "-", "rfbranch_rx_ref": refs.get("rx_ref") or "-",
-            "sef": sef_by_cell.get(cell) or "-",
+            "sef": _sef_number(sef_by_cell.get(cell)),
             "sef_rfbranches": refs.get("sef_branches") or "-",
             "pre_existing_dss": "DSS Active" if dss_by_cell.get(cell) else "No",
             "ulcomp": ulcomp_by_cell.get(cell) or "-",
@@ -203,6 +212,11 @@ def build_lte_cell_rows(node_id, text):
             "rilink_type": rilink.get("rilink_type") or "-",
             "air_if_load_profile": (ailg_val or "NOT FOUND") if is_wcs else "-",
             "eutranfreqcheck": _freq_check_html(freqcheck_by_cell.get(cell)),
+            "catm1_support_enabled": (
+                "True" if catm1_by_cell.get(cell) is True
+                else "False" if catm1_by_cell.get(cell) is False
+                else "-"
+            ),
         })
     return rows
 
@@ -256,7 +270,7 @@ def build_nr_cell_rows(node_id, text):
             "rru": fru_by_cell.get(cell, "-"),
             "radio_type": pe._short_radio_name(radio_by_cell.get(cell)) or "-",
             "tx": cfg["tx"] if cfg else "-", "rx": cfg["rx"] if cfg else "-",
-            "sef": sef_by_cell.get(cell) or "-",
+            "sef": _sef_number(sef_by_cell.get(cell)),
             "sef_rfbranches": refs.get("sef_branches") or "-",
             "rilink_id": rilink.get("rilink_id") or "-", "rilink_port": rilink.get("rilink_port") or "-",
             "rilink_type": rilink.get("rilink_type") or "-",
