@@ -78,12 +78,16 @@ def build_site_details(ciq_wb, rfds_pages=None):
     has none - the LTE-standalone case above still has a real USID
     available even though FA Code doesn't.
 
-    Site ID is the primary node name from Mixed Mode Info ('Node to be
-    built as' on its first row) - confirmed decision, replacing the old
-    RFDS 'Site Details' page scrape (unreliable OCR) and the ATOLL name
-    field (dropped entirely - it was never a real atoll name, it silently
-    fell back to this same Mixed Mode Info node name whenever RFDS didn't
-    supply one, which was confusing shown as its own separate field)."""
+    Site ID is every distinct primary node name from Mixed Mode Info
+    ('Node to be built as'), comma-joined - confirmed real bug: reading
+    only the FIRST row's primary node silently dropped every other node on
+    a multi-node CIQ (e.g. FCL04120 + FCON094120(S), FCL09220R(P) both
+    present in Mixed Mode Info, but Site ID only ever showed 'FCL04120').
+    Replaces the old RFDS 'Site Details' page scrape (unreliable OCR) and
+    the ATOLL name field (dropped entirely - it was never a real atoll
+    name, it silently fell back to this same Mixed Mode Info node name
+    whenever RFDS didn't supply one, which was confusing shown as its own
+    separate field)."""
     out = {}
     fiveg_rows = cer.sheet_rows_as_dicts(ciq_wb['5G Info']) if '5G Info' in ciq_wb.sheetnames else []
     for r in fiveg_rows:
@@ -103,9 +107,12 @@ def build_site_details(ciq_wb, rfds_pages=None):
 
     mm = cer.mixed_mode_rows(ciq_wb)
     if mm:
-        primary = str(mm[0].get('Node to be built as') or '').strip()
-        if primary:
-            out['site_id'] = primary
+        primaries = list(dict.fromkeys(
+            str(r.get('Node to be built as') or '').strip() for r in mm
+            if str(r.get('Node to be built as') or '').strip()
+        ))
+        if primaries:
+            out['site_id'] = ', '.join(primaries)
 
     if rfds_pages is not None:
         import rfds_extract as rf
