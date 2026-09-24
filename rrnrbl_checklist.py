@@ -1496,7 +1496,7 @@ def build_checklist(results, site_details, ciq_wb, edp_rows, node_ids, rfds_page
 
         (88, "CIQ tabs checks", "Losses and delay", "Check for Losses delay matches to FDD and TxRx", "Radio", lambda: _agg(results.get("losses_vs_antenna", []))),
         (89, "CIQ tabs checks", "Antenna Information", "AntennaUnit/AntennaSubunit should unique for the band wise", "Radio", lambda: _agg(results.get("antenna", []))),
-        (90, "CIQ tabs checks", "Sector Movement / Deletion sheet", "All source cells cellid/SSB/ BW matching with ENM and all target cells with eUtan tab", "NR/Radio", lambda: _agg_cell_id(results.get("cell_id_vs_rfds", []))),
+        (90, "CIQ tabs checks", "Sector Movement / Deletion sheet", "All source cells cellid/SSB/ BW matching with ENM and all target cells with eUtan tab", "NR/Radio", lambda: _agg(results.get("sector_del_movement", []))),
         (91, "CIQ tabs checks", "Nokia Info tab", "Nokia info present means N2E site else NSB", "NR/Radio", lambda: _n2e_detection_status(ciq_wb, node_logs_text)),
 
         # "IP Validation Pre Vs EDP" and "Rehoming sites" (old rows 75-76)
