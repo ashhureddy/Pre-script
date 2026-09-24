@@ -2439,16 +2439,20 @@ def check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name=None, g_name=None):
 
 
 def check_sector_del_movement_consistency(node_id, ciq_wb):
-    """'Sector Del_Movement' sanity check: for every row with both a Source
-    and a Target (a real move, not a delete), the sector+carrier SUFFIX
-    (everything after the node name, e.g. '7A_1') and the Cell Id are
-    expected to carry over unchanged across the move - only the NODE NAME
-    is meant to change. Confirmed real case this catches: a row whose
-    Target Sector was mistyped to a different sector letter than its own
-    Source Sector (Source 'HXL00468_7A_1' -> Target 'HXL04468_7B_1' - a
-    genuine data-entry error, not an intentional resectorization), which no
-    other check surfaces since everything else treats Source/Target Sector
-    as opaque identifiers rather than comparing them to each other.
+    """'Sector Del_Movement' sanity check: for a row that's a real
+    cross-node MOVE (Source Node != Target Node, not a delete), both the
+    sector+carrier SUFFIX (everything after the node name, e.g. '7A_1') and
+    the Cell Id are expected to carry over unchanged - only the NODE NAME
+    is meant to change on a physical rehome (confirmed real case this
+    catches: Source 'HXL00468_7A_1' -> Target 'HXL04468_7B_1', a genuine
+    data-entry typo, not an intentional resectorization).
+
+    A row where Source Node == Target Node is a same-node carrier
+    renumber/retune (e.g. '2A_1' -> '2A_2') rather than a move - a
+    legitimate CIQ event where BOTH the sector suffix and the Cell Id can
+    genuinely change (confirmed decision), so neither is compared for that
+    shape; this function skips it entirely rather than reporting a
+    meaningless always-MATCH row for it.
 
     Scoped to this node being the row's SOURCE side (each move row is
     reported once, not once per node). A row targeting 'DELETE' (a Sector
@@ -2467,6 +2471,8 @@ def check_sector_del_movement_consistency(node_id, ciq_wb):
         tgt_node = str(r.get('Target Node name') or '').strip()
         if not tgt_node or tgt_node.upper() == 'DELETE':
             continue
+        if tgt_node.upper() == src_node.upper():
+            continue  # same-node renumber/retune - suffix and Cell Id can both legitimately change
         src_sector = str(r.get('Source Sector') or '').strip()
         tgt_sector = str(r.get('Target Sector') or '').strip()
         if not (src_sector and tgt_sector):
