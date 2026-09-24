@@ -2438,6 +2438,61 @@ def check_losses_vs_antenna_sectors(node_id, ciq_wb, e_name=None, g_name=None):
     return out
 
 
+def check_sector_del_movement_consistency(node_id, ciq_wb):
+    """'Sector Del_Movement' sanity check: for every row with both a Source
+    and a Target (a real move, not a delete), the sector+carrier SUFFIX
+    (everything after the node name, e.g. '7A_1') and the Cell Id are
+    expected to carry over unchanged across the move - only the NODE NAME
+    is meant to change. Confirmed real case this catches: a row whose
+    Target Sector was mistyped to a different sector letter than its own
+    Source Sector (Source 'HXL00468_7A_1' -> Target 'HXL04468_7B_1' - a
+    genuine data-entry error, not an intentional resectorization), which no
+    other check surfaces since everything else treats Source/Target Sector
+    as opaque identifiers rather than comparing them to each other.
+
+    Scoped to this node being the row's SOURCE side (each move row is
+    reported once, not once per node). A row targeting 'DELETE' (a Sector
+    Delete, not a Movement) is skipped - it has no Target Sector/Cell Id to
+    compare."""
+    if "Sector Del_Movement" not in ciq_wb.sheetnames:
+        return [{'rule': None, 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
+                 'note': 'Sector Del_Movement sheet missing from this CIQ.'}]
+    prefix = str(node_id).strip().upper()
+    out = []
+    checked_any = False
+    for r in _rows(ciq_wb, 'Sector Del_Movement'):
+        src_node = str(r.get('Source Node name') or '').strip()
+        if src_node.upper() != prefix:
+            continue
+        tgt_node = str(r.get('Target Node name') or '').strip()
+        if not tgt_node or tgt_node.upper() == 'DELETE':
+            continue
+        src_sector = str(r.get('Source Sector') or '').strip()
+        tgt_sector = str(r.get('Target Sector') or '').strip()
+        if not (src_sector and tgt_sector):
+            continue
+        checked_any = True
+        src_suffix = src_sector.split('_', 1)[-1].upper() if '_' in src_sector else src_sector.upper()
+        tgt_suffix = tgt_sector.split('_', 1)[-1].upper() if '_' in tgt_sector else tgt_sector.upper()
+        src_cellid = str(r.get('Source Cell Id') if r.get('Source Cell Id') is not None else '').strip()
+        tgt_cellid = str(r.get('Target Cell Id') if r.get('Target Cell Id') is not None else '').strip()
+        mismatches = []
+        if src_suffix != tgt_suffix:
+            mismatches.append(f'Sector Source={src_sector} vs Target={tgt_sector}')
+        if src_cellid and tgt_cellid and src_cellid != tgt_cellid:
+            mismatches.append(f'Cell Id Source={src_cellid} vs Target={tgt_cellid}')
+        if mismatches:
+            out.append({'rule': None, 'node': node_id, 'cell': f'{src_sector} -> {tgt_sector}',
+                        'status': 'MISMATCH', 'note': '; '.join(mismatches)})
+        else:
+            out.append({'rule': None, 'node': node_id, 'cell': f'{src_sector} -> {tgt_sector}',
+                        'status': 'MATCH', 'note': 'Sector and Cell Id carried over correctly.'})
+    if not checked_any:
+        out.append({'rule': None, 'node': node_id, 'cell': '-', 'status': 'SKIPPED',
+                    'note': 'No Sector Del_Movement rows for this node (as Source).'})
+    return out
+
+
 def check_carrier_progression(node_id, ciq_wb, e_name=None, g_name=None):
     """Carrier progression — within a node and technology, no two BANDS may
     share the same Carrier value.
