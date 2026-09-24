@@ -1474,7 +1474,7 @@ with top_m:
     if st.button("📜 Revision History", use_container_width=True):
         _show_revision_history_dialog(ciq_wb)
 with top_r:
-    bits = [f"Site ID: `{site_details.get('site_id') or '—'}`", f"FA Code: `{site_details.get('fa_code') or '—'}`",
+    bits = [f"FA Code: `{site_details.get('fa_code') or '—'}`",
             f"USID: `{site_details.get('usid') or '—'}`", f"Nodes: `{', '.join(checked_nodes) or '—'}`"]
     st.caption(" &nbsp;·&nbsp; ".join(bits), unsafe_allow_html=True)
 
@@ -1490,11 +1490,10 @@ tab_rfds, tab_pre, tab_ciq, tab_auditpvc, tab_crdesc, tab_edp, tab_consolidated 
 # ══════════════════════════════════════════════════════════════════════
 with tab_rfds:
     st.subheader("RFDS Validation")
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.markdown(f'<div class="qkx-stat"><b>FA Code</b><br>{esc(site_details.get("fa_code") or "—")}</div>', unsafe_allow_html=True)
     m2.markdown(f'<div class="qkx-stat"><b>USID</b><br>{esc(site_details.get("usid") or "—")}</div>', unsafe_allow_html=True)
     m3.markdown(f'<div class="qkx-stat"><b>Site ID</b><br>{esc(site_details.get("site_id") or "—")}</div>', unsafe_allow_html=True)
-    m4.markdown(f'<div class="qkx-stat"><b>Atoll Name</b><br>{esc(site_details.get("atoll_site_name") or "—")}</div>', unsafe_allow_html=True)
 
     if rfds_pages is None:
         st.info("No RFDS PDF was loaded for this run — RFDS-dependent comparisons below are skipped.")
