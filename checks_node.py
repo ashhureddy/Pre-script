@@ -63,16 +63,27 @@ def check_identity(node_id, parsed, mm_row, has_pre_log):
 
 
 def build_site_details(ciq_wb, rfds_pages=None):
-    """Report-header site details. FA Code and USID come from the CIQ's
-    '5G Info' tab, which carries them as proper named columns - far more
-    reliable than scraping the RFDS 'Site Details' page, whose OCR is
-    column-major-scrambled (the FA Code value lands several lines above its
-    own header, so only a positional-anchor regex could find it there).
+    """Report-header site details.
 
-    Site ID / ATOLL name still come from RFDS when available, since the CIQ
-    has no equivalent column - those two are matched off a header line that
-    IS stable in the OCR output. Falls back to the CIQ's node name when no
-    RFDS is provided."""
+    FA Code comes from the CIQ's '5G Info' tab, which carries it as a proper
+    named column - far more reliable than scraping the RFDS 'Site Details'
+    page, whose OCR is column-major-scrambled (the FA Code value lands
+    several lines above its own header, so only a positional-anchor regex
+    could find it there). An LTE-standalone site has no '5G Info' rows at
+    all, so FA Code genuinely can't be sourced there - no LTE equivalent
+    exists, confirmed decision, so it's left unset rather than guessed.
+
+    USID also comes from '5G Info' first, but falls back to the CIQ's own
+    'Controller Info' tab (its own, independent 'USID' column) when 5G Info
+    has none - the LTE-standalone case above still has a real USID
+    available even though FA Code doesn't.
+
+    Site ID is the primary node name from Mixed Mode Info ('Node to be
+    built as' on its first row) - confirmed decision, replacing the old
+    RFDS 'Site Details' page scrape (unreliable OCR) and the ATOLL name
+    field (dropped entirely - it was never a real atoll name, it silently
+    fell back to this same Mixed Mode Info node name whenever RFDS didn't
+    supply one, which was confusing shown as its own separate field)."""
     out = {}
     fiveg_rows = cer.sheet_rows_as_dicts(ciq_wb['5G Info']) if '5G Info' in ciq_wb.sheetnames else []
     for r in fiveg_rows:
@@ -83,21 +94,33 @@ def build_site_details(ciq_wb, rfds_pages=None):
         if out.get('fa_code') and out.get('usid'):
             break
 
+    if not out.get('usid') and 'Controller Info' in ciq_wb.sheetnames:
+        for r in cer.sheet_rows_as_dicts(ciq_wb['Controller Info']):
+            usid = r.get('USID') or r.get('US ID') or r.get('Usid')
+            if usid and str(usid).strip():
+                out['usid'] = str(usid).strip()
+                break
+
+    mm = cer.mixed_mode_rows(ciq_wb)
+    if mm:
+        primary = str(mm[0].get('Node to be built as') or '').strip()
+        if primary:
+            out['site_id'] = primary
+
     if rfds_pages is not None:
         import rfds_extract as rf
         rfds_details = rf.extract_site_details(rfds_pages)
-        for key in ('site_id', 'atoll_site_name'):
-            if rfds_details.get(key):
-                out[key] = rfds_details[key]
-        # Cross-check: RFDS agrees with the CIQ on FA Code / USID? Disagreement
-        # is worth surfacing rather than silently preferring one source.
-        # rfds_fa_code/rfds_usid are kept as their OWN keys (not merged into
-        # fa_code/usid) so a caller can compare CIQ vs RFDS explicitly —
-        # confirmed real bug this fixes: rrnrbl_checklist._fa_code_status()
-        # previously read site_details['fa_code'] expecting the RFDS value,
-        # but that key is always CIQ-sourced (see loop above), so it was
-        # comparing the CIQ FA Code against itself under an RFDS label and
-        # never actually consulting RFDS at all.
+        # Cross-check only: RFDS agrees with the CIQ on FA Code / USID?
+        # Disagreement is worth surfacing rather than silently preferring
+        # one source. rfds_fa_code/rfds_usid are kept as their OWN keys
+        # (not merged into fa_code/usid) so a caller can compare CIQ vs
+        # RFDS explicitly — confirmed real bug this fixes:
+        # rrnrbl_checklist._fa_code_status() previously read
+        # site_details['fa_code'] expecting the RFDS value, but that key is
+        # always CIQ-sourced (see loop above), so it was comparing the CIQ
+        # FA Code against itself under an RFDS label and never actually
+        # consulting RFDS at all. RFDS's own 'site_id'/'atoll_site_name'
+        # scrape is no longer used for anything (see docstring).
         for key in ('fa_code', 'usid'):
             rv = rfds_details.get(key)
             if rv:
@@ -105,10 +128,6 @@ def build_site_details(ciq_wb, rfds_pages=None):
             if rv and out.get(key) and rv != out[key]:
                 out.setdefault('conflicts', []).append(f'{key}: CIQ={out[key]} vs RFDS={rv}')
 
-    if not out.get('atoll_site_name'):
-        mm = cer.mixed_mode_rows(ciq_wb)
-        if mm:
-            out['atoll_site_name'] = str(mm[0].get('Node to be built as') or '').strip()
     return out
 
 
