@@ -2034,18 +2034,24 @@ def check_antenna_uniqueness(node_id, ciq_wb):
             fam2 = _band_family(band2)
             aws_pcs_pair = (fam1 != fam2) and fam1 in ('AWS', 'PCS') and fam2 in ('AWS', 'PCS')
             rrus = {rru_by_cell.get(cell, ''), rru_by_cell.get(other, '')}
-            # Name the specific radio that triggers the exception rather than
-            # lumping them together - an engineer reading the verdict needs to
-            # know which radio is involved. If both appear across the pair,
-            # both are named.
+            # Name the specific radio(s) involved for the verdict text.
             trigger_models = sorted({m for m in ('4890', '8843') if any(m in r for r in rrus)})
-            uses_4890_or_8843 = bool(trigger_models)
-            # Exception (confirmed): whenever a pair spans DIFFERENT AWS/PCS
-            # bands and involves EITHER a 4890 or 8843 radio on either cell,
-            # the two sectors must use DIFFERENT antenna ports. Same-band
-            # multi-carrier pairs (e.g. AWS_1/AWS_1 on 2A_1 vs 2A_2) are not
-            # this case - they're expected to share, like everything else.
-            exception_applies = aws_pcs_pair and uses_4890_or_8843
+            # Exception (confirmed, corrected): ONLY when the pair is a
+            # genuine MIX of a 4890 radio AND an 8843 radio (both present -
+            # one on each cell) AND spans different AWS/PCS bands, the two
+            # sectors must use DIFFERENT antenna ports. A pair that's
+            # entirely 4890 (or entirely 8843) is NOT this exception, even
+            # across AWS/PCS bands - it still falls under the normal
+            # 'sharing sectors should have the same AUG/AU/ASU' rule.
+            # Confirmed real case this fixes: two RRUS 4890 cells sharing an
+            # AWS/PCS colocation but on different antenna ports were
+            # previously (mis-)read as the 4890 exception (any 4890 present
+            # was enough) and shown as a correct 'Unique' match, when a
+            # pure-4890 pair differing in AUG/AU/ASU is actually the
+            # ordinary mismatch case. Same-band multi-carrier pairs (e.g.
+            # AWS_1/AWS_1 on 2A_1 vs 2A_2) were never this case either way -
+            # they're expected to share, like everything else.
+            exception_applies = aws_pcs_pair and len(trigger_models) == 2
 
             if exception_applies:
                 radio_label = '/'.join(trigger_models)
