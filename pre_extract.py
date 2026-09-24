@@ -815,24 +815,32 @@ def extract_dss_status(text):
     return result
 
 
-def extract_catm1_support(parsed):
+def extract_catm1_support(text):
     """Cell -> True/False for LTE's catm1SupportEnabled, from a narrow
     'get . catm1SupportEnabled' command's MO/Attribute/Value rows (one row
-    per EUtranCellFDD, per confirmed real log shape). LTE-only — CAT-M1 has
-    no NR equivalent here. Returns {} if the command isn't in this log."""
-    entry = find_command(parsed, 'catm1SupportEnabled')
-    if not entry:
+    per EUtranCellFDD). LTE-only — CAT-M1 has no NR equivalent here.
+
+    NOT parsed via the generic table parser (log_parser.parse_tables /
+    find_command+all_rows) - confirmed real bug against an actual log
+    (DTFN096517): that parser slices each row by the HEADER line's own
+    column positions ('Attribute         Value'), but the real attribute
+    name 'catm1SupportEnabled' (20 chars) is wider than the column width
+    the header's own spacing implies, so the generic parser's column
+    boundary lands mid-attribute-name - 'catm1SupportEnabled false' split
+    into Attribute='catm1SupportEnable', Value='d false', silently wrong on
+    every row and returning {} for every cell. A direct regex on the raw
+    command block, splitting on whitespace runs instead of a fixed column
+    position, sidesteps this since MO/Attribute/Value are each a single
+    whitespace-delimited token in this command's actual output.
+
+    Returns {} if the command isn't in this log."""
+    block = get_command_block(text, 'catm1SupportEnabled')
+    if not block:
         return {}
     result = {}
-    for row in all_rows(entry):
-        mo = _dn_leaf(row.get('MO') or '')
-        if not mo.startswith('EUtranCellFDD='):
-            continue
-        cell = mo.split('=', 1)[-1]
-        val = _row_value(row, 'catm1SupportEnabled')
-        if val is None:
-            continue
-        result[cell] = str(val).strip().lower() == 'true'
+    for m in re.finditer(r'^(EUtranCellFDD=\S+)\s+catm1SupportEnabled\s+(true|false)\s*$', block, re.M | re.I):
+        cell = m.group(1).split('=', 1)[-1]
+        result[cell] = m.group(2).strip().lower() == 'true'
     return result
 
 
