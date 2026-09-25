@@ -1726,15 +1726,16 @@ with tab_ciq:
 
         section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
         st.markdown(render_table(ciq_nr_rows, status_key="status", columns=[
-            ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("cell_id", "Cell ID"),
-            ("nrtac", "NR TAC"), ("nr_pci", "NR PCI"), ("rach", "RACH Root Sequence"),
-            ("rru_type", "RRU Type"), ("fru", "RRU FRU"), ("electrical_tilt", "Electrical Tilt"),
-            ("arfcn_dl", "ARFCN DL"), ("arfcn_ul", "ARFCN UL"),
-            ("dl_bw", "BW DL"), ("ul_bw", "BW UL"), ("output_power", "Configured Max Tx Power"),
-            ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-            ("link_name", "Radio Port (DATA1/DATA2)"), ("dss", "DSS"),
-            ("ssb_freq", "SSB Frequency"), ("ssb_offset", "SSB Offset"), ("ssb_duration", "SSB Duration"),
-            ("nsa_sa", "NSA/SA"), ("vonr", "VoNR"),
+            ("node", "Node"), ("cell", "NRCellDU"), ("sef", "SectorEquipmentFunction"),
+            ("nrtac", "nRTAC"), ("cell_id", "cellLocalId"),
+            ("rru_type", "RRU Type"), ("fru", "RRU FieldReplaceableUnit"),
+            ("electrical_tilt", "Electrical Tilt"),
+            ("arfcn_dl", "arfcnDL"), ("arfcn_ul", "arfcnUL"),
+            ("dl_bw", "bSChannelBwDL"), ("ul_bw", "bSChannelBwUL"),
+            ("output_power", "configuredMaxTxPower"), ("nr_pci", "nRPCI"),
+            ("rach", "rachRootSequence"), ("riport", "riport"), ("link_name", "Radio Port"),
+            ("dss", "DSS"), ("ssb_freq", "ssbFrequency"), ("ssb_offset", "ssbOffset"),
+            ("ssb_duration", "ssbDuration"), ("nsa_sa", "NSA/SA"), ("vonr", "VoNR"),
             ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
     else:
