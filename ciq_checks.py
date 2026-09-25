@@ -378,6 +378,16 @@ def build_lte_ciq_rows(ciq_wb, node_id_col_map=None, rbb_results=None):
             "tx": r.get("noOfTxAntennas"), "rx": r.get("noOfRxAntennas"),
             "riport": riport, "link": "-",  # filled in by build_link_map()
             "link_name": _clean_link_name(r.get("Radio Port")),
+            # NSB-layout raw fields (checks_node/rc.classify_site_type ==
+            # "NSB" swaps to a different column set in Streamlit app.py) -
+            # straight off the eUtran Parameters row, no derived logic.
+            "cell_range": r.get("cellRange"), "isdlonly": r.get("ISDLONLY"),
+            "earfcn_dl": r.get("earfcnDl"), "earfcn_ul": r.get("earfcnUl"),
+            "dl_bw": r.get("dlChannelBandwidth"), "ul_bw": r.get("ulChannelBandwidth"),
+            "output_power": r.get("configuredOutputPower"), "rru_type": r.get("RRU type"),
+            "sector_id": r.get("sectorId"), "dus_xmu": r.get("DUS / XMU"),
+            "dus_xmu_port": r.get("DUS / XMU Port"), "dus_xmu_port_exp": r.get("DUS / XMU Port Expansion"),
+            "high_capacity_site": r.get("High Capacity Site"),
             "comments": cell_comments,
             "comments_html": _format_warnings(cell_comments),
             "status": "MISMATCH" if cell_comments else "MATCH",
@@ -522,6 +532,13 @@ def build_nr_ciq_rows(ciq_wb):
             "electrical_tilt": r.get("Electrical Tilt"), "rbb_type": r.get("RBB Type"),
             "riport": riport, "link": "-",
             "link_name": _clean_link_name(r.get("Radio Port")),
+            # NSB-layout raw fields, straight off the 5G Info row.
+            "nrtac": r.get("nRTAC"), "rru_type": r.get("RRU Type"),
+            "arfcn_dl": r.get("arfcnDL"), "arfcn_ul": r.get("arfcnUL"),
+            "dl_bw": r.get("bSChannelBwDL"), "ul_bw": r.get("bSChannelBwUL"),
+            "output_power": r.get("configuredMaxTxPower"), "rach": r.get("rachRootSequence"),
+            "dss": r.get("DSS"), "ssb_freq": r.get("ssbFrequency"), "ssb_offset": r.get("ssbOffset"),
+            "ssb_duration": r.get("ssbDuration"), "nsa_sa": r.get("NSA/SA"), "vonr": r.get("VoNR"),
             "comments": cell_comments,
             "comments_html": _format_warnings(cell_comments),
             "status": "MISMATCH" if cell_comments else "MATCH",
