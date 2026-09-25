@@ -61,8 +61,12 @@ def _base_model(s):
 def resolve_antenna(ciq_value, rfds_value):
     """Compare a CIQ antenna model/type string against an RFDS Port Level
     Details vendor_model string. Returns (tier, detail)."""
-    ciq_value = (ciq_value or '').strip()
-    rfds_value = (rfds_value or '').strip()
+    # str() first - a CIQ 'model' cell can be a non-string openpyxl value
+    # (e.g. a numeric-looking antenna model typed as a number), and
+    # '(x or "").strip()' only substitutes '' when x is falsy - a truthy
+    # non-string x (an int/float) reaches .strip() unconverted and raises.
+    ciq_value = str(ciq_value or '').strip()
+    rfds_value = str(rfds_value or '').strip()
     if not ciq_value or not rfds_value:
         return 'NO MATCH', 'One side is blank.'
 
