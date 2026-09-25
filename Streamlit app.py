@@ -1711,16 +1711,15 @@ with tab_ciq:
     if site_type == "NSB":
         section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
         st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
-            ("node", "Node"), ("cell", "EutranCellFDDId"), ("cell_range", "cellRange"),
-            ("tx", "noOfTxAntennas"), ("rx", "noOfRxAntennas"), ("isdlonly", "ISDLONLY"),
+            ("node", "Node"), ("cell", "Cell"), ("cell_range", "cellRange"),
+            ("tx", "noOfTx"), ("rx", "noOfRx"), ("isdlonly", "ISDLONLY"),
             ("electrical_tilt", "electricalAntennaTilt"),
             ("earfcn_dl", "earfcnDl"), ("earfcn_ul", "earfcnUl"),
-            ("dl_bw", "dlChannelBandwidth"), ("ul_bw", "ulChannelBandwidth"),
+            ("dl_bw", "dl BW"), ("ul_bw", "ul BW"),
             ("output_power", "configuredOutputPower"), ("rru_type", "RRU type"),
             ("rbb_type", "RBB type"), ("sector_id", "sectorId"), ("cell_id", "cellId"), ("pci", "PCI"),
-            ("dus_xmu", "DUS / XMU"), ("dus_xmu_port", "DUS / XMU Port"),
-            ("dus_xmu_port_exp", "DUS / XMU Port Expansion"), ("link_name", "Radio Port"),
-            ("high_capacity_site", "High Capacity Site"),
+            ("dus_xmu", "DUS / XMU"), ("riport", "Riport"), ("link_name", "Radio Port"),
+            ("high_capacity_site", "Hi Cap"),
             ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
 
