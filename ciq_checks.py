@@ -558,12 +558,17 @@ def _format_warnings(comment_list):
     return " | ".join(comment_list)
 
 
-def apply_link_and_sharing(lte_rows, nr_rows):
+def apply_link_and_sharing(lte_rows, nr_rows, ciq_wb=None):
     """Fills 'link' (Single/Double, same node+RRU+RadioPort dual-carrier
     rule the HTML uses) and adds a Sharing Radio comment (cross-sector, same
     RRU+band — new logic, ported from amos_view.build_lte_cell_rows()'s Pre
     checks rule) directly onto the row dicts build_lte_ciq_rows() /
-    build_nr_ciq_rows() already produced. Mutates and returns both lists."""
+    build_nr_ciq_rows() already produced. Mutates and returns both lists.
+
+    ciq_wb is optional (defaults to None, a no-op for the Nokia vs Ericsson
+    pass) so existing callers that don't pass it keep working; Streamlit
+    app.py's CIQ Checks tab passes the workbook so N2E sites get the Nokia
+    vs Ericsson comparison folded in."""
     # ── Link (Single/Doublelink): per QUICKIX's ciqBuildRadioMap() Pass 1 —
     # aggregate RadioPort values per (node, RRU type). A single physical RRU
     # exposes DATA1/DATA2 (or more) as SEPARATE Radio Port values across its
@@ -641,6 +646,12 @@ def apply_link_and_sharing(lte_rows, nr_rows):
     _sharing_pass(lte_rows, "cell")
     _sharing_pass(nr_rows, "cell")
 
+    # ── Nokia vs Ericsson (N2E only) — no-op when ciq_wb wasn't passed, or
+    # Nokia_Info is absent/empty (Legacy/NSB), see apply_nokia_vs_ericsson()'s
+    # own docstring. ──
+    if ciq_wb is not None:
+        apply_nokia_vs_ericsson(ciq_wb, lte_rows, nr_rows)
+
     # 'status' drives the CIQ Checks tab's row highlighting (render_table's
     # status_key) — recomputed HERE, after every comment source (including
     # the Sharing Radio pass just above) has had its say, so a row that
@@ -650,3 +661,163 @@ def apply_link_and_sharing(lte_rows, nr_rows):
         r["status"] = "MISMATCH" if r.get("comments") else "MATCH"
 
     return lte_rows, nr_rows
+
+
+def _nokia_bw_mhz(raw):
+    """'10 MHz' / '5MHz' -> 10.0 / 5.0. Returns None if unparseable."""
+    if raw is None:
+        return None
+    m = re.search(r'([\d.]+)\s*MHZ', str(raw).upper())
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _nz_eq(a, b):
+    """String-normalized equality, treating None/''/'N/A' as all equal to
+    each other (both blank -> not a mismatch, one blank -> real mismatch,
+    handled by the caller checking truthiness first)."""
+    return str(a).strip().upper() == str(b).strip().upper()
+
+
+def _enb_tac(ciq_wb):
+    """Single site-wide TAC value off the 'eNB Info' sheet (one row per
+    CIQ). Used as the cross-check target for Nokia_Info's per-row 'tac'
+    column - confirmed on real data that Nokia_Info's tac is the same
+    constant on every row (4G AND 5G) and matches eNB Info's tac exactly
+    (both 18698 on NDL94872), so one lookup covers both techs. Returns None
+    if the sheet or a usable row isn't there."""
+    if "eNB Info" not in ciq_wb.sheetnames:
+        return None
+    for r in cer.sheet_rows_as_dicts(ciq_wb["eNB Info"]):
+        if str(r.get("eNBId") or "").strip():
+            return r.get("tac")
+    return None
+
+
+def apply_nokia_vs_ericsson(ciq_wb, lte_rows, nr_rows):
+    """N2E only: cross-checks each Nokia_Info row's recorded Nokia-side
+    values against BOTH the same row's own Ericsson-side Nokia_Info columns
+    AND the ACTUAL Ericsson-side CIQ (eUtran Parameters / 5G Info / eNB
+    Info) for the cell it was migrated to, folding any mismatch into that
+    cell's existing comments/status - same mechanism as every other CIQ
+    Checks comment. Per exact scope given (2026-09-25): only these fields
+    are COMPARED - everything else Nokia_Info carries (PCI, nRPCI,
+    expectedCellSize, qrxlevmin, Pmax) is intentionally NOT compared.
+    Nokia crsGain has no Ericsson-side equivalent anywhere in the CIQ, so
+    it's carried through as display-only ('nokia_crs_gain'), never flagged.
+
+      - Nokia Cell Id      vs Nokia_Info's 'Ericsson Cell Id' AND the real
+                            eUtran Parameters 'cellId' / 5G Info
+                            'cellLocalId' on the matched row.
+      - Nokia channelNumberDL vs Nokia_Info's 'Ericsson channelNumberDL' AND
+                            the real 'earfcnDl' (4G) / 'arfcnDL' (5G).
+      - Nokia Bandwidth    ('10 MHz' style) vs Nokia_Info's 'Ericsson
+                            Bandwidth' AND the real 'dlChannelBandwidth' /
+                            'bSChannelBwDL' - all normalized to MHz first,
+                            since confirmed on real files that Nokia_Info's
+                            own 'Ericsson Bandwidth' column (and the real
+                            CIQ field) is in kHz for 4G rows but MHz for 5G
+                            rows.
+      - ssbfrequency (5G rows only) vs the real 5G Info 'ssbFrequency' -
+        Nokia_Info has only one column for this (no Ericsson-side pair), so
+        this only ever compares against the real CIQ value.
+      - tac vs the CIQ's 'eNB Info' sheet tac (single site-wide value) -
+        applies to both 4G and 5G rows, confirmed both carry the same tac
+        on Nokia_Info.
+      - 'Nokia FDD/TDD' / 'Ericsson FDD/TDD' are mislabeled in this CIQ
+        template - they actually hold the Nokia/Ericsson CELL NAME
+        (confirmed: 'AZL01006_7A_1' / 'AZL91006_7A_1'), not a duplex value,
+        and by design never match (different vendor naming), so this pair
+        is carried as informational context only ('nokia_cell' field) and
+        never flagged.
+
+    No-op (both row lists unchanged) when Nokia_Info is missing or empty -
+    Legacy and NSB sites never reach the comparison loop."""
+    nokia_rows = cer.sheet_rows_as_dicts(ciq_wb["Nokia_Info"]) if "Nokia_Info" in ciq_wb.sheetnames else []
+    nokia_rows = [r for r in nokia_rows if str(r.get("Nokia Cell Id") or "").strip()]
+    if not nokia_rows:
+        return
+
+    lte_by_cell = {r.get("cell"): r for r in lte_rows if r.get("cell")}
+    nr_by_cell = {r.get("cell"): r for r in nr_rows if r.get("cell")}
+    enb_tac = _enb_tac(ciq_wb)
+
+    def _check(nk_val, sources, label, mismatches):
+        """sources: list of (tag, value) pairs to compare nk_val against.
+        Blank/N-A on either side skips that pair (nothing to compare)."""
+        if str(nk_val or "").strip().upper() in ("", "N/A"):
+            return
+        diffs = []
+        for tag, val in sources:
+            if val in (None, "") or str(val).strip().upper() == "N/A":
+                continue
+            if not _nz_eq(nk_val, val):
+                diffs.append(f"{tag} {val}")
+        if diffs:
+            mismatches.append(f"{label} (Nokia {nk_val} vs {', '.join(diffs)})")
+
+    for nk in nokia_rows:
+        tech = str(nk.get("Technology") or "").strip().upper()
+        is_5g = tech in ("5G", "NR")
+        ericsson_cell = str(nk.get("Ericsson FDD/TDD") or "").strip()
+        nokia_cell = str(nk.get("Nokia FDD/TDD") or "").strip()
+        target = (nr_by_cell if is_5g else lte_by_cell).get(ericsson_cell)
+        if not target:
+            continue  # cell not in this CIQ's eUtran Parameters/5G Info - nothing to attach the flag to
+
+        mismatches = []
+
+        _check(nk.get("Nokia Cell Id"), [
+            ("Ericsson (Nokia_Info)", nk.get("Ericsson Cell Id")),
+            ("Ericsson (CIQ)", target.get("cell_id")),
+        ], "Cell Id", mismatches)
+
+        er_chan_ciq = target.get("arfcn_dl") if is_5g else target.get("earfcn_dl")
+        _check(nk.get("Nokia channelNumberDL"), [
+            ("Ericsson (Nokia_Info)", nk.get("Ericsson channelNumberDL")),
+            ("Ericsson (CIQ)", er_chan_ciq),
+        ], "channelNumberDL", mismatches)
+
+        # Bandwidth: normalize every side to MHz before comparing - Nokia
+        # Bandwidth is '10 MHz' style; Nokia_Info's own 'Ericsson Bandwidth'
+        # column AND the real CIQ dl_bw field are both in kHz for 4G rows
+        # but MHz for 5G rows (confirmed on all 6 real N2E files).
+        nk_bw_mhz = _nokia_bw_mhz(nk.get("Nokia Bandwidth"))
+        if nk_bw_mhz is not None:
+            bw_diffs = []
+            for tag, raw in (("Ericsson (Nokia_Info)", nk.get("Ericsson Bandwidth")),
+                              ("Ericsson (CIQ)", target.get("dl_bw"))):
+                if raw in (None, ""):
+                    continue
+                try:
+                    raw_f = float(raw)
+                except ValueError:
+                    continue
+                raw_mhz = raw_f if is_5g else raw_f / 1000.0
+                if abs(nk_bw_mhz - raw_mhz) > 0.01:
+                    bw_diffs.append(f"{tag} {raw}")
+            if bw_diffs:
+                mismatches.append(f"Bandwidth (Nokia {nk.get('Nokia Bandwidth')} vs {', '.join(bw_diffs)})")
+
+        if is_5g:
+            _check(nk.get("ssbfrequency"), [
+                ("Ericsson (CIQ)", target.get("ssb_freq")),
+            ], "ssbFrequency", mismatches)
+
+        _check(nk.get("tac"), [
+            ("eNB Info", enb_tac),
+        ], "tac", mismatches)
+
+        target["nokia_cell"] = nokia_cell
+        target["nokia_crs_gain"] = nk.get("Nokia crsGain")
+        if mismatches:
+            note = "Nokia vs Ericsson mismatch: " + "; ".join(mismatches)
+            target["nokia_vs_ericsson"] = note
+            target["comments"].append(note)
+            target["comments_html"] = _format_warnings(target["comments"])
+        else:
+            target["nokia_vs_ericsson"] = "Match"
