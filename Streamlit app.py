@@ -1502,10 +1502,14 @@ with top_r:
             f"USID: `{site_details.get('usid') or '—'}`", f"Nodes: `{', '.join(checked_nodes) or '—'}`"]
     st.caption(" &nbsp;·&nbsp; ".join(bits), unsafe_allow_html=True)
 
+show_nokia_tab = site_type == "N2E"
+
 _tab_labels = ["RFDS Validation"]
 if show_pre_audit_tabs:
     _tab_labels.append("Pre checks (AMOS)")
 _tab_labels.append("CIQ Checks")
+if show_nokia_tab:
+    _tab_labels.append("Nokia vs Ericsson")
 if show_pre_audit_tabs:
     _tab_labels.append("Audit (Pre vs CIQ)")
 _tab_labels += ["CR Desc", "EDP Validator", "Consolidated Report"]
@@ -1514,6 +1518,7 @@ _tabs_iter = iter(st.tabs(_tab_labels))
 tab_rfds = next(_tabs_iter)
 tab_pre = next(_tabs_iter) if show_pre_audit_tabs else None
 tab_ciq = next(_tabs_iter)
+tab_nokia = next(_tabs_iter) if show_nokia_tab else None
 tab_auditpvc = next(_tabs_iter) if show_pre_audit_tabs else None
 tab_crdesc = next(_tabs_iter)
 tab_edp = next(_tabs_iter)
@@ -1698,20 +1703,17 @@ with tab_ciq:
 
     ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb, rbb_results=results.get("rbb_tx_isdlonly_4g", []))
     ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
-    cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows, ciq_wb)
+    cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows)
 
     # NSB sites (brand-new build, no Pre logs / no Nokia_Info) show a
     # different column set on these two tables - confirmed from the actual
     # yellow-highlighted columns on a real NSB CIQ (TNL01216). N2E sites
-    # (migrating off Nokia, also no Pre logs) use the same column set, plus
-    # a "Nokia vs Ericsson" column (populated by
-    # ciq_checks.apply_nokia_vs_ericsson() off the Nokia_Info sheet) - blank
-    # on NSB since that sheet has no data there, so the column is included
-    # for both rather than branching further. Validation logic
-    # (build_lte_ciq_rows/build_nr_ciq_rows' comments/status) is unchanged -
-    # only which fields are displayed changes. Comments/Warning is kept
-    # even though it wasn't highlighted, so validation flags still surface
-    # here same as Legacy.
+    # (migrating off Nokia, also no Pre logs) use the same column set - the
+    # Nokia vs Ericsson comparison lives entirely in its own tab below, not
+    # as columns here. Validation logic (build_lte_ciq_rows/
+    # build_nr_ciq_rows' comments/status) is unchanged - only which fields
+    # are displayed changes. Comments/Warning is kept even though it wasn't
+    # highlighted, so validation flags still surface here same as Legacy.
     if site_type in ("NSB", "N2E"):
         section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
         st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
@@ -1723,8 +1725,7 @@ with tab_ciq:
             ("output_power", "configuredOutputPower"), ("rru_type", "RRU type"),
             ("rbb_type", "RBB type"), ("sector_id", "sectorId"), ("cell_id", "cellId"), ("pci", "PCI"),
             ("dus_xmu", "DUS / XMU"), ("riport", "Riport"), ("link_name", "Radio Port"),
-            ("high_capacity_site", "Hi Cap"), ("nokia_vs_ericsson", "Nokia vs Ericsson"),
-            ("nokia_crs_gain", "Nokia crsGain"),
+            ("high_capacity_site", "Hi Cap"),
             ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
 
@@ -1740,7 +1741,6 @@ with tab_ciq:
             ("rach", "rachRootSequence"), ("riport", "riport"), ("link_name", "Radio Port"),
             ("dss", "DSS"), ("ssb_freq", "ssbFrequency"), ("ssb_offset", "ssbOffset"),
             ("ssb_duration", "ssbDuration"), ("nsa_sa", "NSA/SA"), ("vonr", "VoNR"),
-            ("nokia_vs_ericsson", "Nokia vs Ericsson"), ("nokia_crs_gain", "Nokia crsGain"),
             ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
     else:
@@ -1768,6 +1768,38 @@ with tab_ciq:
     st.markdown(render_table(antenna_rows, status_key="status", columns=[
         ("cell", "Cells"), ("aug_au_asu_1", "AUG/AU/ASU (1)"), ("aug_au_asu_2", "AUG/AU/ASU (2)"),
         ("verdict", "Status"),
+    ]), unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════
+# NOKIA VS ERICSSON — N2E only. Own dedicated tab, separate from CIQ
+# Checks' LTE/5G Parameters tables entirely (their Comments/Warning and
+# MATCH/MISMATCH status never include this check - see
+# ciq_checks.build_nokia_vs_ericsson_rows()'s docstring for exact field
+# scope: Cell Id, channelNumberDL, Bandwidth, ssbFrequency (5G), tac -
+# each shown Nokia value vs both the Nokia_Info-recorded Ericsson value and
+# the real CIQ value, flagged on mismatch. Nokia crsGain is display-only.
+# ══════════════════════════════════════════════════════════════════════
+if tab_nokia is not None:
+  with tab_nokia:
+    nokia_rows = cc.build_nokia_vs_ericsson_rows(ciq_wb, ciq_lte_rows, ciq_nr_rows)
+    section_title("Nokia vs Ericsson", badge=f"{len(nokia_rows)}")
+    st.markdown(render_table(nokia_rows, status_key="status", columns=[
+        ("node", "Node"), ("tech", "Tech"),
+        ("nokia_cell", "Nokia Cell"), ("ericsson_cell", "Ericsson Cell"),
+        ("nokia_cell_id", "Nokia Cell Id"),
+        ("ericsson_cell_id_ni", "Ericsson Cell Id (Nokia_Info)"),
+        ("ericsson_cell_id_ciq", "Ericsson Cell Id (CIQ)"),
+        ("nokia_chan", "Nokia channelNumberDL"),
+        ("ericsson_chan_ni", "Ericsson channelNumberDL (Nokia_Info)"),
+        ("ericsson_chan_ciq", "Ericsson channelNumberDL (CIQ)"),
+        ("nokia_bw", "Nokia Bandwidth"),
+        ("ericsson_bw_ni", "Ericsson Bandwidth (Nokia_Info)"),
+        ("ericsson_bw_ciq", "Ericsson Bandwidth (CIQ)"),
+        ("nokia_ssb", "Nokia ssbFrequency"),
+        ("ericsson_ssb_ciq", "Ericsson ssbFrequency (CIQ)"),
+        ("nokia_tac", "Nokia tac"), ("ericsson_tac", "Ericsson tac (eNB Info)"),
+        ("nokia_crs_gain", "Nokia crsGain"),
+        ("comments_html", "Comments/Warning"),
     ]), unsafe_allow_html=True)
 
 if tab_auditpvc is not None:
