@@ -87,7 +87,13 @@ def build_node_summary(node_id, text):
     node_label = f"{node_id} / {secondary}" if secondary else node_id
     return {
         "node": node_label,
+        # "SW Version" column now shows the software PACKAGE string
+        # ('CXP9024418/16_R17C21', from 'Current SwVersion: <package>
+        # (<version>)') instead of the parenthesized build number
+        # ('RCG123.8') - "sw_version" (the old parenthesized value) is
+        # kept for any other caller relying on it.
         "sw_version": sw.get("sw_version", "NOT FOUND"),
+        "sw_pkg_version": sw.get("sw_package", "NOT FOUND"),
         "sw_package": board_model,
         "type": node_type,
         "ptp_status": ptp_status(text),
