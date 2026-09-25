@@ -2302,7 +2302,7 @@ def check_radio_port(node_id, log_text, ciq_wb):
             cell = row.get(cell_col)
             if not cell or cell not in rilink:
                 continue
-            pre_type = rilink[cell]['rilink_type']
+            pre_type = rilink[cell]['link_count_type']
             pre_short = pre_type.replace(' Links', '').replace(' Link', '')
             rbb_val = row.get(rbb_col)
             ciq_short = pe.parse_rbb_link(rbb_val)
