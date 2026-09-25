@@ -1013,6 +1013,26 @@ def _mme_region_status(ciq_wb):
     return "match", f"N2E site — {len(rows)} node(s), MME Region correctly N-RAN."
 
 
+def classify_site_type(ciq_wb, node_logs_text=None):
+    """Legacy / N2E / NSB / Manual classification - Nokia_Info presence
+    crossed with Pre-log presence, shared by row 91's
+    _n2e_detection_status (message text) and Streamlit app.py's tab
+    layout (which tabs to show). See _n2e_detection_status below for the
+    full rule table this implements."""
+    has_nokia = False
+    if ciq_wb and "Nokia_Info" in ciq_wb.sheetnames:
+        nokia_rows = cer.sheet_rows_as_dicts(ciq_wb["Nokia_Info"])
+        has_nokia = any(_norm(r.get("Nokia Cell Id")) for r in nokia_rows)
+    has_pre = bool(node_logs_text) and any(t for t in node_logs_text.values())
+    if has_nokia and has_pre:
+        return "Manual"
+    if has_nokia:
+        return "N2E"
+    if has_pre:
+        return "Legacy"
+    return "NSB"
+
+
 def _n2e_detection_status(ciq_wb, node_logs_text=None):
     """Row 91 ('Nokia info present means N2E site else NSB'): NOT a
     CIQ-only classification - Pre-log presence changes the meaning of an
@@ -1034,17 +1054,13 @@ def _n2e_detection_status(ciq_wb, node_logs_text=None):
 
     Nokia_Info presence signal: same as _mme_region_status (real
     non-empty 'Nokia Cell Id' cell = Nokia data present)."""
-    has_nokia = False
-    if ciq_wb and "Nokia_Info" in ciq_wb.sheetnames:
-        nokia_rows = cer.sheet_rows_as_dicts(ciq_wb["Nokia_Info"])
-        has_nokia = any(_norm(r.get("Nokia Cell Id")) for r in nokia_rows)
-    has_pre = bool(node_logs_text) and any(t for t in node_logs_text.values())
+    site_type = classify_site_type(ciq_wb, node_logs_text)
 
-    if has_nokia and has_pre:
+    if site_type == "Manual":
         return "manual", "Nokia_Info has cell data AND Pre logs exist — combination not yet defined, verify manually."
-    if has_nokia:
+    if site_type == "N2E":
         return "info", "Nokia_Info has cell data, no Pre logs — N2E site."
-    if has_pre:
+    if site_type == "Legacy":
         return "info", "No Nokia_Info data, but Pre logs exist — Legacy scope (pre-existing Ericsson site)."
     return "info", "No Nokia_Info data, no Pre logs — NSB site."
 
