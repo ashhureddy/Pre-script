@@ -1423,14 +1423,13 @@ rfds_pages = state["rfds_pages"]
 node_logs_text = state["node_logs_text"]
 sow = state["sow"]
 
-# Site-type layout: NSB sites (no Pre logs, no Nokia_Info data - brand new
-# build) have no Pre kget-all logs by definition, so the Pre checks (AMOS)
-# and Audit (Pre vs CIQ) tabs have nothing to show for them and are hidden
-# entirely rather than shown empty. Legacy and N2E sites keep the full tab
-# set (N2E sites also lack Pre logs, but that tab set is unchanged for now
-# pending the N2E-specific layout).
+# Site-type layout: NSB (brand new build) and N2E (migrating off Nokia)
+# sites both have no Pre kget-all logs by definition, so the Pre checks
+# (AMOS) and Audit (Pre vs CIQ) tabs have nothing to show for them and are
+# hidden entirely rather than shown empty. Only Legacy sites (Pre logs
+# present) keep those two tabs.
 site_type = rc.classify_site_type(ciq_wb, node_logs_text)
-show_pre_audit_tabs = site_type != "NSB"
+show_pre_audit_tabs = site_type not in ("NSB", "N2E")
 
 # Engineer Comments must be computed regardless of whether the Audit tab is
 # shown - CR Desc reads state["engineer_comments"] via
@@ -1699,16 +1698,21 @@ with tab_ciq:
 
     ciq_lte_rows = cc.build_lte_ciq_rows(ciq_wb, rbb_results=results.get("rbb_tx_isdlonly_4g", []))
     ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
-    cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows)
+    cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows, ciq_wb)
 
     # NSB sites (brand-new build, no Pre logs / no Nokia_Info) show a
     # different column set on these two tables - confirmed from the actual
-    # yellow-highlighted columns on a real NSB CIQ (TNL01216). Validation
-    # logic (build_lte_ciq_rows/build_nr_ciq_rows' comments/status) is
-    # unchanged - only which fields are displayed changes. Comments/Warning
-    # is kept even though it wasn't highlighted, so validation flags still
-    # surface here same as Legacy/N2E.
-    if site_type == "NSB":
+    # yellow-highlighted columns on a real NSB CIQ (TNL01216). N2E sites
+    # (migrating off Nokia, also no Pre logs) use the same column set, plus
+    # a "Nokia vs Ericsson" column (populated by
+    # ciq_checks.apply_nokia_vs_ericsson() off the Nokia_Info sheet) - blank
+    # on NSB since that sheet has no data there, so the column is included
+    # for both rather than branching further. Validation logic
+    # (build_lte_ciq_rows/build_nr_ciq_rows' comments/status) is unchanged -
+    # only which fields are displayed changes. Comments/Warning is kept
+    # even though it wasn't highlighted, so validation flags still surface
+    # here same as Legacy.
+    if site_type in ("NSB", "N2E"):
         section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
         st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
             ("node", "Node"), ("cell", "Cell"), ("cell_range", "cellRange"),
@@ -1719,7 +1723,8 @@ with tab_ciq:
             ("output_power", "configuredOutputPower"), ("rru_type", "RRU type"),
             ("rbb_type", "RBB type"), ("sector_id", "sectorId"), ("cell_id", "cellId"), ("pci", "PCI"),
             ("dus_xmu", "DUS / XMU"), ("riport", "Riport"), ("link_name", "Radio Port"),
-            ("high_capacity_site", "Hi Cap"),
+            ("high_capacity_site", "Hi Cap"), ("nokia_vs_ericsson", "Nokia vs Ericsson"),
+            ("nokia_crs_gain", "Nokia crsGain"),
             ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
 
@@ -1735,6 +1740,7 @@ with tab_ciq:
             ("rach", "rachRootSequence"), ("riport", "riport"), ("link_name", "Radio Port"),
             ("dss", "DSS"), ("ssb_freq", "ssbFrequency"), ("ssb_offset", "ssbOffset"),
             ("ssb_duration", "ssbDuration"), ("nsa_sa", "NSA/SA"), ("vonr", "VoNR"),
+            ("nokia_vs_ericsson", "Nokia vs Ericsson"), ("nokia_crs_gain", "Nokia crsGain"),
             ("comments_html", "Comments/Warning"),
         ]), unsafe_allow_html=True)
     else:
