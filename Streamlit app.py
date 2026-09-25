@@ -1423,6 +1423,30 @@ rfds_pages = state["rfds_pages"]
 node_logs_text = state["node_logs_text"]
 sow = state["sow"]
 
+# Site-type layout: NSB sites (no Pre logs, no Nokia_Info data - brand new
+# build) have no Pre kget-all logs by definition, so the Pre checks (AMOS)
+# and Audit (Pre vs CIQ) tabs have nothing to show for them and are hidden
+# entirely rather than shown empty. Legacy and N2E sites keep the full tab
+# set (N2E sites also lack Pre logs, but that tab set is unchanged for now
+# pending the N2E-specific layout).
+site_type = rc.classify_site_type(ciq_wb, node_logs_text)
+show_pre_audit_tabs = site_type != "NSB"
+
+# Engineer Comments must be computed regardless of whether the Audit tab is
+# shown - CR Desc reads state["engineer_comments"] via
+# extract_bands_from_comments() to auto-populate Nodes/Bands, even on NSB
+# sites where the Audit tab itself is hidden.
+_amos_lte_rows_ec = state["amos_lte_rows"] if node_logs_text else None
+_amos_nr_rows_ec = state["amos_nr_rows"] if node_logs_text else None
+_ciq_lte_rows_ec = cv.build_param_table(ciq_wb, "eUtran Parameters", ["EutranCellFDDId", "RRU type"])
+_ciq_nr_rows_ec = cv.build_param_table(ciq_wb, "5G Info", ["NRCellDU", "RRU Type"])
+state["engineer_comments"] = build_engineer_comments(
+    sow, results, checked_nodes,
+    amos_lte_rows=_amos_lte_rows_ec, amos_nr_rows=_amos_nr_rows_ec,
+    ciq_lte_rows=_ciq_lte_rows_ec, ciq_nr_rows=_ciq_nr_rows_ec,
+    node_logs_text=node_logs_text,
+)
+
 @st.dialog("Revision History", width="large")
 def _show_revision_history_dialog(ciq_wb):
     sheet_name, rows = cer.read_revision_history(ciq_wb)
@@ -1479,10 +1503,22 @@ with top_r:
             f"USID: `{site_details.get('usid') or '—'}`", f"Nodes: `{', '.join(checked_nodes) or '—'}`"]
     st.caption(" &nbsp;·&nbsp; ".join(bits), unsafe_allow_html=True)
 
-tab_rfds, tab_pre, tab_ciq, tab_auditpvc, tab_crdesc, tab_edp, tab_consolidated = st.tabs(
-    ["RFDS Validation", "Pre checks (AMOS)", "CIQ Checks", "Audit (Pre vs CIQ)", "CR Desc",
-     "EDP Validator", "Consolidated Report"]
-)
+_tab_labels = ["RFDS Validation"]
+if show_pre_audit_tabs:
+    _tab_labels.append("Pre checks (AMOS)")
+_tab_labels.append("CIQ Checks")
+if show_pre_audit_tabs:
+    _tab_labels.append("Audit (Pre vs CIQ)")
+_tab_labels += ["CR Desc", "EDP Validator", "Consolidated Report"]
+
+_tabs_iter = iter(st.tabs(_tab_labels))
+tab_rfds = next(_tabs_iter)
+tab_pre = next(_tabs_iter) if show_pre_audit_tabs else None
+tab_ciq = next(_tabs_iter)
+tab_auditpvc = next(_tabs_iter) if show_pre_audit_tabs else None
+tab_crdesc = next(_tabs_iter)
+tab_edp = next(_tabs_iter)
+tab_consolidated = next(_tabs_iter)
 
 # ══════════════════════════════════════════════════════════════════════
 # TAB 1 — RFDS Validation: every RFDS-vs-CIQ(-vs-Pre) comparison the run
@@ -1598,7 +1634,8 @@ with tab_rfds:
 # TAB 2 — Audit: Pre checks (AMOS) / CIQ Checks / Audit (Pre vs CIQ) / CR Desc
 # ══════════════════════════════════════════════════════════════════════
 
-with tab_pre:
+if tab_pre is not None:
+  with tab_pre:
     if not node_logs_text:
         st.info("No Pre kget-all logs were loaded for this run.")
     else:
@@ -1664,24 +1701,61 @@ with tab_ciq:
     ciq_nr_rows = cc.build_nr_ciq_rows(ciq_wb)
     cc.apply_link_and_sharing(ciq_lte_rows, ciq_nr_rows)
 
-    section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
-    st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
-        ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("cell_id", "Cell ID"),
-        ("electrical_tilt", "Electrical Tilt"),
-        ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
-        ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
-        ("link_name", "Link Name (DATA1/DATA2)"),
-        ("comments_html", "Comments/Warning"),
-    ]), unsafe_allow_html=True)
+    # NSB sites (brand-new build, no Pre logs / no Nokia_Info) show a
+    # different column set on these two tables - confirmed from the actual
+    # yellow-highlighted columns on a real NSB CIQ (TNL01216). Validation
+    # logic (build_lte_ciq_rows/build_nr_ciq_rows' comments/status) is
+    # unchanged - only which fields are displayed changes. Comments/Warning
+    # is kept even though it wasn't highlighted, so validation flags still
+    # surface here same as Legacy/N2E.
+    if site_type == "NSB":
+        section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
+        st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
+            ("node", "Node"), ("cell", "EutranCellFDDId"), ("cell_range", "cellRange"),
+            ("tx", "noOfTxAntennas"), ("rx", "noOfRxAntennas"), ("isdlonly", "ISDLONLY"),
+            ("electrical_tilt", "electricalAntennaTilt"),
+            ("earfcn_dl", "earfcnDl"), ("earfcn_ul", "earfcnUl"),
+            ("dl_bw", "dlChannelBandwidth"), ("ul_bw", "ulChannelBandwidth"),
+            ("output_power", "configuredOutputPower"), ("rru_type", "RRU type"),
+            ("rbb_type", "RBB type"), ("sector_id", "sectorId"), ("cell_id", "cellId"), ("pci", "PCI"),
+            ("dus_xmu", "DUS / XMU"), ("dus_xmu_port", "DUS / XMU Port"),
+            ("dus_xmu_port_exp", "DUS / XMU Port Expansion"), ("link_name", "Radio Port"),
+            ("high_capacity_site", "High Capacity Site"),
+            ("comments_html", "Comments/Warning"),
+        ]), unsafe_allow_html=True)
 
-    section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
-    st.markdown(render_table(ciq_nr_rows, status_key="status", columns=[
-        ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
-        ("cell_id", "Cell ID"),
-        ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
-        ("sharing_radio", "Sharing Radio"),
-        ("link_name", "Link Name (DATA1/DATA2)"), ("comments_html", "Comments/Warning"),
-    ]), unsafe_allow_html=True)
+        section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
+        st.markdown(render_table(ciq_nr_rows, status_key="status", columns=[
+            ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("cell_id", "Cell ID"),
+            ("nrtac", "NR TAC"), ("nr_pci", "NR PCI"), ("rach", "RACH Root Sequence"),
+            ("rru_type", "RRU Type"), ("fru", "RRU FRU"), ("electrical_tilt", "Electrical Tilt"),
+            ("arfcn_dl", "ARFCN DL"), ("arfcn_ul", "ARFCN UL"),
+            ("dl_bw", "BW DL"), ("ul_bw", "BW UL"), ("output_power", "Configured Max Tx Power"),
+            ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
+            ("link_name", "Radio Port (DATA1/DATA2)"), ("dss", "DSS"),
+            ("ssb_freq", "SSB Frequency"), ("ssb_offset", "SSB Offset"), ("ssb_duration", "SSB Duration"),
+            ("nsa_sa", "NSA/SA"), ("vonr", "VoNR"),
+            ("comments_html", "Comments/Warning"),
+        ]), unsafe_allow_html=True)
+    else:
+        section_title("LTE E-UTRAN Parameters", badge=f"{len(ciq_lte_rows)}")
+        st.markdown(render_table(ciq_lte_rows, status_key="status", columns=[
+            ("node", "Node"), ("cell", "Cell"), ("pci", "PCI"), ("cell_id", "Cell ID"),
+            ("electrical_tilt", "Electrical Tilt"),
+            ("rbb_type", "RBB Type Verification"), ("tx", "TX"), ("rx", "RX"),
+            ("riport", "RIPORT"), ("sharing_radio", "Sharing Radio"),
+            ("link_name", "Link Name (DATA1/DATA2)"),
+            ("comments_html", "Comments/Warning"),
+        ]), unsafe_allow_html=True)
+
+        section_title("5G NR Parameters", badge=f"{len(ciq_nr_rows)}")
+        st.markdown(render_table(ciq_nr_rows, status_key="status", columns=[
+            ("node", "Node"), ("cell", "Cell"), ("sef", "SEF"), ("fru", "FRU"), ("nr_pci", "NR PCI"),
+            ("cell_id", "Cell ID"),
+            ("electrical_tilt", "Electrical Tilt"), ("rbb_type", "RBB Type Verification"), ("riport", "RIPORT"),
+            ("sharing_radio", "Sharing Radio"),
+            ("link_name", "Link Name (DATA1/DATA2)"), ("comments_html", "Comments/Warning"),
+        ]), unsafe_allow_html=True)
 
     antenna_rows = cs.check_antenna_uniqueness(node_id="", ciq_wb=ciq_wb)
     section_title("Antenna Uniqueness", badge=f"{len(antenna_rows)}")
@@ -1690,7 +1764,8 @@ with tab_ciq:
         ("verdict", "Status"),
     ]), unsafe_allow_html=True)
 
-with tab_auditpvc:
+if tab_auditpvc is not None:
+  with tab_auditpvc:
     import pre_post_audit as ppa
 
     section_title("Pre vs Post")
@@ -1729,20 +1804,10 @@ with tab_auditpvc:
         ]), unsafe_allow_html=True)
     else:
         st.caption("Upload Pre kget-all logs to see the LTE/5G cell-level Pre vs Post tables.")
-
-    # Engineer Comments is computed silently here (not displayed in this
-    # tab) purely so CR Desc's auto-detected Nodes/Bands still populate —
-    # CR Desc reads state["engineer_comments"] via extract_bands_from_comments().
-    amos_lte_rows = state["amos_lte_rows"] if node_logs_text else None
-    amos_nr_rows = state["amos_nr_rows"] if node_logs_text else None
-    ciq_lte_rows = cv.build_param_table(ciq_wb, "eUtran Parameters", ["EutranCellFDDId", "RRU type"])
-    ciq_nr_rows = cv.build_param_table(ciq_wb, "5G Info", ["NRCellDU", "RRU Type"])
-    state["engineer_comments"] = build_engineer_comments(
-        sow, results, checked_nodes,
-        amos_lte_rows=amos_lte_rows, amos_nr_rows=amos_nr_rows,
-        ciq_lte_rows=ciq_lte_rows, ciq_nr_rows=ciq_nr_rows,
-        node_logs_text=node_logs_text,
-    )
+    # Engineer Comments (state["engineer_comments"], read by CR Desc) is
+    # computed once, unconditionally, above the tab layout - see the
+    # site_type block near the top of this file - so it still populates
+    # even when this tab is hidden for NSB sites.
 
 with tab_crdesc:
     section_title("CR Description")
