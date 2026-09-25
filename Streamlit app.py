@@ -1643,7 +1643,7 @@ if tab_pre is not None:
 
         section_title("Node Summary", badge=f"{len(summary_rows)} NODE(S)")
         st.markdown(render_table(summary_rows, status_key=None, columns=[
-            ("node", "Node ID"), ("sw_package", "BB Type"), ("sw_version", "SW Version"),
+            ("node", "Node ID"), ("sw_package", "BB Type"), ("sw_pkg_version", "SW Version"),
             ("type", "Mode"), ("ptp_status", "PTP Status"), ("sa_nsa_status", "SA/NSA Status"),
             ("vonr_status", "VoNR Status"),
         ]), unsafe_allow_html=True)
